@@ -54,9 +54,21 @@
 ## 环境备忘
 - 沙盒是 aarch64；JDK 要下 aarch64 版。推送用 Git Data API 经 gh-relay（`work/ghpush.py`）。
 
-## 当前进行中（2026-10-18 19:17 CST）
-- 翻译第 1 批：术语表 `translations/glossary.json` + AreaData / ZoneHelp / ProfileHelp / ParliamentaryData / PlayersLog / Replace / EventName。
-- 翻译第 2 批（待开始）：SystemText、TalkData、DinnerMessage、LessonData、AchievementData、TalkActivity、DungeonMessage、MessagePvP、Tips、Name*、全部 evt*。以 `translations/` 里已有的 json 为准，缺哪个文件就翻哪个。
-- 安卓 App + CI + 中文字体：编写中（`app/`、`.github/workflows/build.yml`、`fonts/`）。
-- 接手怎么翻：读 `tools/TRANSLATION_GUIDE.md`（风格：台词四川味、界面标准中文；保留 $(x)$ {0} \n）；源文 = 用 `tools/elnea_text.py` 的 `units()` 从 `base/data.unity3d` 的 *_en 资源导出 {uid: 英文}；写 `translations/<资源名>.json`；`tools/check_tr.py` 自检（脚本里的路径按仓库结构调整）。
-- 推送工具 `tools/ghpush.py`（经 gh-relay 走 Git Data API）。
+## 当前状态（2026-10-18 19:35 CST）
+### 翻译：全部完成
+- `translations/` 下 110 个 *_en 资源全部有中文（11,093 条），`tools/check_tr.py` 全部通过；`build_patch.py` 全量实测：11,093 条回填 + 字体替换成功。
+- 术语表 `translations/glossary.json`（545 条，依日文汉字定名：魔铳师会、守护龙巴格威尔、货币“贝”、时间“朝1刻”等）。
+- 风格：日常台词四川味，典礼/葬礼/议会正式；UI 标准中文。
+- 待润色：英文原文有几处与日文不符，已按日文翻（交接说明见各提交信息）。
+
+### App：已建好，CI 绿
+- `app/`（Kotlin + Compose，包名 com.shuilize.elneazh，名称 艾尔尼亚汉化器），游戏包名 `jp.co.althi.elnea.en`。
+- 流程：找到已装游戏/选 APK → 校验 data.unity3d SHA-256 → 应用 bsdiff 补丁（自写流式 patcher）→ 重建 APK → apksig v1/v2/v3 签名（`app/keystore/elneazh.p12`，密码 elneazh）→ 提示备份存档、卸载原版、安装。
+- CI：`.github/workflows/build.yml`，每次推送生成补丁、构建 App，发布到 Release `latest`（ElneaZH.apk）。
+- 字体：`fonts/zh.ttf` = Noto Sans SC Medium（OFL），构建时按用到的字裁剪。
+
+### 未验证 / 下一步
+1. 真机测试：App 能否识别游戏、安装后游戏能否启动、中文是否显示（NGUI 位图字体 Main_Atlas_jp 可能仍需处理；若出现方块或英文，查 UIFont/BMFont）。
+2. 商店版若是分包 APK（split），重签名安装路径未测。
+3. 图片汉化：`images_zh/` 还空，等用户提供重画的图（meal/call 需 ETC2_RGBA8）。
+4. 补丁约 10 MB（UnityPy 整包重压缩），可接受。
