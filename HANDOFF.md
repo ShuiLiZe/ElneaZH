@@ -100,3 +100,7 @@
 - 用户反映"不是少字就是一大一小"，问能否不用借壳（重打包重签）方案。结论：问题来自两套字体（NGUI 位图字 Main_Atlas_jp + TTF default_android），与打包方式无关；运行时注入（BepInEx/MelonLoader）同样要重打包且更不稳。
 - 待做：bmfont_zh 渲染中文时按原 JIS 汉字字形的格子尺寸、基线、advance 对齐（量原字形平均 width/height/offset 再定字号），等用户发 #41 版的截图确认是哪处一大一小。
 - 方案 B（全用 TTF）：NGUIFont 有动态字体字段（mBMFont/mAtlas 之后的 mDynamicFont PPtr<Font> + mDynamicFontSize + mDynamicFontStyle）。把 BitmapFont-Area / BitmapFont-Name 的 mDynamicFont 指向 Font default_android（path_id 1512）、size 24，所有引用这两个字体的标签就改用 TTF，字形和大小统一。bmFont 字形表照旧保留，防止取名校验只查字形表。资源无 typetree，需按 bmfont_zh.py 的 raw 布局继续往后解析 suffix 定位字段。先测 #41：位图字已用同一 TTF 按原汉字格子渲染，可能已无大小不一。
+
+### 2026-10-18 20:30 真机反馈：很多没汉化 + 名字不能取中文
+- 已排查 data.unity3d：630 个 TextAsset 里 *_en 都已译；prefab（MonoBehaviour）里几乎没有可见英文 UILabel 文本（只有方法名）。所以剩下的英文多半写死在 IL2CPP 代码里（APK 的 assets/bin/Data/Managed/Metadata/global-metadata.dat 字符串字面量），取名校验也在代码里（libil2cpp.so）。
+- 需要原版 APK：用 Il2CppDumper 导出，找取名校验函数和硬编码字符串；汉化 global-metadata.dat 的字符串（同样做 bsdiff 进补丁，App 端要扩展成多文件补丁）。
