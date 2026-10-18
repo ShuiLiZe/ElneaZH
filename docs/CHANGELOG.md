@@ -129,3 +129,10 @@
 
 ### 2026-10-18 21:15 修复：已装汉化版时手动选原版 APK 仍被拦
 - MainViewModel.start()：拦截条件加 `!g.fromFile`，手动选的文件直接生成（输出校验会挡住选错的文件）。
+
+### 2026-10-18 21:20 用户提供的旧汉化方法（不用服务器）
+- 地图：`Android/data/jp.co.althi.elnea.en/files/UnityCache/Shared/map_large_en.android/<hash>/__data`（单张贴图 bundle，812,786→818,205 字节）。
+- 物品等数据表：`files/Contents/c_item`（物品名+说明，主要）、`c_weapon`、`c_trap`、`c_guidebook`、`c_item_fusion`（少量）。
+- `libil2cpp.so` 两处补丁：① 读表路径改到 `/sdcard/ElneaAssistant/Contents/`；② “版本变化就删表重下”的判断直接 return false。否则下次启动表被删回英文。
+- 字体图集补字（1,122 字）是共用改动，我们的新字库已覆盖。
+- 待办：拿到原始 c_* 表与 map __data 样本 → 写 tools 解析/回写；在 libil2cpp.so 找到这两处并做成补丁；汉化器负责把译好的表写到外部目录（需存储权限）。
