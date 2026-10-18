@@ -22,6 +22,8 @@ DATA_KEYS = {
     'DateSpot', 'Fishing', 'Delivery', 'Mofu', 'Herb', 'Mine', 'Fullname', 'area',
     'RiverCollect',
 }
+# Per-file keys that ARE display text even though listed in DATA_KEYS elsewhere.
+DISPLAY_OVERRIDE = {'SystemText_en': {'Agility', 'Strength', 'Spirit'}}
 # Files that hold no display text (id lists, profanity filter).
 SKIP_FILES = {'TalkNew_en', 'TalkSpot_en', 'NGWord_en'}
 LINE_FILES = {'NameFamily_en', 'NameFemale_en', 'NameMale_en', 'Tips_en'}
@@ -147,7 +149,7 @@ def units(name: str, text: str):
                 continue
         else:
             p = '/'.join(path)
-            if not is_display(val, key):
+            if not is_display(val, key) and not (key in DISPLAY_OVERRIDE.get(name, ()) and HAS_LETTER.search(val)):
                 continue
         out.append({'uid': f's{ordn}', 'path': p, 'value': val, 'span': (a, b)})
     return out

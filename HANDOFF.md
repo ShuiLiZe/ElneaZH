@@ -44,3 +44,8 @@ _最后更新：2026-10-18 21:00 CST_
 - 用户给了英文原图（images_zh/map/map_large_en_orig.png）。`tools/map/remap.py en.png out.png [LXGWWenKai-Bold.ttf] [MaShanZheng-Regular.ttf]`：保留原图光晕，只抹英文笔画（Telea），霞鹜文楷 Bold 20px 加字距重写 56 个地名，标题马善政体「艾尔涅亚王国」。地名按 c_dungeon/表内用法（盖纳森林、魔兽森林、深林、山地兵团村、亚诺市场、拉达小屋…）。
 - 输出 images_zh/map/map_large_zh.png，ASTC 5x5（format 49，astc-encoder THOROUGH，上下翻转后编码）写回 content_zh/map_large_en/__data，UnityPy 回读误差 1.9。
 - 待真机看效果。
+
+## 2026-10-18 23:05 真机反馈（闪退已好，能进游戏）
+- 能力页 Speed/Strength/Spirit 仍英文：SystemText_en 第 74-76 行键 Agility/Strength/Spirit 在 DATA_KEYS 里被跳过。已加 elnea_text.DISPLAY_OVERRIDE，并补译 s145 速度 / s147 力量 / s149 心灵。
+- NPC/配偶名仍英文（Conan、Dexter、Kyle Antigua…）：名字表已译，但已有居民的名字存在存档里，只影响新生成角色。待分析存档格式后做“存档名字转换”（要先备份）。
+- 教程图（"If you tap on their Name Plate…"、Talk、FastTravel）是运行时下载的 bundle（UnityCache/Shared/tutorial*），不在 APK；需用户从 Android/data/jp.co.althi.elnea.en/files/UnityCache/Shared/ 提供原 bundle，再像地图一样重 P。
