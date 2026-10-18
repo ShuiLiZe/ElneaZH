@@ -122,10 +122,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val info = readPatchInfo()
                 val signer = Signer(ctx.assets.open("sign.pk8"), ctx.assets.open("sign.x509.der"))
-                val outs = Pipeline(outDir, signer).run(g.apks, patch, info?.optString("new_sha256")) { step, f, msg ->
+                // optional: program-text patch for global-metadata.dat (hardcoded strings, Chinese-name whitelist)
+                val metaPatch = File(outDir, "elnea_meta.patch")
+                val hasMeta = try {
+                    ctx.assets.open("elnea_meta.patch").use { input -> metaPatch.outputStream().use { input.copyTo(it, 1 shl 16) } }
+                    true
+                } catch (e: FileNotFoundException) { false }
+                val outs = Pipeline(outDir, signer).run(
+                    g.apks, patch, info?.optString("new_sha256"),
+                    if (hasMeta) metaPatch else null, info?.optString("meta_new_sha256")
+                ) { step, f, msg ->
                     _state.update { it.copy(step = step, progress = f.coerceIn(0f, 1f), message = msg) }
                 }
                 patch.delete()
+                metaPatch.delete()
                 _state.update { it.copy(phase = Phase.DONE, step = 4, progress = 1f, message = "汉化版已生成", outputs = outs) }
             } catch (e: Pipeline.FriendlyException) {
                 _state.update { it.copy(phase = Phase.ERROR, error = e.message) }

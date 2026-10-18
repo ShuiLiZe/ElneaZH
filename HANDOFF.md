@@ -108,3 +108,11 @@
 ### 原版 APK 已进仓库（2026-10-18 20:35）
 - `base/apk/ElneaKingdom_2.10.7.apk.part00..03`，合并：`cat base/apk/*.part* > ElneaKingdom_2.10.7.apk`，SHA-256 5117bbaa…cf90c（与 base/SHA256SUMS 一致）。
 - 下一步：Il2CppDumper（lib/arm64-v8a/libil2cpp.so + global-metadata.dat）找取名校验和硬编码英文。
+
+### 2026-10-18 20:45 程序文本（IL2CPP metadata）汉化 + 取中文名
+- 游戏是 IL2CPP，metadata 版本 v39（Unity 6000.3）。写死在代码里的字符串都在 `global-metadata.dat` 的 string literal 表（16,145 条）。v39 结构：头 = magic、version、31 组 (offset,size,count)；第 0 段是每条 literal 的 uint32 dataIndex，长度 = 下一条 index 之差；第 1 段是 UTF-8 数据。
+- 新工具 `tools/metadata_zh.py`：按 `translations/metadata_literals.json`（英文原文 → 中文）改 literal，重排数据段并平移后续段偏移，自带回读校验。`--dump x.json` 可导出全部 literal。
+- 取名：literal `abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ' 0123456789-!:` 判断为英文版取名白名单（代码里有 CheckCharacterName / checkCharacterNameFont / NameInputErrorInvalidCharacter），工具自动在后面追加 GB2312 全部汉字。字形检查（checkCharacterNameFont）靠 bmfont_zh 给 BitmapFont-Name 补汉字。**未经反汇编确认**，真机若仍报无效字符，下一步用 Il2CppDumper（libil2cpp.so + metadata）看 CheckCharacterName 的实现。日文版白名单是片假名那条 literal，英文版不用。
+- CI：合并 base/apk 分段 → 取出原 metadata → metadata_zh.py → bsdiff 生成 `app/src/main/assets/elnea_meta.patch`，哈希写进 elnea_zh.json（meta_new_sha256）。
+- App：Pipeline 新增可选 metaPatch，ApkRebuilder.rebuild 支持一次替换多个条目（Map），MainViewModel 有 elnea_meta.patch 就一起打。**这些 Java/Kotlin 改动只靠 CI 编译验证**。
+- 候选英文：`translations/metadata_candidates.txt`（启发式筛出约 1,400 条，噪音多）。需要用户发未汉化界面截图，对照原文填进 metadata_literals.json。框架字符串（语言名、日期格式、异常信息）别翻。

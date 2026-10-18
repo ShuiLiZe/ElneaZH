@@ -1,0 +1,3 @@
+{
+ "//": "程序代码里写死的字符串（global-metadata.dat）。格式：\"英文原文（逐字一致）\": \"中文\"。候选见 translations/metadata_candidates.txt；只翻真机上看得到的游戏文字，框架/语言名/日期格式等别动。取名白名单由 tools/metadata_zh.py 自动加汉字。"
+}

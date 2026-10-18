@@ -226,6 +226,13 @@ public final class ApkRebuilder {
      * entry {@code replaceName} gets the content of {@code replacement} using the entry's original compression method.
      */
     public static void rebuild(File inApk, String replaceName, File replacement, File outApk, File tmpDir, Progress progress) throws IOException {
+        java.util.Map<String, File> m = new java.util.HashMap<>();
+        if (replacement != null) m.put(replaceName, replacement);
+        rebuild(inApk, m, outApk, tmpDir, progress);
+    }
+
+    /** Same as above, replacing every entry named in {@code replacements} (name -> new content). */
+    public static void rebuild(File inApk, java.util.Map<String, File> replacements, File outApk, File tmpDir, Progress progress) throws IOException {
         try (RandomAccessFile in = new RandomAccessFile(inApk, "r");
              CountingOut out = new CountingOut(new BufferedOutputStream(new FileOutputStream(outApk), 1 << 16))) {
             List<Entry> entries = readCentralDirectory(in);
@@ -242,7 +249,8 @@ public final class ApkRebuilder {
                 e.crc = src.crc; e.compSize = src.compSize; e.size = src.size;
 
                 File deflated = null;
-                boolean replace = replacement != null && src.name.equals(replaceName);
+                File replacement = replacements.get(src.name);
+                boolean replace = replacement != null;
                 if (replace) {
                     CRC32 crc = new CRC32();
                     try (InputStream r = new BufferedInputStream(new FileInputStream(replacement), 1 << 16)) {
