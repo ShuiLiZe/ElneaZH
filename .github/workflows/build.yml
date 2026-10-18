@@ -24,7 +24,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install Python deps
-        run: pip install UnityPy==1.10.18 fonttools bsdiff4 openpyxl Pillow numpy
+        run: pip install -r requirements.txt
 
       - name: Verify base data.unity3d
         run: |
@@ -36,6 +36,15 @@ jobs:
           FONT=""
           if [ -f fonts/zh.ttf ]; then FONT="--font fonts/zh.ttf --bmfont fonts/zh.ttf"; fi
           python tools/build_patch.py base/data.unity3d build/data.unity3d --tr translations $FONT --images images_zh
+
+      - name: Verify textures and make previews
+        run: python tools/ci_verify.py base/data.unity3d build/data.unity3d images_zh build/preview
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preview
+          path: build/preview
 
       - name: Patch IL2CPP metadata (hardcoded strings + Chinese-name whitelist)
         run: |

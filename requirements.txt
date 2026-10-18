@@ -1,0 +1,8 @@
+UnityPy==1.10.18
+etcpak==0.9.15
+texture2ddecoder==1.0.6
+Pillow
+numpy
+fonttools
+bsdiff4
+openpyxl
