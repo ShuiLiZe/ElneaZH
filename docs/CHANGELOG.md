@@ -136,3 +136,10 @@
 - `libil2cpp.so` 两处补丁：① 读表路径改到 `/sdcard/ElneaAssistant/Contents/`；② “版本变化就删表重下”的判断直接 return false。否则下次启动表被删回英文。
 - 字体图集补字（1,122 字）是共用改动，我们的新字库已覆盖。
 - 待办：拿到原始 c_* 表与 map __data 样本 → 写 tools 解析/回写；在 libil2cpp.so 找到这两处并做成补丁；汉化器负责把译好的表写到外部目录（需存储权限）。
+
+### 2026-10-18 21:40 拿到用户旧汉化 v6 的服务器数据（content_zh/）
+- `content_zh/Contents/c_*`：22 张主数据表（用户旧汉化版，加密原样）。`content_zh/map_large_en/__data|__info`：汉化地图 bundle（UnityCache/Shared/map_large_en.android/9e41473f5b511831105ea0f1695a843f/）。
+- **解密已打通**：`tools/contents_codec.py`。Rijndael-256（32 字节块）ECB，key=`7+22#bbtrm898j8z5q14lkirwf89q=45`（metadata 字面量），内容是 .NET BinaryFormatter `List<MasterXxx>`；字符串记录 `0x06 <id> <7bit长度> <utf8>`，按 id 替换后重新加密，22 张表 round-trip 全部一致。
+- `translations/contents/c_*.json`：导出的中文串（record id → 文本），共 36,015 条。
+- **重要**：旧汉化用了“借字”——字库不全时把缺的简体字画在别的日文汉字码位上（例：`煥`=种、`曹硲`=收获），表里共有 569 个非 GB2312 的借用字。我们的新字库是真 GB2312，必须先还原映射表才能用。需要用户旧版 APK（里面的字库图集 + libil2cpp.so 两处补丁）来还原。
+- 待办：① 拿到旧 APK → 从旧字库对比得出借字映射 → 批量还原为正常简体并校对译文；② 在 libil2cpp.so 实现读表路径重定向 + 禁止删表；③ 汉化器部署表和地图。
