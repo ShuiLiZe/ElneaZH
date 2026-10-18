@@ -32,3 +32,5 @@ _最后更新：2026-10-18 21:00 CST_
 - 川味：c_message/c_guide 对白/部分 c_quest 已川味化并回写（22:10）。c_quest 大部分 NPC 完成语（分组不规则）尚未处理。
 - 免 Root 投放已写好（见 CHANGELOG 22:30），待 CI 通过与真机验证：装新版后看物品名/地图是否中文，账号存档是否还在。
 - 地图 content_zh/map_large_en/__data 已是中文（1237×1062，md5 2c729c7b…），直接随包投放。
+
+- 22:25 真机闪退已定位为 libil2cpp 跳板在只读段，已改（见 CHANGELOG）。若仍闪退，需 logcat（adb logcat -b crash）。
