@@ -29,6 +29,6 @@ _最后更新：2026-10-18 21:00 CST_
 - 待解决：① 借字已还原（tools/unborrow.py，侘鱼→岩鱼）；下一步校对译文；② 免 Root 让游戏读到汉化表的方式（例如把表打进 APK + 改 libil2cpp 读游戏自身目录，配合禁止删表补丁 0x1ab3588，见 base/so/contents_redirect.elsp）。
 
 ## 2026-10-18 22:30 当前进行
-- 川味：用户要求台词四川味（界面标准）。v6 表是普通话 → 正在把 c_message / c_guide 对白 / c_quest 完成语改川味（work/sc/in_*.json → out_*.json，回写用 contents_codec.replace，未入库前勿丢）。
+- 川味：c_message/c_guide 对白/部分 c_quest 已川味化并回写（22:10）。c_quest 大部分 NPC 完成语（分组不规则）尚未处理。
 - 免 Root 投放已写好（见 CHANGELOG 22:30），待 CI 通过与真机验证：装新版后看物品名/地图是否中文，账号存档是否还在。
 - 地图 content_zh/map_large_en/__data 已是中文（1237×1062，md5 2c729c7b…），直接随包投放。

@@ -164,3 +164,8 @@
 - `tools/manifest_zh.py`（pyaxml）：给 AndroidManifest 加 provider；CI 用 aapt2 dump 检查。手机端先核对原清单 sha256。
 - `ApkRebuilder.rebuild` 支持追加新条目；`Pipeline.setZhDir` + `addZh`；`MainViewModel` 解出 assets/elneazh。
 - 风险：多用户（/data/data 仅 user 0）；游戏若重下地图会覆盖缓存（下次启动再拷回）。
+
+### 2026-10-18 22:10 主数据表台词川味化
+- c_message 全部、c_guide 对白、c_quest 部分完成语共约 8,600 条改为四川味普通话（界面/物品名不动，典礼/议会/公告保持庄重）。已回写加密表并逐条回读校验；变量/格式符/换行数量不变。
+- 顺手修：艾娜之子「中奖名单」→「中选名单」；c_guide 12566/12674 颜色标签补全。
+- 免 Root 投放版 CI #54 通过（f79a74fb）。
