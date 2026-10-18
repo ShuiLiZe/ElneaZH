@@ -53,3 +53,10 @@
 
 ## 环境备忘
 - 沙盒是 aarch64；JDK 要下 aarch64 版。推送用 Git Data API 经 gh-relay（`work/ghpush.py`）。
+
+## 当前进行中（2026-10-18 19:17 CST）
+- 翻译第 1 批：术语表 `translations/glossary.json` + AreaData / ZoneHelp / ProfileHelp / ParliamentaryData / PlayersLog / Replace / EventName。
+- 翻译第 2 批（待开始）：SystemText、TalkData、DinnerMessage、LessonData、AchievementData、TalkActivity、DungeonMessage、MessagePvP、Tips、Name*、全部 evt*。以 `translations/` 里已有的 json 为准，缺哪个文件就翻哪个。
+- 安卓 App + CI + 中文字体：编写中（`app/`、`.github/workflows/build.yml`、`fonts/`）。
+- 接手怎么翻：读 `tools/TRANSLATION_GUIDE.md`（风格：台词四川味、界面标准中文；保留 $(x)$ {0} \n）；源文 = 用 `tools/elnea_text.py` 的 `units()` 从 `base/data.unity3d` 的 *_en 资源导出 {uid: 英文}；写 `translations/<资源名>.json`；`tools/check_tr.py` 自检（脚本里的路径按仓库结构调整）。
+- 推送工具 `tools/ghpush.py`（经 gh-relay 走 Git Data API）。
