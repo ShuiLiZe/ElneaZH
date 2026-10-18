@@ -132,7 +132,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     ctx.assets.open("elnea_meta.patch").use { input -> metaPatch.outputStream().use { input.copyTo(it, 1 shl 16) } }
                     true
                 } catch (e: FileNotFoundException) { false }
-                val outs = Pipeline(outDir, signer).run(
+                // optional: no-root master tables / map payload (assets/elneazh/...)
+                val zhDir = File(outDir, "elneazh")
+                zhDir.deleteRecursively()
+                val hasZh = copyAssetDir(ctx.assets, "elneazh", zhDir)
+                val outs = Pipeline(outDir, signer).setZhDir(if (hasZh) zhDir else null).run(
                     g.apks, patch, info?.optString("new_sha256"),
                     if (hasMeta) metaPatch else null, info?.optString("meta_new_sha256")
                 ) { step, f, msg ->
@@ -140,6 +144,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 patch.delete()
                 metaPatch.delete()
+                zhDir.deleteRecursively()
                 // keep the original APKs so the next localizer update can be installed over the top (same signature)
                 runCatching { GameFinder.saveOriginals(ctx, g.apks) }
                 _state.update { it.copy(phase = Phase.DONE, step = 4, progress = 1f, message = "汉化版已生成", outputs = outs) }
@@ -154,5 +159,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(phase = Phase.ERROR, error = msg) }
             }
         }
+    }
+
+    /** Recursively copy an asset folder; returns false when the folder is missing or empty. */
+    private fun copyAssetDir(am: android.content.res.AssetManager, path: String, dst: File): Boolean {
+        val names = am.list(path) ?: return false
+        if (names.isEmpty()) return false
+        dst.mkdirs()
+        for (n in names) {
+            val child = "$path/$n"
+            val sub = am.list(child)
+            if (sub != null && sub.isNotEmpty()) copyAssetDir(am, child, File(dst, n))
+            else am.open(child).use { input -> File(dst, n).outputStream().use { input.copyTo(it, 1 shl 16) } }
+        }
+        return true
     }
 }

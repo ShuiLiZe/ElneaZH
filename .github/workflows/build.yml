@@ -53,6 +53,17 @@ jobs:
           unzip -p build/base.apk assets/bin/Data/Managed/Metadata/global-metadata.dat > build/meta_orig.dat
           python tools/metadata_zh.py build/meta_orig.dat build/meta_zh.dat --tr translations/metadata_literals.json
 
+      - name: Build no-root master-table payload (tables + map + libil2cpp patch + manifest)
+        run: |
+          Z=app/src/main/assets/elneazh; mkdir -p $Z/Contents $Z/map
+          cp content_zh/Contents/c_* $Z/Contents/
+          cp content_zh/map_large_en/__data content_zh/map_large_en/__info $Z/map/
+          unzip -p build/base.apk lib/arm64-v8a/libil2cpp.so > build/libil2cpp.so
+          python tools/so_patch_zh.py build/libil2cpp.so $Z/so.elsp
+          unzip -p build/base.apk AndroidManifest.xml > build/manifest_orig.axml
+          sha256sum build/manifest_orig.axml | cut -d' ' -f1 > $Z/manifest_base.sha256
+          python tools/manifest_zh.py build/manifest_orig.axml $Z/AndroidManifest.xml
+
       - name: Create patch
         run: |
           python tools/make_patch.py base/data.unity3d build/data.unity3d app/src/main/assets \
@@ -75,6 +86,20 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Build injected ZhInit dex + check manifest
+        run: |
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          PLAT=$(ls -d $ANDROID_HOME/platforms/android-* | sort -V | tail -1)
+          echo "build-tools $BT platform $PLAT"
+          mkdir -p build/inj
+          javac --release 8 -cp $PLAT/android.jar -d build/inj $(find inj -name '*.java')
+          $BT/d8 --min-api 21 --lib $PLAT/android.jar --output build/inj $(find build/inj -name '*.class')
+          cp build/inj/classes.dex app/src/main/assets/elneazh/classes3.dex
+          mkdir -p build/mt && cp app/src/main/assets/elneazh/AndroidManifest.xml build/mt/
+          (cd build/mt && zip -q ../mt.apk AndroidManifest.xml)
+          $BT/aapt2 dump xmltree --file AndroidManifest.xml build/mt.apk | grep -B2 -A8 zhinit
+          ls -la app/src/main/assets/elneazh
 
       # ubuntu-latest already ships the Android SDK (ANDROID_HOME); AGP fetches missing platforms itself.
       - uses: gradle/actions/setup-gradle@v3

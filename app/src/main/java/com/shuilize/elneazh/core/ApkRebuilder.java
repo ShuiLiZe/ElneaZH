@@ -238,8 +238,20 @@ public final class ApkRebuilder {
             List<Entry> entries = readCentralDirectory(in);
             List<Entry> written = new ArrayList<>();
             long total = 0, done = 0;
-            for (Entry e : entries) total += e.compSize;
-            for (Entry src : entries) {
+            java.util.Set<String> present = new java.util.HashSet<>();
+            for (Entry e : entries) { total += e.compSize; present.add(e.name); }
+            // names in replacements that are not in the APK are appended as new entries (deflated; .so stored)
+            List<Entry> all = new ArrayList<>(entries);
+            for (String name : replacements.keySet()) {
+                if (present.contains(name)) continue;
+                Entry a = new Entry();
+                a.name = name; a.rawName = name.getBytes(StandardCharsets.UTF_8);
+                a.versionMadeBy = 20; a.versionNeeded = 20; a.flags = 0x0800;
+                a.method = (name.endsWith(".so") || name.equals("resources.arsc")) ? 0 : 8;
+                a.time = 0; a.date = 0x2821; a.externalAttr = 0;
+                all.add(a);
+            }
+            for (Entry src : all) {
                 if (isSignatureFile(src.name)) { done += src.compSize; continue; }
                 Entry e = new Entry();
                 e.name = src.name; e.rawName = src.rawName; e.versionMadeBy = src.versionMadeBy;

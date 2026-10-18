@@ -7,3 +7,4 @@ fonttools
 bsdiff4
 openpyxl
 py3rijndael==0.3.3
+pyaxml==0.1.1

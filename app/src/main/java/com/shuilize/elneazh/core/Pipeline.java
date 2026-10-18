@@ -12,6 +12,8 @@ import java.util.List;
 public final class Pipeline {
     public static final String DATA_ENTRY = "assets/bin/Data/data.unity3d";
     public static final String META_ENTRY = "assets/bin/Data/Managed/Metadata/global-metadata.dat";
+    public static final String SO_ENTRY = "lib/arm64-v8a/libil2cpp.so";
+    public static final String MANIFEST_ENTRY = "AndroidManifest.xml";
     public static final String BASE_SHA256 = "dc1796ffac62ea29796772f320c4218a922216aa417c4689abaeb6c0e917a155";
 
     public interface Listener {
@@ -33,6 +35,29 @@ public final class Pipeline {
     }
 
     /** Index of the APK (in apks) that contains data.unity3d, or -1. */
+    private File zhDir;
+    /** Directory with the no-root master-table payload (so.elsp, AndroidManifest.xml, manifest_base.sha256, classes3.dex, Contents/, map/). */
+    public Pipeline setZhDir(File dir) { this.zhDir = dir; return this; }
+
+    /** Apply an ELSP v1 byte patch, verifying the original bytes. */
+    static void applyElsp(File target, File elsp) throws Exception {
+        byte[] p = java.nio.file.Files.readAllBytes(elsp.toPath());
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(p).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        if (b.getInt() != 0x50534c45 || b.getInt() != 1) throw new FriendlyException("程序补丁格式错误");
+        int n = b.getInt();
+        try (java.io.RandomAccessFile f = new java.io.RandomAccessFile(target, "rw")) {
+            for (int k = 0; k < n; k++) {
+                long off = b.getInt() & 0xFFFFFFFFL;
+                byte[] o = new byte[b.getInt()]; b.get(o);
+                byte[] w = new byte[b.getInt()]; b.get(w);
+                byte[] cur = new byte[o.length];
+                f.seek(off); f.readFully(cur);
+                if (!java.util.Arrays.equals(cur, o)) throw new FriendlyException("游戏程序（libil2cpp.so）版本不匹配，需要 2.10.7 原版。");
+                f.seek(off); f.write(w);
+            }
+        }
+    }
+
     public static int findDataApk(List<File> apks) {
         for (int i = 0; i < apks.size(); i++) if (ApkRebuilder.hasEntry(apks.get(i), DATA_ENTRY)) return i;
         return -1;
@@ -125,6 +150,7 @@ public final class Pipeline {
                 java.util.Map<String, File> rep = new java.util.HashMap<>();
                 if (i == di) rep.put(DATA_ENTRY, patched);
                 if (i == mi && metaPatched != null) rep.put(META_ENTRY, metaPatched);
+                if (zhDir != null) addZh(apks.get(i), rep);
                 ApkRebuilder.rebuild(apks.get(i), rep, unsigned, workDir,
                         (d, t) -> l.onStep(2, ((float) idx + (float) d / Math.max(1, t)) / apks.size(), "正在重新打包…"));
                 l.onStep(3, (float) idx / apks.size(), "正在签名…");
@@ -143,5 +169,28 @@ public final class Pipeline {
         }
         l.onStep(3, 1f, "完成");
         return out;
+    }
+
+    /** No-root master tables + map: patch libil2cpp (read tables from files/zh/), inject ZhInit provider + payload. */
+    private void addZh(File apk, java.util.Map<String, File> rep) throws Exception {
+        if (ApkRebuilder.hasEntry(apk, SO_ENTRY) && new File(zhDir, "so.elsp").isFile()) {
+            File so = new File(workDir, "libil2cpp_" + apk.getName().hashCode() + ".so");
+            ApkRebuilder.extract(apk, SO_ENTRY, so);
+            applyElsp(so, new File(zhDir, "so.elsp"));
+            rep.put(SO_ENTRY, so);
+        }
+        File man = new File(zhDir, "AndroidManifest.xml");
+        if (ApkRebuilder.hasEntry(apk, "classes.dex") && man.isFile()) {
+            String want = new String(java.nio.file.Files.readAllBytes(new File(zhDir, "manifest_base.sha256").toPath()), "UTF-8").trim();
+            if (!want.equalsIgnoreCase(ApkRebuilder.sha256OfEntry(apk, MANIFEST_ENTRY, null)))
+                throw new FriendlyException("游戏清单文件不匹配：需要 Elnea Kingdom 2.10.7 英文原版。");
+            if (ApkRebuilder.hasEntry(apk, "classes3.dex")) throw new FriendlyException("安装包结构不符（已有 classes3.dex）。");
+            rep.put(MANIFEST_ENTRY, man);
+            rep.put("classes3.dex", new File(zhDir, "classes3.dex"));
+            for (String sub : new String[]{"Contents", "map"}) {
+                File[] fs = new File(zhDir, sub).listFiles();
+                if (fs != null) for (File f : fs) rep.put("assets/elneazh/" + sub + "/" + f.getName(), f);
+            }
+        }
     }
 }

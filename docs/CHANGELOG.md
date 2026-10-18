@@ -157,3 +157,10 @@
 - 用户提供 `tools/borrow_map_flat.json`（1220 条，真字→借字；键值不相交可安全反查）。
 - `tools/unborrow.py`：还原 `translations/contents/*.json` 与加密表 `content_zh/Contents/c_*`（约 3.3 万条字符串改动，回读校验通过）。
 - `侘鱼` 映射表缺，按描述判为「岩鱼」（unborrow.py EXTRA）、`焗`（正常字）。
+
+### 2026-10-18 22:30 免 Root 主数据表/地图投放（未真机验证）
+- 思路：游戏自己有权写自己的目录。往游戏包里注入一个 ContentProvider（`inj/com/shuilize/elneazh/inj/ZhInit.java`，CI 用 javac+d8 编成 classes3.dex），游戏启动前把 `assets/elneazh/Contents/c_*` 拷到 `files/zh/`，把地图 `__data/__info` 拷到内外两处 `UnityCache/Shared/map_large_en.android/9e41…/`；首次把 `files/Contents` 里的其它文件（ws_account 等）复制过去保住账号。
+- `tools/so_patch_zh.py`：沿用旧助手 5 处 libil2cpp 补丁，路径改为 `/data/data/jp.co.althi.elnea.en/files/zh/`（43 字节，空洞 48 字节）。补丁在手机端按原字节校验后应用（Pipeline.applyElsp）。
+- `tools/manifest_zh.py`（pyaxml）：给 AndroidManifest 加 provider；CI 用 aapt2 dump 检查。手机端先核对原清单 sha256。
+- `ApkRebuilder.rebuild` 支持追加新条目；`Pipeline.setZhDir` + `addZh`；`MainViewModel` 解出 assets/elneazh。
+- 风险：多用户（/data/data 仅 user 0）；游戏若重下地图会覆盖缓存（下次启动再拷回）。
