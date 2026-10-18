@@ -152,3 +152,8 @@
   - 0x1ab3588 → `mov w0, wzr; ret`（禁止版本变化删表）
 - 非 Root 方案要点：游戏读 /sdcard 需要“所有文件访问”或旧版存储权限；manifest 已有 READ/WRITE_EXTERNAL_STORAGE，无 requestLegacyExternalStorage。可能需要在 AndroidManifest 加 MANAGE_EXTERNAL_STORAGE 并让用户在设置里授予。
 - 借字字库不在助手里，应在用户的 base.zh.apk（/sdcard/ElneaAssistant/base.zh.apk）里。
+
+### 2026-10-18 21:50 借字还原
+- 用户提供 `tools/borrow_map_flat.json`（1220 条，真字→借字；键值不相交可安全反查）。
+- `tools/unborrow.py`：还原 `translations/contents/*.json` 与加密表 `content_zh/Contents/c_*`（约 3.3 万条字符串改动，回读校验通过）。
+- 剩余非 GB2312：`侘`（侘鱼，映射表缺，疑为某鱼名，待查英文原名）、`焗`（正常字）。
