@@ -48,6 +48,24 @@ def subset_font(path, chars):
     return bio.getvalue()
 
 
+def etc2_rgba_mips(img, mips):
+    """ETC2_RGBA8 with a full mip chain. UnityPy 1.10.18 swaps R/B before etcpak, but etcpak>=0.9.15
+    expects RGBA, so its own set_image turns red into blue. Encode here instead (Unity rows bottom-up)."""
+    import etcpak
+    from PIL import Image
+    out = bytearray()
+    w, h = img.size
+    base = img.transpose(Image.FLIP_TOP_BOTTOM)
+    for i in range(mips):
+        lw, lh = max(w >> i, 1), max(h >> i, 1)
+        lvl = base if i == 0 else base.resize((lw, lh), Image.LANCZOS)
+        pw, ph = (lw + 3) // 4 * 4, (lh + 3) // 4 * 4
+        if (pw, ph) != (lw, lh):
+            pad = Image.new('RGBA', (pw, ph), (0, 0, 0, 0)); pad.paste(lvl, (0, 0)); lvl = pad
+        out += etcpak.compress_to_etc2_rgba(lvl.tobytes(), pw, ph)
+    return bytes(out)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('orig'); ap.add_argument('out')
@@ -82,7 +100,14 @@ def main():
                 from PIL import Image
                 img = Image.open(p).convert('RGBA')
                 assert img.size == (d.m_Width, d.m_Height), f'{p}: size {img.size} != {(d.m_Width, d.m_Height)}'
-                d.set_image(img, target_format=d.m_TextureFormat)
+                if d.m_TextureFormat.name == 'ETC2_RGBA8':
+                    data = etc2_rgba_mips(img, d.m_MipCount)
+                    d.image_data = data
+                    d.m_CompleteImageSize = len(data)
+                    if hasattr(d, 'm_StreamData') and d.m_StreamData is not None:
+                        d.m_StreamData.path = ''; d.m_StreamData.offset = 0; d.m_StreamData.size = 0
+                else:
+                    d.set_image(img, target_format=d.m_TextureFormat)
                 d.save(); ni += 1
     if a.font:
         for o in env.objects:
