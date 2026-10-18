@@ -38,4 +38,9 @@ _最后更新：2026-10-18 21:00 CST_
 
 ## 2026-10-18 22:20
 - 闪退修复 c0ea96df，Actions #56 成功，待真机验证。
-- 用户反馈 v6 地图 P 得不好需重做：标题乱、尼夫之丘/多尔梅坑道/药师森林擦除模糊、卡尔内遗迹旁英文残影、字体太平、希弦妮神殿应为希兹妮神殿。已向用户要英文原版 map_large_en __data（812,786 字节）重新从原图 P。
+- 用户反馈 v6 地图 P 得不好需重做：标题乱、尼夫之丘/多尔梅坑道/药师森林擦除模糊、卡尔内遗迹旁英文残影、字体太平、希弦妮神殿应为希兹妮神殿。已完成重做（见下）。
+
+## 2026-10-18 22:30 地图重做
+- 用户给了英文原图（images_zh/map/map_large_en_orig.png）。`tools/map/remap.py en.png out.png [LXGWWenKai-Bold.ttf] [MaShanZheng-Regular.ttf]`：保留原图光晕，只抹英文笔画（Telea），霞鹜文楷 Bold 20px 加字距重写 56 个地名，标题马善政体「艾尔涅亚王国」。地名按 c_dungeon/表内用法（盖纳森林、魔兽森林、深林、山地兵团村、亚诺市场、拉达小屋…）。
+- 输出 images_zh/map/map_large_zh.png，ASTC 5x5（format 49，astc-encoder THOROUGH，上下翻转后编码）写回 content_zh/map_large_en/__data，UnityPy 回读误差 1.9。
+- 待真机看效果。
