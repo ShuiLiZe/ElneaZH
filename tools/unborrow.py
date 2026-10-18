@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import contents_codec as cc
 R = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 inv = {v: k for k, v in json.load(open(os.path.join(R, 'tools/borrow_map_flat.json'), encoding='utf-8')).items()}
-EXTRA = {}  # manual fixes for borrows missing from the map, e.g. '侘'
+EXTRA = {'侘': '岩'}  # 侘鱼 not in map; judged as rockfish (岩鱼) from description
 fix = lambda s: ''.join(EXTRA.get(c, inv.get(c, c)) for c in s)
 for f in sorted(glob.glob(os.path.join(R, 'content_zh/Contents/c_*'))):
     name = os.path.basename(f)

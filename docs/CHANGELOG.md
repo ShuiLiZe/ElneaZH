@@ -156,4 +156,4 @@
 ### 2026-10-18 21:50 借字还原
 - 用户提供 `tools/borrow_map_flat.json`（1220 条，真字→借字；键值不相交可安全反查）。
 - `tools/unborrow.py`：还原 `translations/contents/*.json` 与加密表 `content_zh/Contents/c_*`（约 3.3 万条字符串改动，回读校验通过）。
-- 剩余非 GB2312：`侘`（侘鱼，映射表缺，疑为某鱼名，待查英文原名）、`焗`（正常字）。
+- `侘鱼` 映射表缺，按描述判为「岩鱼」（unborrow.py EXTRA）、`焗`（正常字）。

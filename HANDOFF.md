@@ -26,4 +26,4 @@ _最后更新：2026-10-18 21:00 CST_
 ## 2026-10-18 21:40 方向确认
 - 用户明确：**不要借壳**（旧王国助手的 Root/Xposed/bind mount、/sdcard/ElneaAssistant 重定向都不用）。
 - 只复用 v6 译文；由本仓库汉化器打进游戏包、免 Root 生效。
-- 待解决：① 借字已还原（tools/unborrow.py，仅剩「侘鱼」待定）；下一步校对译文；② 免 Root 让游戏读到汉化表的方式（例如把表打进 APK + 改 libil2cpp 读游戏自身目录，配合禁止删表补丁 0x1ab3588，见 base/so/contents_redirect.elsp）。
+- 待解决：① 借字已还原（tools/unborrow.py，侘鱼→岩鱼）；下一步校对译文；② 免 Root 让游戏读到汉化表的方式（例如把表打进 APK + 改 libil2cpp 读游戏自身目录，配合禁止删表补丁 0x1ab3588，见 base/so/contents_redirect.elsp）。
