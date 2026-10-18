@@ -29,7 +29,17 @@ def subset_font(path, chars):
     opt.notdef_outline = True
     s = subset.Subsetter(opt)
     base = ''.join(chr(c) for c in range(0x20, 0x7f)) + '，。！？、：；“”‘’（）《》…—～·「」『』【】♪★☆♥①②③④⑤'
-    s.populate(text=base + ''.join(chars))
+    # GB2312 (all 6763 common hanzi + symbols) so player-typed Chinese names also render
+    gb = []
+    for hi in range(0xA1, 0xF8):
+        for lo in range(0xA1, 0xFF):
+            try:
+                gb.append(bytes([hi, lo]).decode('gb2312'))
+            except UnicodeDecodeError:
+                pass
+    latin = ''.join(chr(c) for c in range(0xA0, 0x250))
+    sym = ''.join(chr(c) for c in list(range(0x2000, 0x2BFF)) + list(range(0x3000, 0x30FF)) + list(range(0xFF00, 0xFFEF)))
+    s.populate(text=base + latin + sym + ''.join(gb) + ''.join(chars))
     s.subset(f)
     bio = io.BytesIO()
     f.save(bio)
@@ -59,6 +69,7 @@ def main():
             new = E.apply(d.m_Name, text, tr)
             for v in tr.values():
                 used.update(v)
+            used.update(new if isinstance(new, str) else "")
             d.m_Script = E.encode(new, bom).decode('utf-8', 'surrogateescape') if isinstance(s, str) else E.encode(new, bom)
             d.save(); nt += len(tr)
         elif o.type.name == 'Texture2D' and os.path.isdir(a.images):
