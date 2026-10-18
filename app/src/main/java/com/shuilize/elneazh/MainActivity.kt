@@ -60,6 +60,7 @@ private val WarnInk = Color(0xFF7A4E0E)
 private val ErrBg = Color(0xFFFBEAE7)
 private val ErrInk = Color(0xFF9A2B1F)
 private val OkInk = Color(0xFF2F6B3A)
+private val OkBg = Color(0xFFE8F4EA)
 
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
@@ -213,15 +214,21 @@ private fun App(vm: MainViewModel) {
         // Step 3: install
         AnimatedVisibility(s.phase == Phase.DONE) {
             StepCard(number = 3, title = "安装汉化版", done = false) {
-                Notice(
-                    "重要：汉化版的签名和商店版不同，不能覆盖安装。\n" +
+                val zh = s.game?.alreadyZh == true
+                if (zh) Notice(
+                    "手机上已经是汉化版（签名相同），直接点「安装汉化版」覆盖更新即可，不用卸载，存档保留。",
+                    OkBg, OkInk,
+                ) else Notice(
+                    "重要：汉化版的签名和商店版不同，第一次需要卸载原版（以后更新汉化器就能直接覆盖）。\n" +
                         "① 先在游戏里备份存档：Support → Save Data（存档数据），记下引继码；\n" +
                         "② 再卸载原版；\n③ 安装汉化版后在游戏里恢复存档。",
                     WarnBg, WarnInk,
                 )
                 Spacer(Modifier.height(16.dp))
                 val g = s.game
-                if (g != null && s.gameInstalled) {
+                if (zh) {
+                    // nothing to uninstall
+                } else if (g != null && s.gameInstalled) {
                     SecondaryButton("卸载原版", modifier = Modifier.fillMaxWidth()) {
                         Installer.uninstall(ctx, g.packageName)
                     }
@@ -230,7 +237,7 @@ private fun App(vm: MainViewModel) {
                 }
                 Spacer(Modifier.height(10.dp))
                 PrimaryButton("安装汉化版", enabled = s.outputs.isNotEmpty()) {
-                    if (s.gameInstalled) {
+                    if (s.gameInstalled && !zh) {
                         Toast.makeText(ctx, "请先备份存档并卸载原版，否则会安装失败。", Toast.LENGTH_LONG).show()
                         return@PrimaryButton
                     }

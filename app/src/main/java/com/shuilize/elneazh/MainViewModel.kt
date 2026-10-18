@@ -86,7 +86,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     if (Pipeline.findDataApk(listOf(dst)) < 0) throw Pipeline.FriendlyException("这个文件里没有游戏资源（data.unity3d），请选择 Elnea Kingdom 的 APK。")
                     val info = GameFinder.fromFile(ctx, dst, name)
-                    info
+                    info.copy(alreadyZh = GameFinder.isOurSigned(ctx, info.packageName))
                 }
                 _state.update {
                     it.copy(
@@ -105,6 +105,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun start() {
         val g = _state.value.game ?: return
         if (_state.value.phase == Phase.WORKING) return
+        if (g.alreadyZh && GameFinder.cachedOriginals(ctx).isEmpty()) {
+            _state.update { it.copy(phase = Phase.ERROR, error = "手机上装的已经是汉化版，但汉化器里没有保存原版安装包。请用「选择 APK 文件」选原版 APK（仓库 base/apk 里有），之后更新就不用再卸载了。") }
+            return
+        }
         _state.update { it.copy(phase = Phase.WORKING, step = 0, progress = 0f, message = "准备中…", error = null, outputs = emptyList()) }
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -136,6 +140,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 patch.delete()
                 metaPatch.delete()
+                // keep the original APKs so the next localizer update can be installed over the top (same signature)
+                runCatching { GameFinder.saveOriginals(ctx, g.apks) }
                 _state.update { it.copy(phase = Phase.DONE, step = 4, progress = 1f, message = "汉化版已生成", outputs = outs) }
             } catch (e: Pipeline.FriendlyException) {
                 _state.update { it.copy(phase = Phase.ERROR, error = e.message) }

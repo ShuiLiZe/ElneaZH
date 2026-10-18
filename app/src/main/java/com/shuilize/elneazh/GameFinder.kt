@@ -17,6 +17,8 @@ data class GameInfo(
     /** base APK first, then split APKs */
     val apks: List<File>,
     val fromFile: Boolean,
+    /** installed game is already our localized build (signed with the bundled key) -> can update in place */
+    val alreadyZh: Boolean = false,
 )
 
 object GameFinder {
@@ -44,12 +46,57 @@ object GameFinder {
 
     fun isInstalled(ctx: Context, pkg: String): Boolean = appInfo(ctx.packageManager, pkg) != null
 
-    private fun toInfo(pm: PackageManager, ai: ApplicationInfo): GameInfo {
-        val apks = buildList {
+    /** SHA-256 of the signing certificate(s) of an installed package. */
+    @Suppress("DEPRECATION")
+    private fun certHashes(pm: PackageManager, pkg: String): Set<String> = try {
+        val sigs = if (Build.VERSION.SDK_INT >= 28) {
+            val pi = pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
+            pi.signingInfo?.let { si -> if (si.hasMultipleSigners()) si.apkContentsSigners else si.signingCertificateHistory }
+        } else {
+            pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES).signatures
+        }
+        sigs?.map { sha256(it.toByteArray()) }?.toSet() ?: emptySet()
+    } catch (e: Exception) {
+        emptySet()
+    }
+
+    private fun sha256(b: ByteArray): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(b).joinToString("") { "%02x".format(it) }
+
+    /** True when the installed game is signed with the localizer's bundled certificate (assets/sign.x509.der). */
+    fun isOurSigned(ctx: Context, pkg: String): Boolean = try {
+        val ours = ctx.assets.open("sign.x509.der").use { sha256(it.readBytes()) }
+        ours in certHashes(ctx.packageManager, pkg)
+    } catch (e: Exception) {
+        false
+    }
+
+    /** Copies of the original APKs kept after the first successful run, so later updates need no uninstall. */
+    fun origDir(ctx: Context) = File(ctx.filesDir, "orig")
+
+    fun cachedOriginals(ctx: Context): List<File> {
+        val d = origDir(ctx)
+        val base = File(d, "base.apk")
+        if (!base.isFile) return emptyList()
+        return listOf(base) + (d.listFiles { f -> f.name.startsWith("split") && f.name.endsWith(".apk") }?.sortedBy { it.name } ?: emptyList())
+    }
+
+    fun saveOriginals(ctx: Context, apks: List<File>) {
+        val d = origDir(ctx)
+        if (apks.isNotEmpty() && apks[0].canonicalPath.startsWith(d.canonicalPath)) return
+        d.deleteRecursively(); d.mkdirs()
+        apks.forEachIndexed { i, f -> f.copyTo(File(d, if (i == 0) "base.apk" else "split%02d.apk".format(i)), overwrite = true) }
+    }
+
+    private fun toInfo(ctx: Context, pm: PackageManager, ai: ApplicationInfo): GameInfo {
+        var apks: List<File> = buildList {
             add(File(ai.sourceDir))
             ai.splitSourceDirs?.forEach { add(File(it)) }
         }
+        val zh = isOurSigned(ctx, ai.packageName)
+        if (zh) cachedOriginals(ctx).takeIf { it.isNotEmpty() }?.let { apks = it }
         return GameInfo(
+            alreadyZh = zh,
             label = pm.getApplicationLabel(ai).toString(),
             packageName = ai.packageName,
             versionName = versionOf(pm, ai.packageName),
@@ -75,7 +122,7 @@ object GameFinder {
     @Suppress("DEPRECATION")
     fun find(ctx: Context): GameInfo? {
         val pm = ctx.packageManager
-        for (p in KNOWN) appInfo(pm, p)?.let { return toInfo(pm, it) }
+        for (p in KNOWN) appInfo(pm, p)?.let { return toInfo(ctx, pm, it) }
 
         val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val apps = pm.queryIntentActivities(launcher, 0)
@@ -86,11 +133,11 @@ object GameFinder {
         apps.firstOrNull {
             val label = pm.getApplicationLabel(it).toString()
             label.contains("Elnea", ignoreCase = true) || it.packageName.contains("elnea", ignoreCase = true)
-        }?.let { return toInfo(pm, it) }
+        }?.let { return toInfo(ctx, pm, it) }
 
         apps.filter { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 }
             .firstOrNull { containsGameData(it) }
-            ?.let { return toInfo(pm, it) }
+            ?.let { return toInfo(ctx, pm, it) }
         return null
     }
 
