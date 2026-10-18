@@ -1,0 +1,84 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python deps
+        run: pip install UnityPy==1.10.18 fonttools bsdiff4 openpyxl Pillow
+
+      - name: Verify base data.unity3d
+        run: |
+          echo "dc1796ffac62ea29796772f320c4218a922216aa417c4689abaeb6c0e917a155  base/data.unity3d" | sha256sum -c -
+
+      - name: Build localized data.unity3d
+        run: |
+          mkdir -p build
+          FONT=""
+          if [ -f fonts/zh.ttf ]; then FONT="--font fonts/zh.ttf"; fi
+          python tools/build_patch.py base/data.unity3d build/data.unity3d --tr translations $FONT --images images_zh
+
+      - name: Create patch
+        run: |
+          python tools/make_patch.py base/data.unity3d build/data.unity3d app/src/main/assets \
+            "补丁 #${{ github.run_number }} · ${GITHUB_SHA::7}"
+          ls -la app/src/main/assets
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v3
+
+      - name: Build APK
+        working-directory: app
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/*.apk dist/ElneaZH.apk
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ElneaZH-apk
+          path: dist/ElneaZH.apk
+
+      - name: Publish release "latest"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NOTES="自动构建 #${{ github.run_number }}（${GITHUB_SHA::7}）。下载 ElneaZH.apk 安装到手机，打开后按步骤一键汉化。"
+          git tag -f latest
+          git push -f origin latest
+          if gh release view latest >/dev/null 2>&1; then
+            gh release edit latest --title "艾尔尼亚汉化器（最新构建）" --notes "$NOTES" --prerelease=false
+            gh release upload latest dist/ElneaZH.apk --clobber
+          else
+            gh release create latest dist/ElneaZH.apk --title "艾尔尼亚汉化器（最新构建）" --notes "$NOTES" --latest
+          fi
