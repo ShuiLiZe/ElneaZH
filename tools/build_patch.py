@@ -2,11 +2,13 @@
 """Build the Chinese data.unity3d.
 
 usage: python tools/build_patch.py <orig data.unity3d> <out data.unity3d>
-         [--tr translations] [--font fonts/zh.ttf] [--images images_zh]
+         [--tr translations] [--font fonts/zh.ttf] [--images images_zh] [--bmfont fonts/zh.ttf]
 
 - text:   translations/<asset>.json applied with elnea_text.apply (keys/format untouched)
 - font:   replaces m_FontData of Font 'default_android' (subset to used chars if fonttools present)
 - images: images_zh/<Texture2D name>.png, same size as original; re-encoded in original format
+- bmfont: regenerates the NGUI bitmap fonts in Main_Atlas_jp (BitmapFont-Area / BitmapFont-Name)
+          with GB2312 + every char used in translations (tools/bmfont_zh.py); texture -> 2048x4096
 Then (separately) the app patch = bsdiff(orig, out); see HANDOFF.md.
 """
 import sys, os, json, argparse, io
@@ -51,6 +53,7 @@ def main():
     ap.add_argument('orig'); ap.add_argument('out')
     ap.add_argument('--tr', default='translations')
     ap.add_argument('--font'); ap.add_argument('--images', default='images_zh')
+    ap.add_argument('--bmfont', help='TTF used to render Chinese glyphs into the NGUI bitmap font')
     a = ap.parse_args()
 
     env = UnityPy.load(a.orig)
@@ -72,7 +75,7 @@ def main():
             used.update(new if isinstance(new, str) else "")
             d.m_Script = E.encode(new, bom).decode('utf-8', 'surrogateescape') if isinstance(s, str) else E.encode(new, bom)
             d.save(); nt += len(tr)
-        elif o.type.name == 'Texture2D' and os.path.isdir(a.images):
+        elif o.type.name == 'Texture2D' and os.path.isdir(a.images) and not (a.bmfont and o.read().m_Name == 'Main_Atlas_jp'):
             d = o.read()
             p = os.path.join(a.images, d.m_Name + '.png')
             if os.path.exists(p):
@@ -90,6 +93,9 @@ def main():
                     d.m_FontData = list(data) if isinstance(d.m_FontData, list) else data
                     d.save()
                     print('font replaced', len(data), 'bytes')
+    if a.bmfont:
+        import bmfont_zh
+        bmfont_zh.apply(env.file.files['resources.assets'], a.bmfont, used)
     with open(a.out, 'wb') as f:
         f.write(env.file.save(packer='lz4'))  # keep LZ4 blocks like the original
     print(f'texts {nt}, images {ni} -> {a.out}')

@@ -34,7 +34,7 @@ jobs:
         run: |
           mkdir -p build
           FONT=""
-          if [ -f fonts/zh.ttf ]; then FONT="--font fonts/zh.ttf"; fi
+          if [ -f fonts/zh.ttf ]; then FONT="--font fonts/zh.ttf --bmfont fonts/zh.ttf"; fi
           python tools/build_patch.py base/data.unity3d build/data.unity3d --tr translations $FONT --images images_zh
 
       - name: Create patch
