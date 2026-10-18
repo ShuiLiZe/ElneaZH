@@ -116,3 +116,13 @@
 - CI：合并 base/apk 分段 → 取出原 metadata → metadata_zh.py → bsdiff 生成 `app/src/main/assets/elnea_meta.patch`，哈希写进 elnea_zh.json（meta_new_sha256）。
 - App：Pipeline 新增可选 metaPatch，ApkRebuilder.rebuild 支持一次替换多个条目（Map），MainViewModel 有 elnea_meta.patch 就一起打。**这些 Java/Kotlin 改动只靠 CI 编译验证**。
 - 候选英文：`translations/metadata_candidates.txt`（启发式筛出约 1,400 条，噪音多）。需要用户发未汉化界面截图，对照原文填进 metadata_literals.json。框架字符串（语言名、日期格式、异常信息）别翻。
+
+### 2026-10-18 21:10 真机截图分析（docs/shots/20261018_1..5.jpg）
+1. 地图全英文：是贴图 `map_large_en`，不在 APK 里，是运行时从 CDN 下载的 AssetBundle（`http://cdn-elnea.althi.co.jp/sns04/AssetBundle/` + `*.android.unity3d`）。
+2. 骑士锦标赛人名英文：人名表 NameMale/Female/Family_en 已译，但现有 NPC 的名字是开局时生成、存在存档里的；新出生/新来的人才会是中文名。老存档要改只能改存档数据。
+3. 食谱材料名（Gheat Flour、Milk…）、5. 装备名（Black Wellington Glasses）：APK 和 metadata 里都没有这些字符串。代码里有 master_item / master_food / master_costume / master_accessory / master_guide 等，判断为**服务器下发的主数据**（`http://app-elnea.althi.co.jp/sns04/`），缓存在手机 Android/data/jp.co.althi.elnea.en/files。
+4. 教程图 "Action Switch" + 说明文字：同上，教程是 master_guide（服务器下发）+ 下载的贴图。
+- 结论：剩下的大块英文不在安装包里。方案候选：
+  A. **中转代理**（推荐）：把 metadata 里的服务器地址（app-/cdn-/res-elnea.althi.co.jp/sns04/，明文 http）改成自己的 Cloudflare Worker；Worker 转发到官方服务器，对主数据响应做译文替换、对 map_large_en 等 bundle 返回汉化版。全部在 Worker + 仓库里维护，App 不用碰 Android/data。风险：官方接口格式/签名校验未知，要先抓一份真实响应看格式。
+  B. 改手机上的缓存文件：Android 11+ 普通 App 无法写 Android/data，且会被重新下载覆盖，不推荐。
+- 需要：主数据和 bundle 的真实样本（从手机 Android/data/jp.co.althi.elnea.en/files 导出，或让 Worker 先做透明转发并记录响应）。
