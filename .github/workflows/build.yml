@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false  # translations are pushed often; let a run finish, newest push waits
 
 jobs:
   build:
