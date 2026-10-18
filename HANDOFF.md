@@ -72,3 +72,10 @@
 2. 商店版若是分包 APK（split），重签名安装路径未测。
 3. 图片汉化：`images_zh/` 还空，等用户提供重画的图（meal/call 需 ETC2_RGBA8）。
 4. 补丁约 10 MB（UnityPy 整包重压缩），可接受。
+
+### 2026-10-18 19:55 真机反馈（重要）
+- 真机已能显示中文，但简体特有字（应、费、游、确…）全部消失；取中文名提示“含有无效字符”。
+- 原因：界面用 NGUI 位图字体（Main_Atlas_jp 下半部分，只有日文 JIS 汉字），缺字直接丢弃，取名也按这张字形表校验。
+- 修法（进行中）：解析 UIFont MonoBehaviour 的 glyph 表，保留原假名/拉丁字形，用 fonts/zh.ttf 重新渲染「译文用字 + GB2312 6763 字」，必要时把贴图扩到 2048x4096；集成进 tools/build_patch.py（每次构建自动重生成），CI 开启。
+- 图片汉化（进行中）：images_zh/ 下 Main_Atlas_en、Sub1_Atlas_en、now_loading、call、meal_1-6 抹英文重绘中文；Main_Atlas_jp 只归字体任务改。
+- 已做：tools/build_patch.py 的 TTF 子集已含 GB2312 全集。
