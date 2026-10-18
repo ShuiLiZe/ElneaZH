@@ -30,7 +30,7 @@
 - [x] `tools/import_xlsx.py`：表格 → translations/*.json
 - [x] `tools/build_patch.py`：译文回填已在沙盒实测通过（SystemText 改两条 → 重新打包 LZ4 → UnityPy 读回正确）；换字体、贴图回填代码已写，**未实测**
 - [ ] 安卓 App + CI
-- [ ] 翻译（等用户决定：自己翻 or 机翻初稿）
+- [ ] 翻译：由 AI 人工式翻译，台词四川味、界面标准中文，规范见 `translations/TRANSLATION_GUIDE.md`，术语表 `translations/glossary.json`；进行中
 - [ ] 中文贴图（用户重画中）
 
 ## 已知事实
@@ -40,7 +40,7 @@
 - 重签后与商店版签名不同：必须先卸载原版，**卸载前先在游戏里「サポート/Support → 存档数据」备份**。
 
 ## 下一步（接手照做）
-1. **上传原版资源给 CI**：把原版 `assets/bin/Data/data.unity3d`（28 MB，从 APK 解压）放到仓库 `base/data.unity3d`（私有仓库，自用）。
+1. ~~上传原版资源~~ 已完成：`base/data.unity3d`（原版，补丁基准）、`base/images_en/`（待重画的英文贴图）、`base/SHA256SUMS`（含原版 APK 哈希，用于校验）。整包 APK（98.6 MB）不进 git，接手时从商店/原文件重新获取并对照哈希即可。
 2. **选字体**：开源中文字体放 `fonts/zh.ttf`（建议思源黑体 SC / Noto Sans SC Medium，OFL），build_patch 会按用到的字裁剪。
 3. **测字体与贴图**：`python tools/build_patch.py base/data.unity3d out/data.unity3d --font fonts/zh.ttf --images images_zh`，手动塞回 APK 装机看效果（字号是否统一）。若 NGUI 标签仍用 `Main_Atlas_jp` 的位图字体，需要另做位图字体（BMFont 生成新图集 + 改 UIFont 的 MonoBehaviour 字形表）。
 4. **生成补丁**：`bsdiff base/data.unity3d out/data.unity3d app/src/main/assets/elnea_zh.patch`（Java 端用 `io.sigpipe:jbsdiff` 应用），同时写入原版 SHA-256 做校验。
