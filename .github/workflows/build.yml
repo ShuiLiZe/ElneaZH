@@ -24,7 +24,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install Python deps
-        run: pip install UnityPy==1.10.18 fonttools bsdiff4 openpyxl Pillow
+        run: pip install UnityPy==1.10.18 fonttools bsdiff4 openpyxl Pillow numpy
 
       - name: Verify base data.unity3d
         run: |
