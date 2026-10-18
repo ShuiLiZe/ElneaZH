@@ -40,7 +40,7 @@
 - 重签后与商店版签名不同：必须先卸载原版，**卸载前先在游戏里「サポート/Support → 存档数据」备份**。
 
 ## 下一步（接手照做）
-1. ~~上传原版资源~~ 已完成：`base/data.unity3d`（原版，补丁基准）、`base/images_en/`（待重画的英文贴图）、`base/SHA256SUMS`（含原版 APK 哈希，用于校验）。整包 APK（98.6 MB）不进 git，接手时从商店/原文件重新获取并对照哈希即可。
+1. ~~上传原版资源~~ 已完成：`base/data.unity3d`（原版，补丁基准）、`base/images_en/`（待重画的英文贴图）、`base/SHA256SUMS`（含原版 APK 哈希，用于校验）。整包 APK 已分 4 段放在 `base/apk/`（见其中 README，`cat` 合并后校验 SHA-256）。
 2. **选字体**：开源中文字体放 `fonts/zh.ttf`（建议思源黑体 SC / Noto Sans SC Medium，OFL），build_patch 会按用到的字裁剪。
 3. **测字体与贴图**：`python tools/build_patch.py base/data.unity3d out/data.unity3d --font fonts/zh.ttf --images images_zh`，手动塞回 APK 装机看效果（字号是否统一）。若 NGUI 标签仍用 `Main_Atlas_jp` 的位图字体，需要另做位图字体（BMFont 生成新图集 + 改 UIFont 的 MonoBehaviour 字形表）。
 4. **生成补丁**：`bsdiff base/data.unity3d out/data.unity3d app/src/main/assets/elnea_zh.patch`（Java 端用 `io.sigpipe:jbsdiff` 应用），同时写入原版 SHA-256 做校验。
@@ -104,3 +104,7 @@
 ### 2026-10-18 20:30 真机反馈：很多没汉化 + 名字不能取中文
 - 已排查 data.unity3d：630 个 TextAsset 里 *_en 都已译；prefab（MonoBehaviour）里几乎没有可见英文 UILabel 文本（只有方法名）。所以剩下的英文多半写死在 IL2CPP 代码里（APK 的 assets/bin/Data/Managed/Metadata/global-metadata.dat 字符串字面量），取名校验也在代码里（libil2cpp.so）。
 - 需要原版 APK：用 Il2CppDumper 导出，找取名校验函数和硬编码字符串；汉化 global-metadata.dat 的字符串（同样做 bsdiff 进补丁，App 端要扩展成多文件补丁）。
+
+### 原版 APK 已进仓库（2026-10-18 20:35）
+- `base/apk/ElneaKingdom_2.10.7.apk.part00..03`，合并：`cat base/apk/*.part* > ElneaKingdom_2.10.7.apk`，SHA-256 5117bbaa…cf90c（与 base/SHA256SUMS 一致）。
+- 下一步：Il2CppDumper（lib/arm64-v8a/libil2cpp.so + global-metadata.dat）找取名校验和硬编码英文。
