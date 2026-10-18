@@ -79,3 +79,19 @@
 - 修法（进行中）：解析 UIFont MonoBehaviour 的 glyph 表，保留原假名/拉丁字形，用 fonts/zh.ttf 重新渲染「译文用字 + GB2312 6763 字」，必要时把贴图扩到 2048x4096；集成进 tools/build_patch.py（每次构建自动重生成），CI 开启。
 - 图片汉化（进行中）：images_zh/ 下 Main_Atlas_en、Sub1_Atlas_en、now_loading、call、meal_1-6 抹英文重绘中文；Main_Atlas_jp 只归字体任务改。
 - 已做：tools/build_patch.py 的 TTF 子集已含 GB2312 全集。
+
+## 当前状态（2026-10-18 20:15 CST）
+### 缺字修复：已完成（ac09be8、02116d8，run #38 成功）
+- `tools/bmfont_zh.py` 重做 NGUI 位图字体（BitmapFont-Area / BitmapFont-Name）：保留原假名/拉丁字形，用 fonts/zh.ttf 渲染 GB2312 6,763 字 + 译文用字，Main_Atlas_jp 扩到 2048x4096。build_patch 每次构建自动执行。
+- 取中文名能否通过校验仍待真机确认。
+
+### 图片：已打包进构建
+- `images_zh/` 10 张：Main_Atlas_en、Sub1_Atlas_en（RGBA32）、now_loading_en（RGB24）、call_en、meal_1..6_en（ETC2_RGBA8）。
+- 之前以为没推送的 texture_io.py 不需要：仓库里的 build_patch.py 本身就会写回图片（数据改为内嵌，m_StreamData 清空，Unity 可正常读取）。
+- **已修 bug**：UnityPy 1.10.18 编 ETC2 前把 RGBA 换成 BGRA，而 etcpak 0.9.15 本来就收 RGBA，结果红色变蓝（call_en、meal_1、meal_6 误差大就是这个原因，不是透明像素）。另外 set_image 把 mip 数从 8/9 降成 1。
+  现在 build_patch.py 的 `etc2_rgba_mips()` 自己用 etcpak 编码，保留原 mip 数和原数据大小。实测所有 ETC2 图可见像素平均误差 3–8，正常。
+- 还剩英文：Main_Atlas_jp 里的战斗字（Counter Break!、Guard Break!、Counter Damage!、Miss!、Guard）、icon_talk 卡片上的小字。
+
+### 下一步
+1. 真机测试：缺字、取中文名、游戏启动、ETC2 图颜色正常（红字不能变蓝）。装前先备份存档。
+2. 战斗字和 icon_talk 小字（要动 Main_Atlas_jp，注意它现在由 bmfont_zh 重生成，图片要在字体生成后再贴进同一张图）。
