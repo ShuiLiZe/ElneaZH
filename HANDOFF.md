@@ -99,3 +99,4 @@
 ### 2026-10-18 20:25 用户反馈
 - 用户反映"不是少字就是一大一小"，问能否不用借壳（重打包重签）方案。结论：问题来自两套字体（NGUI 位图字 Main_Atlas_jp + TTF default_android），与打包方式无关；运行时注入（BepInEx/MelonLoader）同样要重打包且更不稳。
 - 待做：bmfont_zh 渲染中文时按原 JIS 汉字字形的格子尺寸、基线、advance 对齐（量原字形平均 width/height/offset 再定字号），等用户发 #41 版的截图确认是哪处一大一小。
+- 方案 B（全用 TTF）：NGUIFont 有动态字体字段（mBMFont/mAtlas 之后的 mDynamicFont PPtr<Font> + mDynamicFontSize + mDynamicFontStyle）。把 BitmapFont-Area / BitmapFont-Name 的 mDynamicFont 指向 Font default_android（path_id 1512）、size 24，所有引用这两个字体的标签就改用 TTF，字形和大小统一。bmFont 字形表照旧保留，防止取名校验只查字形表。资源无 typetree，需按 bmfont_zh.py 的 raw 布局继续往后解析 suffix 定位字段。先测 #41：位图字已用同一 TTF 按原汉字格子渲染，可能已无大小不一。
