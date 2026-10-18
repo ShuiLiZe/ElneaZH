@@ -126,3 +126,6 @@
   A. **中转代理**（推荐）：把 metadata 里的服务器地址（app-/cdn-/res-elnea.althi.co.jp/sns04/，明文 http）改成自己的 Cloudflare Worker；Worker 转发到官方服务器，对主数据响应做译文替换、对 map_large_en 等 bundle 返回汉化版。全部在 Worker + 仓库里维护，App 不用碰 Android/data。风险：官方接口格式/签名校验未知，要先抓一份真实响应看格式。
   B. 改手机上的缓存文件：Android 11+ 普通 App 无法写 Android/data，且会被重新下载覆盖，不推荐。
 - 需要：主数据和 bundle 的真实样本（从手机 Android/data/jp.co.althi.elnea.en/files 导出，或让 Worker 先做透明转发并记录响应）。
+
+### 2026-10-18 21:15 修复：已装汉化版时手动选原版 APK 仍被拦
+- MainViewModel.start()：拦截条件加 `!g.fromFile`，手动选的文件直接生成（输出校验会挡住选错的文件）。

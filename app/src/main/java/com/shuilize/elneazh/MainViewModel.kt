@@ -105,7 +105,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun start() {
         val g = _state.value.game ?: return
         if (_state.value.phase == Phase.WORKING) return
-        if (g.alreadyZh && GameFinder.cachedOriginals(ctx).isEmpty()) {
+        if (g.alreadyZh && !g.fromFile && GameFinder.cachedOriginals(ctx).isEmpty()) {
             _state.update { it.copy(phase = Phase.ERROR, error = "手机上装的已经是汉化版，但汉化器里没有保存原版安装包。请用「选择 APK 文件」选原版 APK（仓库 base/apk 里有），之后更新就不用再卸载了。") }
             return
         }
