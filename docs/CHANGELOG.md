@@ -143,3 +143,12 @@
 - `translations/contents/c_*.json`：导出的中文串（record id → 文本），共 36,015 条。
 - **重要**：旧汉化用了“借字”——字库不全时把缺的简体字画在别的日文汉字码位上（例：`煥`=种、`曹硲`=收获），表里共有 569 个非 GB2312 的借用字。我们的新字库是真 GB2312，必须先还原映射表才能用。需要用户旧版 APK（里面的字库图集 + libil2cpp.so 两处补丁）来还原。
 - 待办：① 拿到旧 APK → 从旧字库对比得出借字映射 → 批量还原为正常简体并校对译文；② 在 libil2cpp.so 实现读表路径重定向 + 禁止删表；③ 汉化器部署表和地图。
+
+### 2026-10-18 21:55 分析用户旧「王国助手 0.0.7」(gitee water-conservancy-ze/ElneaAssistant)
+- 是 Root + Xposed + bind mount 方案：把 22 张表写进 /data/data/.../files/Contents 或挂载 /sdcard/ElneaAssistant/Contents，地图写 UnityCache/Shared。
+- `base/so/contents_redirect.elsp`（原 assets/so_patch.bin）：libil2cpp.so 补丁，格式 `ELSP` v1, n, 每条 (u32 offset, u32 len, orig, u32 len, new)。5 条，与我们 2.10.7 的 libil2cpp.so 逐字节匹配：
+  - 0x8f0b18 写入路径串 `/sdcard/ElneaAssistant/Contents/`（32 字节空洞）；0x8f0b48–0x8f0b57 一段 stub（adrp/add x0 指向该串 + bl + ret）
+  - 0x18aa994 `sub sp` → `bl stub`（读表路径改为该串）
+  - 0x1ab3588 → `mov w0, wzr; ret`（禁止版本变化删表）
+- 非 Root 方案要点：游戏读 /sdcard 需要“所有文件访问”或旧版存储权限；manifest 已有 READ/WRITE_EXTERNAL_STORAGE，无 requestLegacyExternalStorage。可能需要在 AndroidManifest 加 MANAGE_EXTERNAL_STORAGE 并让用户在设置里授予。
+- 借字字库不在助手里，应在用户的 base.zh.apk（/sdcard/ElneaAssistant/base.zh.apk）里。
