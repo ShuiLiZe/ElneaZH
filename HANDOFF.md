@@ -58,3 +58,9 @@ _最后更新：2026-10-18 21:00 CST_
   `tools/bmfont_zh.py` 重建 Main_Atlas_jp 时按 `atlas_sprites.json` 坐标贴入（出错只打日志不中断）。
 - 旧工作区盘点：`docs/old_workspace_inventory.md`（DSH 只读产出）。要点：旧 metadata 无译文；教程图无中文版；气泡文本已在 translations/TalkData_en.json；旧存档改名有 ID 错位 bug 不可照搬；借壳字 glyph_subst 属缺陷不沿用。
 - 仍在跑：下载包（bundles/README.md）、国王（king.md，要求：杨广、男、黄/白皮、游戏约 5 岁、未婚、川味台词）。
+
+## 2026-10-20 01:40 国王调查结论（docs/king_research.md）
+- 初始国王名随机取自 NameMale 表，无固定名；改名只能改存档。国王 id 疑在 `sv1_ws_info`@0x28（高置信，未证实），profile flag King=4。
+- profiles 每条 25B：off23 性别(2=男)，off12 肤色(0 白/1 黄/2 拉丁/3 棕)，off24 年龄(独立整数)，off1..3 出生日编码（age=5 → `c0 5d 01`，仅对该旧档 t≈5746 有效）。
+- 婚姻在 FamilyData.dicPersons 的 Partner(1) + HumanData flag 0x26c/0x26d；familys 解析仍有矛盾 → **暂不改存档**。
+- 台词按身份匹配：c_message speaker/listener=Monarch(35) 可做"国王专属川味台词"（DSH 会话 bE 正在列条目）。
