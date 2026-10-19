@@ -50,3 +50,11 @@ _最后更新：2026-10-18 21:00 CST_
 - NPC/配偶名仍英文（Conan、Dexter、Kyle Antigua…）：名字表已译，但已有居民的名字存在存档里，只影响新生成角色。待分析存档格式后做“存档名字转换”（要先备份）。
 - 教程图（"If you tap on their Name Plate…"、Talk、FastTravel）是运行时下载的 bundle（UnityCache/Shared/tutorial*），不在 APK；需用户从 Android/data/jp.co.althi.elnea.en/files/UnityCache/Shared/ 提供原 bundle，再像地图一样重 P。
 - 教程图名 fig_XXX_en（c_guide 引用 107 张），按需下载到 UnityCache/Shared。喷泉广场手写拉丁文气泡也是下载的场景/特效 bundle（APK 内 258 张贴图都没有）。已请用户截 Shared 全部文件夹名以定位。
+
+## 2026-10-20 01:30 战斗字 + 旧工作区盘点
+- CI #61（cc13a84e 交流与支持卡片/游戏内说明）、#62（909e224e 老存档人名转中文）均成功。
+- 战斗字：英文版的 Guard Break!/Counter Break!/Counter Damage!/Guard/Miss! 在 `Main_Atlas_jp`（EN 图集没覆盖），之前从没汉化。
+  新增 `tools/imgzh/battle_marks.py` → `images_zh/Main_Atlas_jp_patch/*.png`（破防！/破解反击！/反击伤害！/格挡/落空！，保留左侧图标，预乘 alpha）；
+  `tools/bmfont_zh.py` 重建 Main_Atlas_jp 时按 `atlas_sprites.json` 坐标贴入（出错只打日志不中断）。
+- 旧工作区盘点：`docs/old_workspace_inventory.md`（DSH 只读产出）。要点：旧 metadata 无译文；教程图无中文版；气泡文本已在 translations/TalkData_en.json；旧存档改名有 ID 错位 bug 不可照搬；借壳字 glyph_subst 属缺陷不沿用。
+- 仍在跑：下载包（bundles/README.md）、国王（king.md，要求：杨广、男、黄/白皮、游戏约 5 岁、未婚、川味台词）。

@@ -30,6 +30,8 @@ What apply() does:
   * 'BitmapFont-Name' switched to sprite 'BitmapFont-Area_0' with its own glyphs + all hanzi,
     so Chinese names render and pass the name check.
 """
+import json
+import os
 import struct
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -130,6 +132,34 @@ def render_glyph(font, c):
     ox = bb[0] - pen_x + extra
     oy = LINE_BASE - (pen_y - bb[1])
     return im.crop(bb), ox, oy, adv
+
+
+PATCH_DIR = os.environ.get('ELNEAZH_JP_PATCH', 'images_zh/Main_Atlas_jp_patch')
+
+
+def paste_sprite_patches(arr, log=print):
+    """Paste <sprite>.png (exact sprite size, premultiplied) at the sprite rect of Main_Atlas_jp."""
+    try:
+        if not os.path.isdir(PATCH_DIR):
+            return 0
+        here = os.path.dirname(os.path.abspath(__file__))
+        spr = {s['name']: s for s in json.load(open(os.path.join(here, 'imgzh', 'atlas_sprites.json')))[TEX_NAME]}
+        n = 0
+        for f in sorted(os.listdir(PATCH_DIR)):
+            name = f[:-4]
+            if not f.endswith('.png') or name not in spr:
+                continue
+            s = spr[name]
+            im = np.array(Image.open(os.path.join(PATCH_DIR, f)).convert('RGBA'))
+            assert im.shape[:2] == (s['h'], s['w']), f'{f}: {im.shape[:2]} != {(s["h"], s["w"])}'
+            assert s['y'] + s['h'] <= REGION_Y
+            arr[s['y']:s['y'] + s['h'], s['x']:s['x'] + s['w']] = im
+            n += 1
+        log(f'bmfont: pasted {n} sprite patches from {PATCH_DIR}')
+        return n
+    except Exception as e:  # never break the build over cosmetics
+        log(f'bmfont: sprite patches skipped: {e}')
+        return 0
 
 
 def apply(env_file, ttf_path, extra_chars=(), log=print):
@@ -244,6 +274,7 @@ def apply(env_file, ttf_path, extra_chars=(), log=print):
 
     new = np.zeros((NEW_H, W, 4), np.uint8)
     new[:REGION_Y] = src[:REGION_Y]                 # UI sprites untouched
+    paste_sprite_patches(new, log)                  # Chinese battle telops etc. (images_zh/Main_Atlas_jp_patch)
     for i, (key, arr, ox, oy, adv) in enumerate(items):
         px, py = pos[i]; h, w = arr.shape[:2]
         new[REGION_Y + py:REGION_Y + py + h, px:px + w] = arr
