@@ -125,7 +125,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          NOTES="自动构建 #${{ github.run_number }}（${GITHUB_SHA::7}）。下载 ElneaZH.apk 安装到手机，打开后按步骤一键汉化。"
+          NOTES="自动构建 #${{ github.run_number }}（${GITHUB_SHA::7}）。下载 ElneaZH.apk 安装到手机，打开后按步骤一键汉化。完全免费，禁止倒卖；汉化交流 QQ 群 790184852。"
           git tag -f latest
           git push -f origin latest
           if gh release view latest >/dev/null 2>&1; then

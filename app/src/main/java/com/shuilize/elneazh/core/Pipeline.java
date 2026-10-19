@@ -187,7 +187,7 @@ public final class Pipeline {
             if (ApkRebuilder.hasEntry(apk, "classes3.dex")) throw new FriendlyException("安装包结构不符（已有 classes3.dex）。");
             rep.put(MANIFEST_ENTRY, man);
             rep.put("classes3.dex", new File(zhDir, "classes3.dex"));
-            for (String sub : new String[]{"Contents", "map"}) {
+            for (String sub : new String[]{"Contents", "map", "about"}) {
                 File[] fs = new File(zhDir, sub).listFiles();
                 if (fs != null) for (File f : fs) rep.put("assets/elneazh/" + sub + "/" + f.getName(), f);
             }

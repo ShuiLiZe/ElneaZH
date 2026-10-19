@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,7 +44,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -256,11 +260,44 @@ private fun App(vm: MainViewModel) {
             }
         }
 
+        SupportCard()
+
         Text(
             "仅供个人使用。汉化版使用本机生成的签名，游戏更新后需要等待新的汉化补丁。",
             fontSize = 12.sp, color = Muted, lineHeight = 18.sp,
             modifier = Modifier.padding(horizontal = 4.dp),
         )
+    }
+}
+
+@Composable
+private fun SupportCard() {
+    val ctx = LocalContext.current
+    val clip = LocalClipboardManager.current
+    val shape = RoundedCornerShape(24.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .shadow(14.dp, shape, ambientColor = Color(0x14000000), spotColor = Color(0x1F000000))
+            .background(CardWhite, shape)
+            .padding(22.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("完全免费 · 交流与支持", fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = Ink,
+            modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "本汉化完全免费，禁止倒卖。汉化交流 QQ 群 790184852：反馈没汉化的地方、获取新版都来群里。" +
+                "觉得好玩，可以微信扫码请汉化作者喝杯奶茶，全凭自愿，不捐也一样能用。",
+            fontSize = 14.sp, color = Muted, lineHeight = 21.sp, modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(14.dp))
+        Image(painterResource(R.drawable.donate_qr), contentDescription = "微信收款码", modifier = Modifier.size(200.dp))
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(onClick = {
+            clip.setText(AnnotatedString("790184852"))
+            Toast.makeText(ctx, "已复制 QQ 群号 790184852", Toast.LENGTH_SHORT).show()
+        }) { Text("复制 QQ 群号", color = Ink) }
     }
 }
 
