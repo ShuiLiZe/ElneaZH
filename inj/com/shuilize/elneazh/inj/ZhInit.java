@@ -28,6 +28,7 @@ public final class ZhInit extends ContentProvider {
 
     @Override public boolean onCreate() {
         try { deploy(getContext()); } catch (Throwable t) { Log.e(TAG, "deploy failed", t); }
+        try { SaveNames.run(getContext()); } catch (Throwable t) { Log.e(TAG, "names failed", t); }
         try { About.install(getContext()); } catch (Throwable t) { Log.e(TAG, "about failed", t); }
         return true;
     }

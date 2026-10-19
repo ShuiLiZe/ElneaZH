@@ -56,6 +56,7 @@ jobs:
       - name: Build no-root master-table payload (tables + map + libil2cpp patch + manifest)
         run: |
           Z=app/src/main/assets/elneazh; mkdir -p $Z/Contents $Z/map
+          mkdir -p $Z/data && python tools/names_map.py $Z/data/names.tsv
           cp content_zh/Contents/c_* $Z/Contents/
           cp content_zh/map_large_en/__data content_zh/map_large_en/__info $Z/map/
           unzip -p build/base.apk lib/arm64-v8a/libil2cpp.so > build/libil2cpp.so
