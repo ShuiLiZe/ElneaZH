@@ -173,3 +173,11 @@
 ### 2026-10-18 22:25 修闪退（用户反馈：打开即闪退）
 - 原因：沿用的旧助手补丁把跳板放在 libil2cpp 文件偏移 0x8f0b48，那里属于只读段（LOAD#0, R），且分支按文件偏移算、代码段 VA=偏移+0x4000 → 一启动就崩。
 - 修法：不用跳板，直接把 0x18aa994 函数开头改为 `adrp x0,0x8f0000; add x0,x0,#0xb18; b 0x172cedc`（全按 VA 计算，capstone 验证）。
+
+## 2026-10-20 夜间
+- cc13a84e：汉化器 App「完全免费 · 交流与支持」卡片（QQ 群 790184852、微信收款码）；游戏首次启动弹一次说明。CI #61。
+- 909e224e：老存档人名自动转中文（inj/SaveNames.java，原件备份 files/zh_backup/）。CI #62。
+- 58fb495a：战斗字（Main_Atlas_jp 的 Guard Break / Counter Break / Counter Damage / Guard / Miss）汉化。CI #63。
+- be7ba74c：国王/存档结构调查 docs/king_research.md；旧工作区盘点 docs/old_workspace_inventory.md。CI #64。
+- 667d29c3：国王（Monarch）22 条台词改川味；tools/nrbf.py。CI #65。
+- 下载包：URL 含运行时版本串，静态无法拼出；改为用已缓存的 bundle 汉化后覆盖 UnityCache（待做）。
