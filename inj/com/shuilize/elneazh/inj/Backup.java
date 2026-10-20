@@ -2,6 +2,18 @@ package com.shuilize.elneazh.inj;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.widget.TextView;
+import android.widget.ScrollView;
+import android.widget.LinearLayout;
+import android.view.Window;
+import android.view.ViewGroup;
+import android.view.View;
+import android.view.Gravity;
+import android.graphics.drawable.StateListDrawable;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.Typeface;
+import android.graphics.Color;
+import android.app.Dialog;
 import android.content.ContentResolver;
 import android.content.ContentUris;
 import android.content.ContentValues;
@@ -266,16 +278,6 @@ final class Backup {
         return r;
     }
 
-    private static String label(Item it) {
-        String n = it.name.replace("存档_", "").replace(".zip", "");
-        String[] p = n.split("_");
-        if (p.length >= 3 && p[1].length() == 8 && p[2].length() >= 4) {
-            n = p[0] + "  " + p[1].substring(0, 4) + "-" + p[1].substring(4, 6) + "-" + p[1].substring(6, 8)
-                    + " " + p[2].substring(0, 2) + ":" + p[2].substring(2, 4);
-        }
-        return n + "  (" + Math.max(1, it.size / 1024) + " KB)";
-    }
-
     /** In-game backup manager: list, back up now, restore, delete. */
     static void manage(final Activity a) {
         new Thread(new Runnable() { @Override public void run() {
@@ -285,55 +287,33 @@ final class Backup {
     }
 
     private static void showList(final Activity a, final List<Item> items) {
-        try {
-            String[] labels = new String[items.size()];
-            for (int i = 0; i < labels.length; i++) labels[i] = label(items.get(i));
-            AlertDialog.Builder b = new AlertDialog.Builder(a)
-                    .setTitle(items.isEmpty() ? "还没有备份" : "存档备份 " + items.size() + " 份（" + (rootOk(a) ? "根目录" : "Documents") + "）")
-                    .setPositiveButton("立即备份", new DialogInterface.OnClickListener() {
-                        @Override public void onClick(DialogInterface d, int w) {
-                            toast(a, "正在备份存档…");
-                            new Thread(new Runnable() { @Override public void run() {
-                                String n = make(a, "手动");
-                                toast(a, n == null ? "备份失败（手机存储不可写？）" : "已备份：" + n);
-                                if (n != null) manage(a);
-                            }}).start();
-                        }
-                    })
-                    .setNeutralButton("从文件选择", new DialogInterface.OnClickListener() {
-                        @Override public void onClick(DialogInterface d, int w) { Support.restore(a); }
-                    })
-                    ;
-            final boolean root = rootOk(a);
-            if (root) b.setNegativeButton("关闭", null);
-            else b.setNegativeButton("改存根目录", new DialogInterface.OnClickListener() {
-                @Override public void onClick(DialogInterface d, int w) { askRoot(a); }
-            });
-            String where = root ? "备份位置：手机存储根目录 /" + DIR
-                    : "备份位置：Documents/" + DIR + "。想放根目录 /" + DIR + "，点「改存根目录」授权一次。";
-            if (items.isEmpty()) b.setMessage(where + "\n重装过游戏的话旧备份可能列不出来，点「从文件选择」去找。");
-            else b.setItems(labels, new DialogInterface.OnClickListener() {
-                @Override public void onClick(DialogInterface d, int w) { itemMenu(a, items.get(w)); }
-            });
-            b.show();
-        } catch (Throwable t) { Log.w(TAG, "showList", t); }
+        final boolean root = rootOk(a);
+        Pop p = new Pop(a, "存档管理");
+        p.msg((root ? "备份位置：手机存储根目录 /" : "备份位置：Documents/") + DIR
+                + (items.isEmpty() ? "\n还没有备份。" : "\n共 " + items.size() + " 份，点一份可以恢复或删除。"));
+        for (final Item it : items) p.row(head(it), size(it), new Runnable() { @Override public void run() { itemMenu(a, it); } });
+        p.btn("立即备份", 0, new Runnable() { @Override public void run() {
+            toast(a, "正在备份存档…");
+            new Thread(new Runnable() { @Override public void run() {
+                String n = make(a, "手动");
+                toast(a, n == null ? "备份失败（手机存储不可写？）" : "备份好了");
+                manage(a);
+            }}).start();
+        }});
+        if (!root) p.btn("改放到根目录", 1, new Runnable() { @Override public void run() { askRoot(a); } });
+        p.btn("从文件里找备份", 1, new Runnable() { @Override public void run() { Support.restore(a); } });
+        p.btn("关闭", 3, null);
+        p.show();
     }
 
     private static void itemMenu(final Activity a, final Item it) {
-        try {
-            new AlertDialog.Builder(a)
-                    .setTitle(label(it))
-                    .setItems(new String[]{"恢复这个备份", "删除这个备份", "查看备份了哪些文件"}, new DialogInterface.OnClickListener() {
-                        @Override public void onClick(DialogInterface d, int w) {
-                            if (w == 0) confirmRestore(a, it.uri);
-                            else if (w == 1) confirmDelete(a, it);
-                            else showInfo(a, it);
-                        }
-                    })
-                    .setNegativeButton("返回", new DialogInterface.OnClickListener() {
-                        @Override public void onClick(DialogInterface d, int w) { manage(a); }
-                    }).show();
-        } catch (Throwable t) { Log.w(TAG, "itemMenu", t); }
+        new Pop(a, head(it))
+                .msg("大小 " + size(it))
+                .btn("恢复这个备份", 0, new Runnable() { @Override public void run() { confirmRestore(a, it.uri); } })
+                .btn("查看里面有哪些文件", 1, new Runnable() { @Override public void run() { showInfo(a, it); } })
+                .btn("删除这个备份", 2, new Runnable() { @Override public void run() { confirmDelete(a, it); } })
+                .btn("返回", 3, new Runnable() { @Override public void run() { manage(a); } })
+                .show();
     }
 
     private static void showInfo(final Activity a, final Item it) {
@@ -346,34 +326,132 @@ final class Backup {
             }
             txt = "共 " + n + " 个文件：\n" + sb;
         } catch (Throwable t) { txt = "读不了：" + t; }
-        try {
-            new AlertDialog.Builder(a).setTitle(label(it)).setMessage(txt)
-                    .setPositiveButton("返回", new DialogInterface.OnClickListener() {
-                        @Override public void onClick(DialogInterface d, int w) { manage(a); }
-                    }).show();
-        } catch (Throwable t) { Log.w(TAG, "info", t); }
+        new Pop(a, "备份内容").msg(txt)
+                .btn("返回", 3, new Runnable() { @Override public void run() { itemMenu(a, it); } }).show();
     }
 
     private static void confirmDelete(final Activity a, final Item it) {
-        try {
-            new AlertDialog.Builder(a)
-                    .setTitle("删除备份")
-                    .setMessage("确定删除「" + label(it) + "」？删了就找不回来了。")
-                    .setNegativeButton("取消", new DialogInterface.OnClickListener() {
-                        @Override public void onClick(DialogInterface d, int w) { manage(a); }
-                    })
-                    .setPositiveButton("删除", new DialogInterface.OnClickListener() {
-                        @Override public void onClick(DialogInterface d, int w) {
-                            boolean ok = false;
-                            try {
-                                if ("file".equals(it.uri.getScheme())) ok = new File(it.uri.getPath()).delete();
-                                else ok = a.getContentResolver().delete(it.uri, null, null) > 0;
-                            } catch (Throwable t) { Log.w(TAG, "delete", t); }
-                            toast(a, ok ? "已删除" : "删不掉（可能是重装前的旧备份，请用文件管理删除）");
-                            manage(a);
-                        }
-                    }).show();
-        } catch (Throwable t) { Log.w(TAG, "confirmDelete", t); }
+        new Pop(a, "删除备份")
+                .msg("确定删除「" + head(it) + "」？删了就找不回来了。")
+                .btn("删除", 2, new Runnable() { @Override public void run() {
+                    boolean ok = false;
+                    try {
+                        if ("file".equals(it.uri.getScheme())) ok = new File(it.uri.getPath()).delete();
+                        else ok = a.getContentResolver().delete(it.uri, null, null) > 0;
+                    } catch (Throwable t) { Log.w(TAG, "delete", t); }
+                    toast(a, ok ? "已删除" : "删不掉（可能是重装前的旧备份，请用文件管理删除）");
+                    manage(a);
+                }})
+                .btn("取消", 3, new Runnable() { @Override public void run() { itemMenu(a, it); } })
+                .show();
+    }
+
+    /** Small popup in the same cream/brown game style as {@link Support}. Every action dismisses it first. */
+    static final class Pop {
+        final Activity a; final float d; final Dialog dlg; final LinearLayout card, rows, btns;
+        Pop(Activity a, String title) {
+            this.a = a; d = a.getResources().getDisplayMetrics().density;
+            dlg = new Dialog(a);
+            dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
+            dlg.setCanceledOnTouchOutside(true);
+            card = new LinearLayout(a);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setBackground(Support.round(Support.CREAM, Support.BROWN, 3 * d, 14 * d));
+            int pad = (int) (18 * d);
+            card.setPadding(pad, (int) (14 * d), pad, (int) (16 * d));
+            TextView t = new TextView(a);
+            t.setText(title); t.setTextColor(Support.BROWN); t.setTextSize(19);
+            t.setTypeface(Typeface.DEFAULT_BOLD); t.setGravity(Gravity.CENTER);
+            t.setPadding(0, 0, 0, (int) (8 * d));
+            card.addView(t, new LinearLayout.LayoutParams(-1, -2));
+            View line = new View(a);
+            line.setBackgroundColor(Color.argb(0x66, 0x7A, 0x4B, 0x24));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, Math.max(1, (int) (1.5f * d)));
+            lp.bottomMargin = (int) (8 * d);
+            card.addView(line, lp);
+            rows = new LinearLayout(a); rows.setOrientation(LinearLayout.VERTICAL);
+            btns = new LinearLayout(a); btns.setOrientation(LinearLayout.VERTICAL);
+        }
+        Pop msg(String m) {
+            TextView tv = new TextView(a);
+            tv.setText(m); tv.setTextColor(Support.BROWN_TEXT); tv.setTextSize(14); tv.setLineSpacing(0, 1.25f);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+            lp.bottomMargin = (int) (4 * d);
+            rows.addView(tv, lp);
+            return this;
+        }
+        Pop row(String head, String sub, final Runnable r) {
+            LinearLayout b = new LinearLayout(a);
+            b.setOrientation(LinearLayout.VERTICAL);
+            int p = (int) (12 * d);
+            b.setPadding(p, (int) (9 * d), p, (int) (9 * d));
+            StateListDrawable st = new StateListDrawable();
+            st.addState(new int[]{android.R.attr.state_pressed}, Support.round(Color.rgb(0xE6, 0xCC, 0x9C), Support.BROWN, 1.5f * d, 10 * d));
+            st.addState(new int[0], Support.round(Support.CREAM_DARK, Color.argb(0x99, 0x7A, 0x4B, 0x24), 1.5f * d, 10 * d));
+            b.setBackground(st);
+            b.setClickable(true);
+            TextView h = new TextView(a);
+            h.setText(head); h.setTextColor(Support.BROWN); h.setTextSize(15); h.setTypeface(Typeface.DEFAULT_BOLD);
+            b.addView(h);
+            if (sub != null) {
+                TextView s2 = new TextView(a);
+                s2.setText(sub); s2.setTextColor(Support.BROWN_TEXT); s2.setTextSize(12);
+                b.addView(s2);
+            }
+            b.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { go(r); } });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+            lp.topMargin = (int) (8 * d);
+            rows.addView(b, lp);
+            return this;
+        }
+        Pop btn(String text, int style, final Runnable r) {
+            int fill = style == 0 ? Support.ORANGE : style == 1 ? Support.CREAM_DARK : style == 2 ? Color.rgb(0xC6, 0x3C, 0x2B) : Support.BROWN;
+            int stroke = style == 0 ? Support.ORANGE_DARK : style == 1 ? Support.BROWN : style == 2 ? Color.rgb(0x8E, 0x22, 0x16) : Color.rgb(0x4E, 0x2F, 0x14);
+            int tc = style == 1 ? Support.BROWN : Color.WHITE;
+            btns.addView(Support.button(a, d, text, fill, stroke, tc, new View.OnClickListener() {
+                @Override public void onClick(View v) { go(r); }
+            }));
+            return this;
+        }
+        private void go(Runnable r) {
+            try { dlg.dismiss(); } catch (Throwable ignored) {}
+            if (r != null) try { r.run(); } catch (Throwable t) { Log.w(TAG, "pop", t); }
+        }
+        void show() {
+            try {
+                ScrollView sv = new ScrollView(a);
+                sv.setVerticalScrollBarEnabled(false);
+                sv.addView(rows);
+                int sh = a.getResources().getDisplayMetrics().heightPixels;
+                card.addView(sv, new LinearLayout.LayoutParams(-1, -2));
+                card.addView(btns, new LinearLayout.LayoutParams(-1, -2));
+                dlg.setContentView(card);
+                Window w = dlg.getWindow();
+                if (w != null) {
+                    w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+                    int sw = a.getResources().getDisplayMetrics().widthPixels;
+                    w.setLayout(Math.min((int) (sw * 0.9f), (int) (380 * d)), ViewGroup.LayoutParams.WRAP_CONTENT);
+                }
+                // keep long lists from pushing the buttons off screen
+                rows.measure(View.MeasureSpec.makeMeasureSpec((int) (340 * d), View.MeasureSpec.AT_MOST), View.MeasureSpec.UNSPECIFIED);
+                if (rows.getMeasuredHeight() > sh * 0.45f) sv.getLayoutParams().height = (int) (sh * 0.45f);
+                dlg.show();
+            } catch (Throwable t) { Log.w(TAG, "pop show", t); }
+        }
+    }
+
+    private static String head(Item it) {
+        String n = it.name.replace("存档_", "").replace(".zip", "");
+        String[] p = n.split("_");
+        String kind = p.length > 0 ? p[0] : n;
+        String when = n;
+        if (p.length >= 3 && p[1].length() == 8 && p[2].length() >= 4)
+            when = p[1].substring(0, 4) + "-" + p[1].substring(4, 6) + "-" + p[1].substring(6, 8) + "  " + p[2].substring(0, 2) + ":" + p[2].substring(2, 4);
+        return when + "  ·  " + kind + "备份";
+    }
+
+    private static String size(Item it) {
+        return it.size >= 1024 * 1024 ? String.format(Locale.US, "%.1f MB", it.size / 1048576.0) : Math.max(1, it.size / 1024) + " KB";
     }
 
     // ---------------- UI ----------------
@@ -403,18 +481,15 @@ final class Backup {
     /** From SupportActivity.onActivityResult. */
     static void confirmRestore(final Activity a, final Uri u) {
         try {
-            new AlertDialog.Builder(a)
-                    .setTitle("恢复存档")
-                    .setMessage("会用这个备份覆盖当前存档（当前存档会先自动备份一份）。恢复后游戏会关闭，请重新打开。")
-                    .setNegativeButton("取消", new DialogInterface.OnClickListener() {
-                        @Override public void onClick(DialogInterface d, int w) { closeIfRestoreOnly(a); }
-                    })
-                    .setOnCancelListener(new DialogInterface.OnCancelListener() {
-                        @Override public void onCancel(DialogInterface d) { closeIfRestoreOnly(a); }
-                    })
-                    .setPositiveButton("恢复", new DialogInterface.OnClickListener() {
-                        @Override public void onClick(DialogInterface d, int w) { restore(a, u); }
-                    }).show();
+            final boolean[] chosen = {false};
+            Pop p = new Pop(a, "恢复存档")
+                    .msg("会用这个备份覆盖当前存档（当前存档会先自动备份一份）。恢复后游戏会关闭，请重新打开。")
+                    .btn("恢复", 0, new Runnable() { @Override public void run() { chosen[0] = true; restore(a, u); } })
+                    .btn("取消", 3, null);
+            p.dlg.setOnDismissListener(new DialogInterface.OnDismissListener() {
+                @Override public void onDismiss(DialogInterface d) { if (!chosen[0]) closeIfRestoreOnly(a); }
+            });
+            p.show();
         } catch (Throwable t) { Log.w(TAG, "confirm", t); }
     }
 

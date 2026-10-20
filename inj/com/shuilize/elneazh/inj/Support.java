@@ -150,7 +150,7 @@ final class Support {
         return dlg;
     }
 
-    private static TextView button(Context c, float d, String text, int fill, int stroke, int textColor, View.OnClickListener l) {
+    static TextView button(Context c, float d, String text, int fill, int stroke, int textColor, View.OnClickListener l) {
         TextView b = new TextView(c);
         b.setText(text);
         b.setTextColor(textColor);
