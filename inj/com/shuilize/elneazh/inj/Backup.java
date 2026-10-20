@@ -84,8 +84,11 @@ final class Backup {
     static String make(Context ctx, String kind) {
         String name = "存档_" + kind + "_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".zip";
         OutputStream out = null;
+        Uri dst = null;
         try {
-            out = openOut(ctx, name);
+            Object[] opened = new Object[2];
+            out = openOut(ctx, name, opened);   // opened[0] = Uri（MediaStore 项）
+            dst = (Uri) opened[0];
             if (out == null) return null;
             Set<String> tables = tableNames(ctx);
             File data = ctx.getFilesDir().getParentFile();
@@ -99,9 +102,15 @@ final class Backup {
                 z.write(("ElneaZH save backup\nfiles=" + n + "\ntime=" + new Date() + "\ndata=" + data + "\next=" + ext
                         + "\n\n" + lst).getBytes("UTF-8"));
                 z.closeEntry();
+                z.finish();
             }
+            // 关键：ZipOutputStream.close() 只 finish、不关底层的 MediaStore 流；不显式 close 的话
+            // resolver 没机会把 SIZE 写回、IS_PENDING 也不会清，列表里就是 1KB（重进菜单时才补上）。
+            try { out.flush(); } catch (Throwable ignored) {}
+            try { out.close(); } catch (Throwable ignored) {}
             out = null;
-            Log.i(TAG, "backup " + name);
+            settle(ctx, dst);
+            Log.i(TAG, "backup " + name + " (" + (dst != null ? size(ctx, dst) : -1) + " B)");
             return name;
         } catch (Throwable t) {
             Log.e(TAG, "backup failed", t);
@@ -182,6 +191,11 @@ final class Backup {
     }
 
     private static OutputStream openOut(Context ctx, String name) throws Exception {
+        return openOut(ctx, name, new Object[2]);
+    }
+
+    /** opened[0] 回填 MediaStore 的 Uri（没有则为 null），供 settle()/size() 用。 */
+    private static OutputStream openOut(Context ctx, String name, Object[] opened) throws Exception {
         if (rootOk(ctx)) {
             File d = rootDir();
             if (d.isDirectory() || d.mkdirs()) return new FileOutputStream(new File(d, name));
@@ -192,11 +206,45 @@ final class Backup {
             v.put(MediaStore.MediaColumns.MIME_TYPE, "application/zip");
             v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOCUMENTS + "/" + DIR);
             Uri u = ctx.getContentResolver().insert(MediaStore.Files.getContentUri("external"), v);
+            opened[0] = u;
             return u == null ? null : ctx.getContentResolver().openOutputStream(u);
         }
         File d = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), DIR);
         if (!d.isDirectory() && !d.mkdirs()) return null;
         return new FileOutputStream(new File(d, name));
+    }
+
+    /** 写完后把 MediaStore 项的 IS_PENDING 清掉并让 resolver notifyChange，列表立刻能读到正确 SIZE。 */
+    private static void settle(Uri u) {
+        settle(CUR, u);
+    }
+
+    /** 进程内最近一次的 Application Context（ZhInit.onCreate 里 setCtx 过）。 */
+    private static Context CUR;
+
+    static void setCtx(Context c) { if (c != null) CUR = c.getApplicationContext(); }
+
+    private static void settle(Context ctx, Uri u) {
+        if (u == null || Build.VERSION.SDK_INT < 29) return;
+        Context c = ctx != null ? ctx : CUR;
+        if (c == null) return;
+        try {
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            c.getContentResolver().update(u, v, null, null);
+        } catch (Throwable ignored) {}
+    }
+
+    /** 单个 uri 的真实大小（-1 = 查不到）。 */
+    private static long size(Context ctx, Uri u) {
+        if (u == null) return -1;
+        Cursor c = null;
+        try {
+            c = ctx.getContentResolver().query(u, new String[]{MediaStore.MediaColumns.SIZE}, null, null, null);
+            if (c != null && c.moveToFirst()) return c.getLong(0);
+        } catch (Throwable ignored) {
+        } finally { if (c != null) try { c.close(); } catch (Throwable ignored) {} }
+        return -1;
     }
 
     /** Keeps only the newest AUTO_KEEP automatic backups this install created; manual ones are never touched. */

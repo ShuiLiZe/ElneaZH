@@ -28,11 +28,18 @@ public final class ZhInit extends ContentProvider {
     private static final String MAP_DIR = "UnityCache/Shared/map_large_en.android/9e41473f5b511831105ea0f1695a843f";
 
     @Override public boolean onCreate() {
+        Backup.setCtx(getContext());
+        // 上传方向的中文名映射（中文名 -> 固定拼音）。只加载词表，不动存档。
+        try { NameFix.load(getContext()); } catch (Throwable t) { Log.e(TAG, "names load failed", t); }
         try { Backup.auto(getContext()); } catch (Throwable t) { Log.e(TAG, "auto backup failed", t); }
         try { deploy(getContext()); } catch (Throwable t) { Log.e(TAG, "deploy failed", t); }
         try { Bundles.run(getContext()); } catch (Throwable t) { Log.e(TAG, "bundles failed", t); }
-        try { SaveNames.run(getContext()); } catch (Throwable t) { Log.e(TAG, "names failed", t); }
         try { About.install(getContext()); } catch (Throwable t) { Log.e(TAG, "about failed", t); }
+        // 上传方向的兜底闸：请求明文里的中文名换成拼音（单向，响应不处理）。
+        try {
+            if (!NetGuard.install(getContext())) Log.w(TAG, "NET gate: no Java-visible hook (see NetGuard)");
+        } catch (Throwable t) { Log.w(TAG, "NET gate failed", t); }
+        try { SelfCheck.run(getContext()); } catch (Throwable t) { Log.w(TAG, "selfcheck failed", t); }
         return true;
     }
 

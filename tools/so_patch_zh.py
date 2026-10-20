@@ -16,8 +16,10 @@ points to the game's own private dir (no root, no /sdcard):  /data/data/jp.co.al
             -> king_stub: first king of a NEW world is 「杨广」, male, Asia(yellow) skin; see king_stub() below.
   0x193e590 (VA 0x1942590) KingData.CreateNewKing: `bl GameSystem.CreateAdult` -> `bl king_stub`.
   0x19a08d4/0x19a08d8 (VA 0x19a48d4/0x19a48d8) HumanData.get_limitFriendCount, player branch:
-            Range(52, 102, 52 + FriendListSlot items) -> Range(888, 888, ...) = player friend limit 888 (local, not premium).
-            NPC branch (32) untouched. Friends are a List grown by addFriend, no fixed buffer.
+            Range(52, 102, 52 + FriendListSlot items) — REMOVED 2026-10: the old patch forced 888 here (see
+            HANDOFF.md「已移除：888 好友上限」). 888 can never come from the stock client (102 is the cap), so the
+            server comparing numbers sees an impossible value; the script now only asserts these two
+            instructions are still the original mov w0,#52 / mov w1,#102.
   0x19c53c8 (VA 0x19c93c8) HumanData.SelectTalkFriend: `add w9,w8,#30` (player bonus) -> `bl king_visit_stub`
             (VA 0x1c05b18, dead tail of InfoMenuPanel.ContactButtonClick after its 0x34-byte support stub, 0x3c bytes).
             When the thinking NPC (x19) is the king and the friend is the player, the score becomes 100 (always picks
@@ -129,12 +131,15 @@ P.append((KV_STUB - 0x4000, kvo, kv))
 kc = so[KV_CALL - 0x4000: KV_CALL - 0x4000 + 4]
 assert kc.hex() == '09790011', 'SelectTalkFriend site moved ' + kc.hex()
 P.append((KV_CALL - 0x4000, kc, struct.pack('<I', 0x94000000 | (((KV_STUB - KV_CALL) >> 2) & 0x3FFFFFF))))
-# ---- 玩家交友上限 888（HumanData.get_limitFriendCount 玩家分支，本地常量，与付费无关）----
-FRIEND_MIN, FRIEND_MAX, FRIEND_LIMIT = 0x19a48d4, 0x19a48d8, 888
-for va, orig, reg in ((FRIEND_MIN, '80068052', 0), (FRIEND_MAX, 'c10c8052', 1)):   # mov w0,#52 / mov w1,#102
+# ---- 玩家交友上限（已移除，见 HANDOFF「已移除：888 好友上限」）----
+# 原补丁把 HumanData.get_limitFriendCount 玩家分支的 Range(52,102) 改成 (888,888)：
+#   VA 0x19a48d4 mov w0,#52 (80068052) / VA 0x19a48d8 mov w1,#102 (c10c8052) -> mov w0,#888 / mov w1,#888
+# 888 不可能出现在原版客户端（原版上限 102），属于服务器侧一眼可辨的异常值，与封号风险直接相关，故移除。
+# 这里只做“恢复原指令”的校验：两个位置必须仍是原版的 mov #52 / mov #102，若已被旧补丁改掉就报错，
+# 保证产出的 so.elsp 一定把这处还原成原版（P 里不再放这两个字节，原样保留即等于原指令）。
+for va, orig in ((0x19a48d4, '80068052'), (0x19a48d8, 'c10c8052')):   # mov w0,#52 / mov w1,#102
     o = so[va - 0x4000: va - 0x4000 + 4]
-    assert o.hex() == orig, 'friend limit site moved %x' % va
-    P.append((va - 0x4000, o, struct.pack('<I', 0x52800000 | (FRIEND_LIMIT << 5) | reg)))
+    assert o.hex() == orig, 'friend limit site changed (%x = %s), input .so must be the original' % (va, o.hex())
 # ---- 设备身份不再取自安卓 ID（解决真机卡维护 / 强制输入账号）----
 # UuidPlugin.GetUUID (VA 0x1c8f410): cached PlayerPrefs uuid -> else AndroidUuidPlugin id (derived from the device,
 # survives clear-data/reinstall; the server had locked that identity) -> else makeUUID (random) -> saved to PlayerPrefs.

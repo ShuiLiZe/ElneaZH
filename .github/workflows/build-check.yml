@@ -1,0 +1,73 @@
+﻿name: build-check
+
+# 分支验证用：只编译，不打 release、不碰 app/keystore 之外的东西。
+on:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+      - name: Python syntax
+        run: python -m py_compile tools/*.py && echo "python ok"
+      - name: Verify base data.unity3d
+        run: |
+          echo "dc1796ffac62ea29796772f320c4218a922216aa417c4689abaeb6c0e917a155  base/data.unity3d" | sha256sum -c -
+      - name: Build localized data.unity3d
+        run: |
+          mkdir -p build
+          FONT=""
+          if [ -f fonts/zh.ttf ]; then FONT="--font fonts/zh.ttf --bmfont fonts/zh.ttf"; fi
+          python tools/build_patch.py base/data.unity3d build/data.unity3d --tr translations $FONT --images images_zh
+      - name: Verify textures, name tables stay ASCII, previews
+        run: |
+          python tools/ci_verify.py base/data.unity3d build/data.unity3d images_zh build/preview
+      - name: Patch IL2CPP metadata (hardcoded strings; name whitelist stays as shipped)
+        run: |
+          cat base/apk/ElneaKingdom_2.10.7.apk.part* > build/base.apk
+          echo "5117bbaaa301ad2e4535280918173da9500cb2c96bab012ce6040bf1a2bcf90c  build/base.apk" | sha256sum -c -
+          unzip -p build/base.apk assets/bin/Data/Managed/Metadata/global-metadata.dat > build/meta_orig.dat
+          python tools/metadata_zh.py build/meta_orig.dat build/meta_zh.dat --tr translations/metadata_literals.json
+      - name: Build no-root payload (names.tsv + so patch + manifest)
+        run: |
+          Z=app/src/main/assets/elneazh; mkdir -p $Z/Contents $Z/map
+          mkdir -p $Z/data && python tools/names_map.py $Z/data/names.tsv
+          cp content_zh/Contents/c_* $Z/Contents/
+          cp content_zh/map_large_en/__data content_zh/map_large_en/__info $Z/map/
+          mkdir -p $Z/bundles && cp content_zh/bundles/*~*.data content_zh/bundles/*~*.info $Z/bundles/
+          (cd content_zh/bundles && for f in *~*.data; do n=${f%.data}; printf '%s\t%s\t%s\n' "${n%%~*}" "${n#*~}" "$(stat -c %s "$f")"; done) > $Z/bundles/index.tsv
+          unzip -p build/base.apk lib/arm64-v8a/libil2cpp.so > build/libil2cpp.so
+          python tools/so_patch_zh.py build/libil2cpp.so $Z/so.elsp
+          unzip -p build/base.apk AndroidManifest.xml > build/manifest_orig.axml
+          sha256sum build/manifest_orig.axml | cut -d' ' -f1 > $Z/manifest_base.sha256
+          python tools/manifest_zh.py build/manifest_orig.axml $Z/AndroidManifest.xml
+      - name: Compile injected Java (classes3.dex sources)
+        run: |
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          PLAT=$(ls -d $ANDROID_HOME/platforms/android-* | sort -V | tail -1)
+          echo "build-tools $BT platform $PLAT"
+          mkdir -p build/inj
+          javac -Xlint:all --release 8 -cp $PLAT/android.jar -d build/inj $(find inj -name '*.java')
+          $BT/d8 --min-api 21 --lib $PLAT/android.jar --output build/inj $(find build/inj -name '*.class')
+          ls -la build/inj/classes.dex
+      - name: Build APK (no release)
+        working-directory: app
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+      - name: Collect APK
+        run: |
+          mkdir -p dist && cp app/build/outputs/apk/release/*.apk dist/ElneaZH-branch.apk && ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ElneaZH-branch-apk
+          path: dist/ElneaZH-branch.apk

@@ -10,6 +10,48 @@ _最后更新：2026-10-20 12:45 CST_
 - 签名本来就固定（app/keystore/elneazh.p12），只有第一次从商店版换汉化版要卸载。
 - App 现在会：检测已装游戏是否是自己签名的汉化版 → 是就提示直接覆盖安装；第一次汉化成功后把原版 APK 存到 App 私有目录（filesDir/orig），以后用它打补丁。没存过的话让用户手动选原版 APK（仓库 base/apk 有）。
 
+## 2026-10-21 00:30 名字：本地存档保持中文，只在上传时换成拼音（单向）
+策略定稿：**不改存档、不改显示**。玩家和 NPC 的中文名照旧留在本地、照旧在界面上显示中文；
+只在数据离开设备（上传 `sns04/*.php`）时把明文里的中文名换成固定拼音；服务器响应里回来的拼音原样显示，不做反向还原。
+
+- 停用旧的「老存档人名转中文」：删除 `inj/.../SaveNames.java`，`ZhInit.onCreate` 里不再调用它。
+  （旧版 CI #62 / 909e224e 那套把存档里的人名改成中文，正是被标记的来源之一。）
+- 名字表不再做英文化：`tools/bmfont_zh.py`、`tools/metadata_zh.py`、`tools/build_patch.py` 保持原样
+  （即 Name 字体与取名白名单仍放行汉字、NPC 名字表仍是中文译文），因为中文现在只留在本地。
+- 新增 `inj/.../NameFix.java`：中文名 → **恒定**拼音。别名表（`SharedPreferences` `elneazh_names`，键 `n:<拼音>`）优先，
+  未命中则用 `names.tsv` 的中文→英文原文，再没有就逐字拼音（纯函数，同输入同输出），并写回别名表；
+  别名表在 `shared_prefs/` 下，`Backup` 已会随备份/恢复一起带走。
+- 新增 `inj/.../Pinyin.java`：`android.icu.text.Transliterator("Han-Latin; Latin-ASCII")`（反射调用，API 29+），
+  API 24–28 退回打包的 `assets/elneazh/data/pinyin.tsv`（GB2312 6763 字，`tools/pinyin_tables.py` 生成）。
+- `inj/.../NetGuard.java` 重写为**单向**闸门：`body()` 只清洗请求体键值里的非 ASCII，`resp()` 原样返回。
+  **代码位置已找到但 Java 侧挂不上**（证据见下），所以闸门目前是「备用+可离线自测」状态，
+  真正的防线在「名字进入游戏前就已经是 ASCII 之外无他」这条路上——见下一条。
+- 新增 `inj/.../SelfCheck.java`：启动时把词表规模、拼音恒定性、闸门行为写进 `files/elneazh_selfcheck.txt`
+  并打 `ElneaZH-SELF` 日志，便于真机一次 `adb logcat -d -s ElneaZH-SELF ElneaZH-NET` 验证。
+
+### 网络栈与加密入口的静态结论（找不到可挂点，记录以免重复挖）
+- 游戏 HTTP 走 `UnityWebRequest`（APK 的 `ScriptingAssemblies.json` 含 `UnityEngine.UnityWebRequestModule.dll`，
+  `libunity.so` 有 41 个 `UnityEngine.Networking.UnityWebRequest::*` 符号）；传输是 native curl，
+  **不经过 okhttp / java.net**——所以拦 Java 的 `CallServerInterceptor`、`HttpURLConnection` 一律无效。
+- `libil2cpp.so`（61MB）里 `acc=` / `lang=` / `sns04` / `althi` / `POST` **0 命中**；`libunity.so` 同样 0 命中。
+  请求体是 C# 层用 `il2cpp_string_new` 内联拼的代码（例：`pvp.php` 唯一引用点 VA 0x17fc6a8 是
+  `mov x8,wzr; stp x21,xzr,[x0]; adrp x20,#0x8d6000; add x20,#0x27c; mov w19,#0x15` 这种对象构造），
+  没有可替换的命名导出函数；il2cpp 的字符串表指针（`0x389c9a8`/`0x389c9b0`）静态初值为 0、运行时才填，
+  **静态定位不到加密入口**。要真正在加密前截明文，只能真机动态 hook（Frida/LSPatch）+ 一条抓包 `acc=` 样本。
+- 已知的接口名（`tools/metadata_zh.py --dump` 可从字面量表取到）：`http://app-elnea.althi.co.jp/sns04/`（字面量 #12315）、
+  `res-elnea`(#12320)、`cdn-elnea`(#12316)，参数名 `acc`(#10187) / `lang`(#12806)，接口 `read.php`/`save2.php`/
+  `recov2.php`/`pvp.php`/`rename.php`/`token.php` 等 27 个 `.php`。
+
+### 未验证 / 风险
+- 闸门在 Java 侧无挂点（上面已说明），所以**上传时是否真的没有汉字，取决于名字进入游戏前是否已转 ASCII**；
+  当前版本没有强制转换玩家输入（取名白名单仍放行汉字），这一点是有意保留的（用户要求本地保持中文）。
+- 真正要收敛风险，下一步应做动态 hook 或要求玩家取名用英文/拼音；等用户给 `acc=` 样本后可继续做解密侧验证。
+
+## 2026-10-20 23:30 已移除：888 好友上限（防封）
+- 移除 tools/so_patch_zh.py 里的 FRIEND_MIN/FRIEND_MAX/FRIEND_LIMIT 与 `mov w0,#888`/`mov w1,#888` 两个补丁字节；VA 0x19a48d4 / 0x19a48d8 现已恢复原指令 `mov w0,#52` / `mov w1,#102`（脚本里只留断言，输入 .so 若已被改过会直接报错）。
+- 原因：原版客户端交友上限就是 102，888 是服务器侧一眼可辨的非法值；get_limitFriendCount 又是每次存档/上传统计都会走到的数据来源，属于典型的“客户端数据与原版不一致”特征。本地多交友的收益远小于封号风险。
+- 国王补丁（CreateNewKing 首个国王「杨广」）与 SelectTalkFriend 补丁保留。注意：补丁本身不含中文，“杨广”两个汉字是 libil2cpp 里 `il2cpp_string_new` 从 so 内字面量构造的，不走存档名字段；若以后发现服务器会看到王的名字，需要再改。
+
 ## 2026-10-20 19:30 真机卡维护 / 强制输入账号（OurPlay 正常）
 - 根因：UuidPlugin.GetUUID 在 PlayerPrefs 没缓存时采用 AndroidUuidPlugin 按设备算出的 ID（清数据、卸载重装都不变），服务器对该身份下发了维护锁（规则模式→维护页；全局模式→登录失败 10 次弹账号框）。OurPlay 沙盒设备 ID 不同所以正常。
 - 修复：tools/so_patch_zh.py 新增 VA 0x1c8f490 `tbz` → nop，不再采用设备 ID，首次随机 makeUUID 后缓存。装新版后需清一次游戏数据（或全新安装）才会换身份。v1.0.81 仍卡维护：新身份 = String.Format(设备串 VA 0x18a2db4, 随机串).Substring(0,41)，设备串在前，截断后仍绑设备。
