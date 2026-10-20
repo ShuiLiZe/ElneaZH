@@ -135,26 +135,15 @@ for va, orig, reg in ((FRIEND_MIN, '80068052', 0), (FRIEND_MAX, 'c10c8052', 1)):
     o = so[va - 0x4000: va - 0x4000 + 4]
     assert o.hex() == orig, 'friend limit site moved %x' % va
     P.append((va - 0x4000, o, struct.pack('<I', 0x52800000 | (FRIEND_LIMIT << 5) | reg)))
-# ---- 维护/账号门禁（_hark/maintenance-login.md 第 5 节）----
-# 全是 4 字节等长原地替换：不写桩、不占洞、不碰上面任何一条。
-#   P_LOGIN_NO_ACCOUNT_B0/B1  TitlePanel.accountCheck：isAccountInput 恒 0，永不 openAccountPanel
-#   P_LOGIN_NO_RETRY          TitlePanel.onErrorLoginRequest1：登录失败 >9 次不再弹「输入账号」
-#   P_UUID_NO_CACHE_0/1       UuidPlugin.GetUUID：不采信 PlayerPrefs["uuid"]，每次冷启动重造 althi_uniq
-# P_UUID_NO_CACHE_* 会让每次冷启动都变成服务器端「新号」；只想进游戏、想留服务器存档的人
-# 可以注释掉下面两行（只留前三行）再生成。
-LOGIN_PATCHES = [
-    ('P_LOGIN_NO_ACCOUNT_B0', 0x1C3E62C, '68A24439', '08008052'),   # ldrb w8,[x19,#0x128] -> mov w8,wzr
-    ('P_LOGIN_NO_ACCOUNT_B1', 0x1C3E630, 'A8000034', '1F2003D5'),   # cbz w8,<open>        -> nop
-    ('P_LOGIN_NO_RETRY',      0x1C3FFB8, '6D000054', '6D000014'),   # b.le -> b (onErrorLoginRequest1+0x8)
-    ('P_UUID_NO_CACHE_0',     0x1C8B478, 'C0040036', '1F2003D5'),   # tbz w0,#0,0x1C8F510  -> nop
-    ('P_UUID_NO_CACHE_1',     0x1C8B490, '80030036', '1F2003D5'),   # tbz w0,#0,0x1C8F500  -> nop
-]
-for _n, _off, _o, _w in LOGIN_PATCHES:
-    _cur = so[_off:_off + 4]
-    if _cur.hex().upper() != _o.upper():
-        print('[warn] %s @0x%X 原字节不符（期望 %s 实际 %s），跳过' % (_n, _off, _o, _cur.hex()))
-        continue
-    P.append((_off, _cur, bytes.fromhex(_w)))
+# ---- 设备身份不再取自安卓 ID（解决真机卡维护 / 强制输入账号）----
+# UuidPlugin.GetUUID (VA 0x1c8f410): cached PlayerPrefs uuid -> else AndroidUuidPlugin id (derived from the device,
+# survives clear-data/reinstall; the server had locked that identity) -> else makeUUID (random) -> saved to PlayerPrefs.
+# `tbz w0,#0,save` after the plugin id (VA 0x1c8f490) -> nop: never adopt the plugin id, always makeUUID once, then cached.
+# Same identity for the whole install; a fresh one after clearing data. OurPlay works because its sandbox has its own id.
+UUID_PLUGIN_CHECK = 0x1c8f490
+o = so[UUID_PLUGIN_CHECK - 0x4000: UUID_PLUGIN_CHECK - 0x4000 + 4]
+assert o.hex() == '80030036', 'GetUUID site moved ' + o.hex()
+P.append((UUID_PLUGIN_CHECK - 0x4000, o, bytes.fromhex('1f2003d5')))
 out = b'ELSP' + struct.pack('<II', 1, len(P))
 for off, o, n in P:
     assert so[off:off+len(o)] == o, hex(off)
