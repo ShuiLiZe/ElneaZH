@@ -148,6 +148,9 @@ final class Backup {
         }
         String nm = f.getName();
         if (nm.endsWith(".tmp") || f.length() > MAX_FILE) return 0;
+        // 只跳第 1 层会漏掉 ext/UnityCache 这类深一层的大目录 → 任意层都按名字跳
+        if (SKIP_DIRS.contains(path.substring(path.indexOf('/') + 1).split("/")[0])) return 0;
+        if (SKIP_DIRS.contains(nm)) return 0;
         if (tables.contains(nm) && (path.endsWith("/zh/" + nm) || path.endsWith("/Contents/" + nm))) return 0;
         if (path.startsWith("shared_prefs/elneazh_backup")) return 0;
         lst.append(path).append('\t').append(f.length()).append('\n');
@@ -485,49 +488,157 @@ final class Backup {
         return null;
     }
 
+    // ---------------- 换身份：最小删除集合 ----------------
+    //
+    // 依据（全部来自 base.apk 静态取证，见 .work/p_keys2.txt / p_cache.txt）：
+    //   登录键名的字面量，global-metadata 索引 —— 'althi_uniq'(10282) 'login_key'(12937) 'uuid'(15217)
+    //   'token'(14859) 'user_id'(15196) user_pass/user_uniq(15200/15205) 'already login!'(10275)
+    //   'login.php'(12935) 'create.php'(11131) — 归在同一个登录流程 (LoginRequest / AccountInputPanel)。
+    //   libil2cpp.so 与 dex 里都搜不到 althi_uniq/login_key → 它们是 C# 字面量，只能在 metadata 里取到。
+    //
+    // 必须保留（删了要重新下载数据包 / 丢汉化）：
+    //   UnityCache/Shared/<bundle>/<hash>/{__data,__info} —— libunity.so 原生 AssetBundle 缓存
+    //        （字面量 'UnityCache'(libunity +0x51xxx) '__data' '__info'），与登录无关。
+    //   files/zh、files/Contents 里的汉化主表（c_* 22 张，tableNames 给名单）。
+    //   shared_prefs/elneazh_*（含 elneazh_names、elneazh_backup 的 last_auto）。
+    //   我们会话自己生成的东西（elneazh_selfcheck.txt、zh_backup/、il2cpp/）。
+    //   PlayerPrefs 里的资源版本键：'assetbundle_version'(10436) 等 —— 只删登录键，不当整体清空。
+    //
+    // 存档 sv1_* 全删：它们存的是旧身份的存档（含旧 PlayerPrefs 之外的角色/家族/世界状态）。
+    static final Set<String> LOGIN_PREF_KEYS = new HashSet<>();
+    static {
+        for (String k : new String[]{
+                "uuid", "login_key", "althi_uniq", "token", "token_id",
+                "user_id", "user_uniq", "user_pass", "user_name", "user_rename",
+                "account", "session", "session_id", "device_id"}) LOGIN_PREF_KEYS.add(k);
+    }
+    /** 这些 prefs 文件本身就是登录凭证（althi_uniq 有时单独存一个 xml）。 */
+    private static final Set<String> LOGIN_PREF_FILES = new HashSet<>();
+    static {
+        for (String n : new String[]{"althi_uniq", "login_key", "uuid", "token"}) LOGIN_PREF_FILES.add(n);
+    }
+
+    static boolean isLoginPrefFile(String fileName) {
+        String b = fileName.toLowerCase(Locale.US);
+        if (b.endsWith(".xml")) b = b.substring(0, b.length() - 4);
+        return LOGIN_PREF_FILES.contains(b);
+    }
+
+    private static boolean isLoginPrefKey(String k) {
+        if (k == null) return false;
+        String s = k.toLowerCase(Locale.US).trim();
+        if (s.startsWith("elneazh_")) return false;          // 我们自己的键永远不动
+        return LOGIN_PREF_KEYS.contains(s);
+    }
+
     /**
-     * 清空游戏本地数据：只删「这份备份登记过、但不在保留白名单里」的文件，所以
-     * 汉化表（zh/Contents 里的主表）、我们自己的 elneazh_* 设置、prefs 备份索引、UnityCache/il2cpp 缓存都留下。
-     * uuid / login_key 所在的那个 prefs xml 会删掉（新身份要重新要一个 id）。
+     * 换身份：只删「明确属于登录凭证 / 旧存档」的东西，数据包与汉化表一概不碰。
+     *  - files/ 与 ext files 下的 sv1_*（存档）、*.ntmp/*.rtmp（写了一半的临时文件）
+     *  - PlayerPrefs 里的登录键（uuid / login_key / althi_uniq / token / user_* …）—— 逐键 remove，
+     *    资源下载 / 版本键（assetbundle_version 等）原样保留
+     *  - althi_uniq 系列独立 prefs xml（files/althi_uniq、shared_prefs/althi_uniq.xml）
+     *  - databases/ 里的账号库（名字含 login/account/token/user 的 .db*）
+     *  - files/althi_uniq 这类无扩展名的凭证文件
+     * UnityCache、汉化表、我们自己的 elneazh_* 全部保留。
      */
     static void wipeForIdentity(Context ctx, Uri backup) {
-        Set<String> keep = tableNames(ctx), idx = indexOf(ctx, backup);
         File data = ctx.getFilesDir().getParentFile();
         File ext = ctx.getExternalFilesDir(null);
-        int del = 0, kept = 0;
-        for (String p : idx) {
-            String base = p.substring(p.lastIndexOf('/') + 1);
-            if (p.startsWith("shared_prefs/")) {
-                if (base.startsWith("elneazh_")) { kept++; continue; }   // 我们的设置（含 elneazh_names）
-            } else {
-                if (p.startsWith("ext/") && (p.startsWith("ext/zh/") || p.startsWith("ext/Contents/"))) {
-                    if (keep.contains(base)) { kept++; continue; }        // 汉化主表
-                }
-                if (p.startsWith("files/") && (p.startsWith("files/zh/") || p.startsWith("files/Contents/"))) {
-                    if (keep.contains(base)) { kept++; continue; }
-                }
-            }
-            File f = null;
-            if (p.startsWith("ext/") && ext != null) f = new File(ext, p.substring(4));
-            else if (p.startsWith("files/") || p.startsWith("shared_prefs/")
-                    || p.startsWith("databases/") || p.startsWith("no_backup/")) f = new File(data, p);
-            if (f == null) continue;
-            try { if (f.isFile() && f.delete()) del++; } catch (Throwable t) { Log.w(TAG, "wipe " + p, t); }
-        }
-        // 没登记但明显是存档的东西也清掉（sv1_*、存档临时文件）
-        for (File root : new File[]{ctx.getFilesDir(), ext}) {
+        int del = 0;
+
+        // 1) 存档 sv1_*（files/zh、files/Contents、ext/zh、ext/Contents 以及这两个根的其它子目录）
+        for (File root : new File[]{ctx.getFilesDir(), ctx.getExternalFilesDir(null)}) {
             if (root == null) continue;
-            for (String d : new String[]{"zh", "Contents"}) {
-                File[] ls = new File(root, d).listFiles();
-                if (ls == null) continue;
-                for (File f : ls) {
-                    String nm = f.getName();
-                    if (!nm.startsWith("sv1_") && !nm.endsWith(".ntmp") && !nm.endsWith(".rtmp")) continue;
-                    try { if (f.isFile() && f.delete()) del++; } catch (Throwable ignored) {}
+            del += deleteSaveFiles(root, 0);
+        }
+
+        // 2) files/ 与 ext files 根下的登录凭证文件（althi_uniq 之类，没有扩展名）
+        for (File root : new File[]{ctx.getFilesDir(), ext, new File(data, "no_backup")}) {
+            if (root == null || !root.isDirectory()) continue;
+            File[] ls = root.listFiles();
+            if (ls == null) continue;
+            for (File f : ls) {
+                if (!f.isFile()) continue;
+                String nm = f.getName().toLowerCase(Locale.US);
+                if (isLoginPrefFile(nm) || nm.equals("althi_uniq") || nm.startsWith("althi_uniq")) {
+                    try { if (f.delete()) { del++; Log.i(TAG, "identity: removed " + f); } } catch (Throwable ignored) {}
                 }
             }
         }
-        Log.i(TAG, "identity wipe: deleted " + del + ", kept " + kept);
+
+        // 3) 独立 prefs xml：shared_prefs/althi_uniq.xml 之类
+        File sp = new File(data, "shared_prefs");
+        File[] sps = sp.listFiles();
+        if (sps != null) for (File f : sps) {
+            if (!f.isFile()) continue;
+            if (isLoginPrefFile(f.getName())) {
+                try { if (f.delete()) { del++; Log.i(TAG, "identity: removed " + f); } } catch (Throwable ignored) {}
+            }
+        }
+
+        // 4) 主 PlayerPrefs：只 remove 登录键，其它（资源版本、设置、音量…）一个不动
+        del += clearLoginPrefs(ctx, prefsName(ctx));
+        del += clearLoginPrefs(ctx, "althi_uniq");
+        del += clearLoginPrefs(ctx, "login_key");
+
+        // 5) databases/ 里的账号库
+        File db = new File(data, "databases");
+        File[] dbs = db.listFiles();
+        if (dbs != null) for (File f : dbs) {
+            if (!f.isFile()) continue;
+            String nm = f.getName().toLowerCase(Locale.US);
+            boolean hit = false;
+            for (String k : new String[]{"login", "account", "token", "user", "session", "althi"})
+                if (nm.contains(k)) { hit = true; break; }
+            if (!hit) continue;
+            try { if (f.delete()) { del++; Log.i(TAG, "identity: removed " + f); } } catch (Throwable ignored) {}
+        }
+
+        Log.i(TAG, "identity wipe (minimal): deleted " + del + "; UnityCache/tables/resource prefs kept");
+    }
+
+    /** 删 root 下（递归 8 层）所有 sv1_* 存档与临时文件，返回删除数。不进 UnityCache/il2cpp。 */
+    private static int deleteSaveFiles(File dir, int depth) {
+        if (dir == null || !dir.isDirectory() || depth > 8) return 0;
+        String dn = dir.getName();
+        if (depth > 0 && (dn.equals("UnityCache") || dn.equals("il2cpp") || dn.equals("zh_backup")
+                || dn.equals("cache") || dn.equals("code_cache"))) return 0;
+        if (depth == 0) {
+            // 根目录下只下探存档可能出现的那几个子目录，别乱扫
+            int n = 0;
+            for (String d : new String[]{"zh", "Contents", "save", "saves"})
+                n += deleteSaveFiles(new File(dir, d), depth + 1);
+            return n;
+        }
+        File[] ls = dir.listFiles();
+        if (ls == null) return 0;
+        int n = 0;
+        for (File f : ls) {
+            if (f.isDirectory()) { n += deleteSaveFiles(f, depth + 1); continue; }
+            String nm = f.getName();
+            if (!nm.startsWith("sv1_") && !nm.endsWith(".ntmp") && !nm.endsWith(".rtmp")) continue;
+            try { if (f.delete()) n++; } catch (Throwable t) { Log.w(TAG, "wipe " + f, t); }
+        }
+        return n;
+    }
+
+    /** 只删登录键；返回删掉的键数。commit 失败也不抛。 */
+    private static int clearLoginPrefs(Context ctx, String name) {
+        try {
+            SharedPreferences sp = ctx.getSharedPreferences(name, Context.MODE_PRIVATE);
+            Map<String, ?> all = sp.getAll();
+            SharedPreferences.Editor e = sp.edit();
+            int n = 0;
+            for (String k : all.keySet()) {
+                String kd = android.net.Uri.decode(k);
+                if (isLoginPrefKey(k) || isLoginPrefKey(kd) || isLoginPrefFile(name)) { e.remove(k); n++; }
+            }
+            if (n > 0) {
+                boolean ok = e.commit();
+                Log.i(TAG, "identity: cleared " + n + " login key(s) from " + name + " ok=" + ok);
+            }
+            return n;
+        } catch (Throwable t) { Log.w(TAG, "clearLoginPrefs " + name, t); return 0; }
     }
 
     /** 恢复备份时把里面带的 uuid / login_key 一起写回（旧身份能直接回去）。 */
@@ -910,11 +1021,10 @@ final class Backup {
                 // 身份（uuid / login_key）一起写回：旧身份解封后恢复即回去
                 File prefsXml = new File(data, "shared_prefs/" + prefsName(a) + ".xml");
                 if (prefsXml.isFile()) restoreIdentityFile(a, prefsXml);
-                // 换成新身份后本机可能已经跑出了新号的文件；恢复旧备份时要先把这些新号的存档清掉，
-                // 否则新旧两份存档混在一起。只删「当前存在、但两份备份都没登记」的存档类文件。
+                // 换成新身份后本机可能已经跑出了新号的存档；恢复旧备份时先删掉这些「备份里没有的 sv1_*」，
+                // 否则新旧两份存档混在一起。只碰 sv1_*，不碰缓存、不碰汉化表。
                 try {
                     Set<String> keep = indexOf(a, u);
-                    Set<String> after = tableNames(a);
                     for (File root : new File[]{a.getFilesDir(), a.getExternalFilesDir(null)}) {
                         if (root == null) continue;
                         for (String d : new String[]{"zh", "Contents"}) {
@@ -922,10 +1032,9 @@ final class Backup {
                             if (ls == null) continue;
                             for (File f : ls) {
                                 String nm = f.getName();
-                                if (!nm.startsWith("sv1_")) continue;
-                                if (after.contains(nm)) continue;   // 汉化主表，留着
+                                if (!nm.startsWith("sv1_") || !f.isFile()) continue;
                                 String rel = (root == a.getFilesDir() ? "files/" : "ext/") + d + "/" + nm;
-                                if (keep.contains(rel) || !f.isFile()) continue;
+                                if (keep.contains(rel)) continue;
                                 if (f.delete()) Log.i(TAG, "restore: removed newer save " + rel);
                             }
                         }

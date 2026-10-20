@@ -175,3 +175,26 @@ _最后更新：2026-10-20 12:45 CST_
 - `tools/verify_identity.py`：复刻 wipe 的保留/删除判定，实测 22 张汉化表 keep、`sv1_*`/playerprefs/login 库 delete、`elneazh_*` keep → `wipe rules OK`。
 - 编译：`python tools/ci_inj.py`（等价 CI 的 `javac --release 8 -cp android.jar`）→ `javac OK, 58 classes`。
 - 未验证：真机。风险点：某些机型 `shared_prefs` 目录被 SELinux 保护读不到时只能走「从内存手写 xml」分支（格式与 SharedPreferences 一致，恢复时由 `restoreIdentityFile` 重新 commit，理论可行）；`databases/` 里的登录库若被游戏打开着，删除后需重开进程生效（本流程本来就会 kill）。
+
+## 2026-10-21 00:05 更换身份：改成最小删除集合（绝不碰数据包）
+
+- 上一版（commit db2e97e）按备份清单整目录删，风险太大：`ext/UnityCache` 就是下载的 AssetBundle 缓存，删了要重下数据包。
+- 现在 `Backup.wipeForIdentity` 只删「明确是登录凭证 / 旧存档」的东西，**白名单式最小删除**：
+
+| 类别 | 处理 | 依据 |
+| --- | --- | --- |
+| `files/{zh,Contents,save,saves}` 及 ext 同位置的 `sv1_*`、`*.ntmp/*.rtmp` | 删 | 存档本体（旧身份的角色/家族/世界状态） |
+| PlayerPrefs 登录键：`uuid` `login_key` `althi_uniq` `token` `token_id` `user_id` `user_uniq` `user_pass` `user_name` `user_rename` `account` `session` `session_id` `device_id` | 逐键 remove | global-metadata 字面量表：`althi_uniq`=10282、`login_key`=12937、`uuid`=15217、`token`=14859、`user_id`=15196、`user_uniq`=15205，与 `already login!`(10275)、`login.php`(12935)、`create.php`(11131) 同属登录流程；libil2cpp.so 与 dex 里 0 命中 → 确认是 C# 字面量（只存在于 metadata） |
+| `shared_prefs/althi_uniq.xml`、`files/althi_uniq` 等独立凭证文件 | 删 | `althi_uniq` 有时单独存一个 xml / 无扩展名文件 |
+| `databases/` 里名字含 login/account/token/user/session/althi 的 `.db*` | 删 | 账号库 |
+| **`UnityCache/Shared/<bundle>/<hash>/{__data,__info}`** | **保留** | libunity.so 原生 AssetBundle 缓存（字面量 `UnityCache` / `__data` / `__info`），与登录无关 |
+| **汉化主表 `c_*`（22 张）** | **保留** | 我们投放的 `zh/Contents` 表 |
+| **`shared_prefs/elneazh_*`（含 `elneazh_names`、`elneazh_backup`）** | **保留** | 我们自己的设置 |
+| **PlayerPrefs 资源/版本键（`assetbundle_version`=10436 等）** | **保留** | 只 remove 登录键，不整体清空 prefs |
+
+- 附带修复：`Backup.add()` 原来的 `SKIP_DIRS` 只跳第 1 层，`ext/UnityCache` 这种深一层的仍会被打进备份 zip（备份因此巨大且慢）→ 改成任意层按名字跳。
+- `restore()` 里"清掉备份没登记的 sv1_*"也收窄为**只碰 `sv1_*`**，不碰缓存与汉化表。
+- 自检：`python tools/verify_identity.py` → `minimal wipe OK`（14 条文件规则 + 9 条 prefs 键规则，含 `UnityCache/__data` keep、`assetbundle_version` keep、`althi_uniq` delete）。
+- 编译：`python tools/ci_inj.py` → `javac OK, 58 classes`。
+- 目标达成路径：删掉登录键后 `UuidPlugin.GetUUID`（so_patch_zh.py 补丁：无缓存 id 就生成随机）会给新 uuid，`althi_uniq` 清空后重新取，AssetBundle 缓存仍在 → **重开不需要重新下载数据包，直接新建人物**。
+- 未验证：真机。若某些机型把资源版本键也放进了上述独立凭证 xml（`althi_uniq.xml`），那份会被整个删掉 → 最坏是重新校验一次版本，不会重下整包（`UnityCache` 在）。
