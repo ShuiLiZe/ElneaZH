@@ -53,12 +53,15 @@ jobs:
           unzip -p build/base.apk assets/bin/Data/Managed/Metadata/global-metadata.dat > build/meta_orig.dat
           python tools/metadata_zh.py build/meta_orig.dat build/meta_zh.dat --tr translations/metadata_literals.json
 
-      - name: Build no-root master-table payload (tables + map + libil2cpp patch + manifest)
+      - name: Build no-root master-table payload (tables + map + bundles + libil2cpp patch + manifest)
         run: |
           Z=app/src/main/assets/elneazh; mkdir -p $Z/Contents $Z/map
           mkdir -p $Z/data && python tools/names_map.py $Z/data/names.tsv
           cp content_zh/Contents/c_* $Z/Contents/
           cp content_zh/map_large_en/__data content_zh/map_large_en/__info $Z/map/
+          mkdir -p $Z/bundles && cp content_zh/bundles/*~*.data content_zh/bundles/*~*.info $Z/bundles/
+          (cd content_zh/bundles && for f in *~*.data; do n=${f%.data}; printf '%s\t%s\t%s\n' "${n%%~*}" "${n#*~}" "$(stat -c %s "$f")"; done) > $Z/bundles/index.tsv
+          cat $Z/bundles/index.tsv
           unzip -p build/base.apk lib/arm64-v8a/libil2cpp.so > build/libil2cpp.so
           python tools/so_patch_zh.py build/libil2cpp.so $Z/so.elsp
           unzip -p build/base.apk AndroidManifest.xml > build/manifest_orig.axml

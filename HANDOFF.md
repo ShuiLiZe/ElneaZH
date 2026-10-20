@@ -1,6 +1,6 @@
 # HANDOFF — 现状（只写当前状态；过程见 docs/CHANGELOG.md，规矩见 AGENTS.md）
 
-_最后更新：2026-10-18 21:00 CST_
+_最后更新：2026-10-20 10:50 CST_
 
 ## 现在能用的版本
 - Release `latest` 的 ElneaZH.apk（每次推送自动构建）。装前先在游戏「Support → 存档数据」备份，卸载原版后安装汉化版（签名不同）。
@@ -70,3 +70,8 @@ _最后更新：2026-10-18 21:00 CST_
 - c_message 中 speaker=Monarch 的 22 条台词改成更浓的四川话（任何在位国王都会说），listener=Monarch（臣民对国王）保持标准中文。
   同步改了 `translations/contents/c_message.json` 和加密的 `content_zh/Contents/c_message`（解析校验通过）。
 - 台词系统按身份匹配，不能按名字绑定"杨广"；改名/年龄/肤色要改存档，婚姻结构未证实前不动。
+
+## 2026-10-20 10:50 下载包贴图（bundle）汉化
+- 14 张下载包贴图已汉化（教程图 5 张 + 活动/扭蛋/琥珀横幅 9 张；地图之前已做 = 共 15 张，缓存里带英文的全部做完）。脚本 `tools/imgzh/bundle_tex.py`，成品 `content_zh/bundles/`，注入 `inj/.../Bundles.java` 启动时覆盖 UnityCache（所有已有 hash 目录）。
+- 待真机验证：装新版后看新手引导图/扭蛋横幅是否中文；若游戏校验 CRC 而重新下载英文版，logcat 看 `ElneaZH: bundles:`，再考虑 hook 下载 URL。
+- 下一步：教程图共 107 张（c_guide 引用），缓存只有 5 张。需要用户在游戏里翻一遍「指南」各页、看看活动页，再把手机 Android/data/jp.co.althi.elnea.en/files/UnityCache/Shared 整个拷到电脑，交给 bundle_tex.py 补框。

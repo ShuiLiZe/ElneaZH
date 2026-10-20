@@ -180,4 +180,15 @@
 - 58fb495a：战斗字（Main_Atlas_jp 的 Guard Break / Counter Break / Counter Damage / Guard / Miss）汉化。CI #63。
 - be7ba74c：国王/存档结构调查 docs/king_research.md；旧工作区盘点 docs/old_workspace_inventory.md。CI #64。
 - 667d29c3：国王（Monarch）22 条台词改川味；tools/nrbf.py。CI #65。
-- 下载包：URL 含运行时版本串，静态无法拼出；改为用已缓存的 bundle 汉化后覆盖 UnityCache（待做）。
+- 下载包：URL 含运行时版本串，静态无法拼出；改为用已缓存的 bundle 汉化后覆盖 UnityCache（见下）。
+
+### 2026-10-20 10:50 下载包贴图汉化 + 注入覆盖 UnityCache
+- 盘点（DSH，_hark/bundles/README §11）：旧工作区缓存 239 个唯一 bundle（Shared 196 + _delta 43），452 张 Texture2D；带英文字的只有 15 张（都叫 *_en），其余是场景/道具/特效图。地图 map_large_en 之前已汉化。
+- 新增 `tools/imgzh/bundle_tex.py`：其余 14 张逐框抹字（中值背景差分 → OpenCV Telea，含 alpha 通道）后用思源黑/宋重写，写回 bundle（统一 RGBA32，LZ4 重新打包，UnityPy 回读误差 0）。
+  - 教程图 fig_000/001/009/010/062：HUD 按钮（限时活动/任务/支援/公告/礼物箱/转移魔法/好友/指南/自动移动，与 Main_Atlas 用词一致）、自动移动地名（同地图）、摘花/爬上/动作按钮、人名塞缪尔/博杜、操作说明。
+  - 横幅：淘金热！、琥珀兑换所（服装和装备 / 道具和染料）、扭蛋广告 6 张（点这里查看详情！、成人/儿童/伊姆和婴儿服装、装备、十连抽保底★★★★以上、零度冰/冰晶、贝戈拉银闪管）。
+- 原件 `content_en/bundles/<bundle>~<hash>.data|.info`，成品 `content_zh/bundles/`，预览 `images_zh/bundles/*_zh.png`。
+- 注入 `inj/.../Bundles.java`（ZhInit 启动时调用，独立 try/catch）：按 assets/elneazh/bundles/index.tsv 写 UnityCache/Shared/<bundle>/<hash>/__data(+__info)，外部和内部 files 目录都写；同名 bundle 已有的其他 hash 目录也覆盖（运行时版本串决定 hash）；大小相同即跳过。
+- CI：build.yml 把 content_zh/bundles 拷到 assets/elneazh/bundles 并生成 index.tsv；Pipeline 把 bundles/ 打进游戏包。
+- 已知：大字抹除处在人物图上有涂抹痕迹；缓存里没有 fig_002…fig_107（教程图共 107 张）和其他活动横幅，要用户在手机上把对应教程看一遍后再拷 UnityCache/Shared 才能继续做。
+

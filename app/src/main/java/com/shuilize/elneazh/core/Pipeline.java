@@ -36,7 +36,7 @@ public final class Pipeline {
 
     /** Index of the APK (in apks) that contains data.unity3d, or -1. */
     private File zhDir;
-    /** Directory with the no-root master-table payload (so.elsp, AndroidManifest.xml, manifest_base.sha256, classes3.dex, Contents/, map/). */
+    /** Directory with the no-root master-table payload (so.elsp, AndroidManifest.xml, manifest_base.sha256, classes3.dex, Contents/, map/, bundles/). */
     public Pipeline setZhDir(File dir) { this.zhDir = dir; return this; }
 
     /** Apply an ELSP v1 byte patch, verifying the original bytes. */
@@ -187,7 +187,7 @@ public final class Pipeline {
             if (ApkRebuilder.hasEntry(apk, "classes3.dex")) throw new FriendlyException("安装包结构不符（已有 classes3.dex）。");
             rep.put(MANIFEST_ENTRY, man);
             rep.put("classes3.dex", new File(zhDir, "classes3.dex"));
-            for (String sub : new String[]{"Contents", "map", "about", "data"}) {
+            for (String sub : new String[]{"Contents", "map", "about", "data", "bundles"}) {
                 File[] fs = new File(zhDir, sub).listFiles();
                 if (fs != null) for (File f : fs) rep.put("assets/elneazh/" + sub + "/" + f.getName(), f);
             }
