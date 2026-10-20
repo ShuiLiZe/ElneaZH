@@ -86,6 +86,11 @@ jobs:
           PY
           ls -la app/src/main/assets
 
+      - name: Build native name gate (request-body CJK filter)
+        run: |
+          python tools/build_gate.py
+          python tools/verify_gate.py
+          ls -la app/src/main/assets/elneagate/*/
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

@@ -53,6 +53,11 @@ jobs:
           unzip -p build/base.apk AndroidManifest.xml > build/manifest_orig.axml
           sha256sum build/manifest_orig.axml | cut -d' ' -f1 > $Z/manifest_base.sha256
           python tools/manifest_zh.py build/manifest_orig.axml $Z/AndroidManifest.xml
+      - name: Build native name gate (libelneagate.so, arm64-v8a + armeabi-v7a)
+        run: |
+          python tools/build_gate.py
+          python tools/verify_gate.py
+          ls -la app/src/main/assets/elneagate/*/
       - name: Compile injected Java (classes3.dex sources)
         run: |
           BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
@@ -62,8 +67,10 @@ jobs:
           javac -Xlint:all --release 8 -cp $PLAT/android.jar -d build/inj $(find inj -name '*.java')
           $BT/d8 --min-api 21 --lib $PLAT/android.jar --output build/inj $(find build/inj -name '*.class')
           ls -la build/inj/classes.dex
-      - name: Verify injected logic offline (wipe rules)
-        run: python tools/verify_identity.py
+      - name: Verify injected logic offline (wipe rules + upload name filter)
+        run: |
+          python tools/verify_identity.py
+          python tools/verify_upload_names.py
       - name: Build APK (no release)
         working-directory: app
         run: |
