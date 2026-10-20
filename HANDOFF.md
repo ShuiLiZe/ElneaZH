@@ -41,7 +41,7 @@ javac/d8 inj -> javac OK, 57 classes
 JVM 直跑 Harness: filterNames OK / blob 96 -> 88 roundtrip OK notLonger OK -> RESULT PASS
 ```
 
-**风险（真机未验证）**：跳板的机器码（`tools/net_gate_so.py`，待接）本机没有真机跑过；`bl` 到 Java 的 JNI 往返（`NetGuard.ensure`）还没接完，目前 `NetGuard.install()` 只探测、返回 false 并写明「闸门未激活」，绝不阻断启动。跳板接好之前，这一层是**死代码**，不会影响游戏。
+**风险（真机未验证）**：跳板的机器码（`tools/net_gate_so.py`，尚未落地）本机没有真机跑过；`bl` 到 Java 的 JNI 往返（`NetGuard.ensure`）还没接完，目前 `NetGuard.install()` 只探测、返回 false 并写明「闸门未激活」，绝不阻断启动。跳板接好之前，这一层是**死代码**，不会影响游戏。
 
 **解密工具**：`tools/decrypt_acc.py`（`--key/--iv` 支持 hex 与 base64，`--mode cbc|ecb`，`--selftest` 自检全绿），用来核对抓包里的 `acc=`。
 
