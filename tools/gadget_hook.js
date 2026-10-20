@@ -106,7 +106,8 @@ function loadApi() {
     fieldStaticGetValue: exp('il2cpp_field_static_get_value', 'void', ['pointer', 'pointer']),
     stringNew: exp('il2cpp_string_new', 'pointer', ['pointer']),
     typeObject: exp('il2cpp_class_get_type', 'pointer', ['pointer']),
-    objNew: exp('il2cpp_object_new', 'pointer', ['pointer'])
+    objNew: exp('il2cpp_object_new', 'pointer', ['pointer']),
+    clsMethods: exp('il2cpp_class_get_methods', 'pointer', ['pointer', 'pointer'])
   };
   return api;
 }
@@ -174,8 +175,9 @@ function dumpCrypto(IL) {
       for (var j = 0; j < mlist.length; j++) {
         var m = A.methFromName(k, Memory.allocUtf8String(mlist[j]), -1);
         if (!m || m.isNull()) continue;
-        var fp = A.methPointer(m);
-        var va = fp.isNull() ? 0 : fp.sub(IL.base);
+        var fp = (A.methPointer && A.methPointer(m)) || m.readPointer();
+        if (!fp || fp.isNull()) continue;
+        var va = fp.sub(IL.base);
         log('METHOD ' + ns + '.' + kn + '::' + mlist[j] + ' va=' + fp + ' fileoff=' + va + ' (' + va.toString(16) + ')');
         if (!fp.isNull() && /set_Key|set_IV|CreateEncryptor|CreateDecryptor|ToBase64String/.test(mlist[j])) {
           hookManaged(ns + '.' + kn + '::' + mlist[j], fp);
@@ -248,6 +250,116 @@ function hookManaged(tag, fp) {
   } catch (e) { log('attach fail ' + tag + ': ' + e); }
 }
 
+
+/* ---------------- 4. v3: find the real cipher (game does NOT use .NET crypto) ---------------- */
+function fptr(A, m) { var f = (A.methPointer && A.methPointer(m)) || m.readPointer(); return (f && !f.isNull()) ? f : null; }
+function findCls(A, asms, count, ns, nm) {
+  for (var q = 0; q < count; q++) {
+    var im = A.asmImage(asms.add(q * Process.pointerSize).readPointer());
+    if (!im || im.isNull()) continue;
+    var k = A.clsFromName(im, Memory.allocUtf8String(ns), Memory.allocUtf8String(nm));
+    if (k && !k.isNull()) return k;
+  }
+  return null;
+}
+function bt(ctx, IL) {
+  try {
+    return Thread.backtrace(ctx, Backtracer.FUZZY).slice(0, 8).map(function (p) {
+      return (p.compare(IL.base) >= 0 && p.compare(IL.base.add(IL.size)) < 0) ? 'il+' + p.sub(IL.base).toString(16) : DebugSymbol.fromAddress(p).toString();
+    }).join(' < ');
+  } catch (e) { return 'bt?' + e; }
+}
+var PLAINN = 0;
+var CJK = /[\u3040-\u30ff\u4e00-\u9fff]/;
+function v3(IL) {
+  var A = loadApi();
+  var dom = A.domainGet(), n = Memory.alloc(4), asms = A.asmGet(dom, n), count = n.readU32();
+  // a) Convert.ToBase64String(byte[]) : static, arg0 = ciphertext. backtrace -> the encrypt function
+  var kc = findCls(A, asms, count, 'System', 'Convert');
+  if (kc) ['ToBase64String'].forEach(function (mn) {
+    var m = A.methFromName(kc, Memory.allocUtf8String(mn), 1); var f = m && !m.isNull() ? fptr(A, m) : null;
+    if (!f) { log('v3 no Convert.' + mn); return; }
+    Interceptor.attach(f, { onEnter: function (a) {
+      var b = bytesFromArray(a[0], IL); if (!b || b.length < 32 || b.length % 16) return;
+      log('B64IN len=' + b.length + ' hex=' + ab2hex(b, 32) + ' BT ' + bt(this.context, IL)); flush();
+    } });
+    log('v3 hooked Convert.' + mn + ' @il+' + f.sub(IL.base).toString(16));
+  });
+  // b) Encoding.GetBytes(string): plaintext right before encryption
+  [['System.Text', 'Encoding'], ['System.Text', 'UTF8Encoding'], ['System.Text', 'ASCIIEncoding'], ['System.Text', 'UnicodeEncoding']].forEach(function (cn) {
+    var k = findCls(A, asms, count, cn[0], cn[1]); if (!k) return;
+    var m = A.methFromName(k, Memory.allocUtf8String('GetBytes'), 1); var f = m && !m.isNull() ? fptr(A, m) : null;
+    if (!f) return;
+    try { Interceptor.attach(f, { onEnter: function (a) {
+      var s = managedBytes(a[1], IL); if (!s || !s.len || s.len < 8 || s.len > 200000) return;
+      if (PLAINN > 400) return;
+      var t = s.text; if (!(/[=&]/.test(t) || CJK.test(t) || t.charAt(0) == '{')) return;
+      PLAINN++; log('PLAIN ' + cn[1] + ' len=' + s.len + ' cjk=' + CJK.test(t) + ' ' + JSON.stringify(t.slice(0, 4000)) + ' BT ' + bt(this.context, IL)); flush();
+    } }); log('v3 hooked ' + cn[1] + '.GetBytes'); } catch (e) { log('v3 attach ' + cn[1] + ': ' + e); }
+  });
+  // c) list game-side methods whose name looks like a cipher (Assembly-CSharp etc.)
+  if (!A.clsMethods) { log('v3 no class_get_methods'); return; }
+  var hits = 0;
+  for (var i = 0; i < count; i++) {
+    var img = A.asmImage(asms.add(i * Process.pointerSize).readPointer());
+    var an = cstr(A.imgName(img)) || '';
+    if (/^(mscorlib|System|Mono|Unity|UnityEngine|Newtonsoft|DOTween|TextMeshPro)/i.test(an)) continue;
+    var cc = A.imgClassCount(img);
+    for (var c = 0; c < cc; c++) {
+      var k = A.imgClass(img, c); if (!k || k.isNull()) continue;
+      var it = Memory.alloc(Process.pointerSize); it.writePointer(ptr(0)); var m;
+      while ((m = A.clsMethods(k, it)) && !m.isNull()) {
+        var mn = cstr(A.methName(m)) || '';
+        if (!/crypt|cipher|aes|rijn|xor|obfus|scramble|encode|decode|acc/i.test(mn)) continue;
+        var f = fptr(A, m); if (!f) continue;
+        var tag = an + ' ' + (cstr(A.clsNamespace(k)) || '') + '.' + (cstr(A.clsName(k)) || '') + '::' + mn;
+        log('GAMEMETHOD ' + tag + ' va=il+' + f.sub(IL.base).toString(16));
+        if (++hits <= 60) hookManaged(tag, f);
+      }
+    }
+  }
+  log('v3 game methods=' + hits);
+}
+
+
+/* ---------------- 5. v4: game Cipher (static, RJ256) : dump all args + return ---------------- */
+function anyVal(p, IL) {
+  if (!p || p.isNull()) return 'null';
+  try { if (p.compare(ptr(0x100000)) < 0) return 'int:' + p.toInt32(); } catch (e) {}
+  var b = bytesFromArray(p, IL);
+  var s = managedBytes(p, IL);
+  var out = [];
+  if (s && s.len > 0 && s.len < 200000 && /^[\x09\x0a\x0d\x20-\x7e\u00a0-\uffff]*$/.test(s.text.slice(0, 64))) out.push('str(' + s.len + ')' + JSON.stringify(s.text.slice(0, 4000)));
+  if (b && b.length > 0) out.push('bytes(' + b.length + ') hex=' + ab2hex(b, 96) + ' b64=' + base64(b.length > 3000 ? b.slice(0, 3000) : b));
+  return out.length ? out.join(' | ') : ('ptr:' + p);
+}
+function hookAll(tag, f, IL) {
+  Interceptor.attach(f, {
+    onEnter: function (a) {
+      var parts = [];
+      for (var i = 0; i < 4; i++) parts.push('a' + i + '=' + anyVal(a[i], IL));
+      log('CALL ' + tag + ' ' + parts.join(' ;; '));
+    },
+    onLeave: function (r) { log('RET  ' + tag + ' ' + anyVal(r, IL)); flush(); }
+  });
+  log('v4 hooked ' + tag);
+}
+function v4(IL) {
+  var A = loadApi();
+  var dom = A.domainGet(), n = Memory.alloc(4), asms = A.asmGet(dom, n), count = n.readU32();
+  [['', 'Cipher', null], ['', 'HttpSystem', /Crypt/i], ['', 'AccountData', /Crypt|Iv/i]].forEach(function (c) {
+    var k = findCls(A, asms, count, c[0], c[1]); if (!k) { log('v4 no class ' + c[1]); return; }
+    var it = Memory.alloc(Process.pointerSize); it.writePointer(ptr(0)); var m;
+    while ((m = A.clsMethods(k, it)) && !m.isNull()) {
+      var mn = cstr(A.methName(m)) || '';
+      if (c[2] && !c[2].test(mn)) continue;
+      if (mn == '.ctor' || mn == '.cctor') continue;
+      var f = fptr(A, m); if (!f) continue;
+      try { hookAll(c[1] + '::' + mn, f, IL); } catch (e) { log('v4 attach ' + mn + ': ' + e); }
+    }
+  });
+}
+
 /* ---------------- 3. socket fallback ---------------- */
 function hookSockets() {
   ['send', 'sendto', 'write'].forEach(function (nm) {
@@ -275,8 +387,9 @@ function onIl2cpp() {
   if (!IL) return false;
   log('libil2cpp.so base=' + IL.base + ' size=' + IL.size + ' (file offset of a VA = VA - 0x4000 in the code LOAD)');
   try { hookStrings(IL); } catch (e) { log('strings: ' + e); }
-  try { dumpCrypto(IL); } catch (e) { log('crypto: ' + e); }
+  /* dumpCrypto disabled: game does not use .NET crypto */
   try { hookSockets(); } catch (e) { log('sockets: ' + e); }
+  try { v4(IL); } catch (e) { log('v4: ' + e); }
   flush();
   return true;
 }
