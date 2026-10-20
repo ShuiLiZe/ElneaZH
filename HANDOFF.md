@@ -90,3 +90,10 @@ _最后更新：2026-10-20 12:45 CST_
 - tools/so_patch_zh.py 新增：CreateNewKing 里的 `bl CreateAdult`（VA 0x1942590）→ king_stub（VA 0x1c43db0，TitlePanel 联系按钮函数的死代码尾部）。世界第一位国王（GenerationData.currentGeneration<0）改为 CreateAdult("杨广", 原家族, 男) + 肤色 Asia(黄)；其余情况原样。
 - 年龄 6（游戏成年年龄常量 6；5 岁是儿童，当国王风险大），出生日期游戏自己算；未婚有保证（新建人物，setupNewKing 无婚配）。老存档不受影响。详情 docs/king_research.md §8。
 - 测：装新版 → 标题「新游戏」开新档，捏完人进游戏，过完第一天（或开档后看国王/王宫、人物名册），国王应叫「杨广」、男、黄皮、6 岁、未婚。若开档就闪退或国王还是随机名：`adb logcat -b crash` 发来。
+
+
+## 2026-10-20 13:00 玩家交友上限 888（libil2cpp 补丁，待真机验证）
+- DSH 会话 session-a5a3246b 调查（旧工作区 _hark\friends.md），Hark 复核反汇编：上限在 HumanData.get_limitFriendCount（VA 0x19a485c），玩家分支 = Range(52, 102, 52 + 好友栏扩充道具 4021 数量)，NPC 固定 32；纯本地常量，调用链里没有 Premium/服务器。
+- tools/so_patch_zh.py：VA 0x19a48d4 `mov w0,#52`→`#888`、0x19a48d8 `mov w1,#102`→`#888`，玩家上限恒 888；NPC 32 不动。好友表是 addFriend 动态扩容的 List，无固定缓冲。
+- 注意：DSH 报告里把 VA 当成文件偏移（应 −0x4000），且建议整函数改 ret，未采用。好友栏扩充道具此后无意义。
+- 测：装新版 → 人物「朋友」页上限显示 888，交友超过 52/102 不再挤掉旧朋友。

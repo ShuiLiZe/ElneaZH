@@ -205,3 +205,10 @@
 - 反汇编（文件偏移 = RVA − 0x4000，旧 king.md 用错偏移导致“符号错配”结论作废）：初始国王由 dailyPhaseSupplementKing(0x1952b24) → KingData.CreateNewKing(0x194249c) → GameSystem.CreateAdult(0x1a756d4) 新建，age=AgeAdult=6，外观随机，setupNewKing 无婚配。
 - so_patch_zh.py：0x1942590 bl CreateAdult → bl king_stub(0x1c43db0)；king_stub 判断 [[KingData+0x18]+0x18]<0（首代）时用 il2cpp_string_new("杨广")、Male、再 HumanData.ChangeSkinColor(Asia)；否则尾调用原 CreateAdult。stub 放在 TitlePanel.ContactButtonClick 被支援补丁替换后剩下的死代码里（已扫全 so 无外部分支跳入）。
 - 需求「约 5 岁」按游戏最小成年年龄 6 实现（5 岁为儿童）。DSH 复核会话 session-fb9f4490（Elnea-Localization 分组，11:55 开始）。
+
+
+## 2026-10-20 13:00 玩家交友上限 888（libil2cpp 补丁，待真机验证）
+- DSH 会话 session-a5a3246b 调查（旧工作区 _hark\friends.md），Hark 复核反汇编：上限在 HumanData.get_limitFriendCount（VA 0x19a485c），玩家分支 = Range(52, 102, 52 + 好友栏扩充道具 4021 数量)，NPC 固定 32；纯本地常量，调用链里没有 Premium/服务器。
+- tools/so_patch_zh.py：VA 0x19a48d4 `mov w0,#52`→`#888`、0x19a48d8 `mov w1,#102`→`#888`，玩家上限恒 888；NPC 32 不动。好友表是 addFriend 动态扩容的 List，无固定缓冲。
+- 注意：DSH 报告里把 VA 当成文件偏移（应 −0x4000），且建议整函数改 ret，未采用。好友栏扩充道具此后无意义。
+- 测：装新版 → 人物「朋友」页上限显示 888，交友超过 52/102 不再挤掉旧朋友。

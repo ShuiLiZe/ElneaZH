@@ -15,6 +15,9 @@ points to the game's own private dir (no root, no /sdcard):  /data/data/jp.co.al
   0x1c3fdb0 (VA 0x1c43db0, dead tail of TitlePanel.ContactButtonClick after the 0x34-byte support stub, func ends 0x1c43e1c)
             -> king_stub: first king of a NEW world is 「杨广」, male, Asia(yellow) skin; see king_stub() below.
   0x193e590 (VA 0x1942590) KingData.CreateNewKing: `bl GameSystem.CreateAdult` -> `bl king_stub`.
+  0x19a08d4/0x19a08d8 (VA 0x19a48d4/0x19a48d8) HumanData.get_limitFriendCount, player branch:
+            Range(52, 102, 52 + FriendListSlot items) -> Range(888, 888, ...) = player friend limit 888 (local, not premium).
+            NPC branch (32) untouched. Friends are a List grown by addFriend, no fixed buffer.
   (AccountSettingPanel.ContactButtonClick VA 0x1b8cf88, the forgot-password help, is left original.)
 Format: b'ELSP', u32 1, u32 n, n * (u32 off, u32 len, orig, u32 len, new). Usage: so_patch_zh.py libil2cpp.so out.elsp"""
 import struct, sys
@@ -95,6 +98,12 @@ P.append((KING_STUB - 0x4000, so[KING_STUB - 0x4000: KING_STUB - 0x4000 + len(ks
 kc = so[KING_CALL - 0x4000: KING_CALL - 0x4000 + 4]
 assert struct.unpack('<I', kc)[0] == 0x94000000 | (((CREATE_ADULT - KING_CALL) >> 2) & 0x3FFFFFF), 'CreateNewKing call site moved'
 P.append((KING_CALL - 0x4000, kc, struct.pack('<I', 0x94000000 | (((KING_STUB - KING_CALL) >> 2) & 0x3FFFFFF))))
+# ---- 玩家交友上限 888（HumanData.get_limitFriendCount 玩家分支，本地常量，与付费无关）----
+FRIEND_MIN, FRIEND_MAX, FRIEND_LIMIT = 0x19a48d4, 0x19a48d8, 888
+for va, orig, reg in ((FRIEND_MIN, '80068052', 0), (FRIEND_MAX, 'c10c8052', 1)):   # mov w0,#52 / mov w1,#102
+    o = so[va - 0x4000: va - 0x4000 + 4]
+    assert o.hex() == orig, 'friend limit site moved %x' % va
+    P.append((va - 0x4000, o, struct.pack('<I', 0x52800000 | (FRIEND_LIMIT << 5) | reg)))
 out = b'ELSP' + struct.pack('<II', 1, len(P))
 for off, o, n in P:
     assert so[off:off+len(o)] == o, hex(off)
