@@ -288,11 +288,13 @@ final class Backup {
 
     private static void showList(final Activity a, final List<Item> items) {
         final boolean root = rootOk(a);
-        Pop p = new Pop(a, "存档管理");
-        p.msg((root ? "备份位置：手机存储根目录 /" : "备份位置：Documents/") + DIR
-                + (items.isEmpty() ? "\n还没有备份。" : "\n共 " + items.size() + " 份，点一份可以恢复或删除。"));
-        for (final Item it : items) p.row(head(it), size(it), new Runnable() { @Override public void run() { itemMenu(a, it); } });
-        p.btn("立即备份", 0, new Runnable() { @Override public void run() {
+        Pop p = new Pop(a, "存档备份");
+        if (items.isEmpty()) p.msg("还没有备份。");
+        for (final Item it : items) p.item(head(it), size(it),
+                new Runnable() { @Override public void run() { confirmRestore(a, it.uri); } },
+                new Runnable() { @Override public void run() { confirmDelete(a, it); } });
+        if (!root) p.link("备份放在 Documents/" + DIR + "，点这里改放到根目录", new Runnable() { @Override public void run() { askRoot(a); } });
+        p.btn("备份当前存档", 0, new Runnable() { @Override public void run() {
             toast(a, "正在备份存档…");
             new Thread(new Runnable() { @Override public void run() {
                 String n = make(a, "手动");
@@ -300,49 +302,23 @@ final class Backup {
                 manage(a);
             }}).start();
         }});
-        if (!root) p.btn("改放到根目录", 1, new Runnable() { @Override public void run() { askRoot(a); } });
-        p.btn("从文件里找备份", 1, new Runnable() { @Override public void run() { Support.restore(a); } });
         p.btn("关闭", 3, null);
         p.show();
     }
 
-    private static void itemMenu(final Activity a, final Item it) {
-        new Pop(a, head(it))
-                .msg("大小 " + size(it))
-                .btn("恢复这个备份", 0, new Runnable() { @Override public void run() { confirmRestore(a, it.uri); } })
-                .btn("查看里面有哪些文件", 1, new Runnable() { @Override public void run() { showInfo(a, it); } })
-                .btn("删除这个备份", 2, new Runnable() { @Override public void run() { confirmDelete(a, it); } })
-                .btn("返回", 3, new Runnable() { @Override public void run() { manage(a); } })
-                .show();
-    }
-
-    private static void showInfo(final Activity a, final Item it) {
-        String txt;
-        try (ZipInputStream z = new ZipInputStream(a.getContentResolver().openInputStream(it.uri))) {
-            StringBuilder sb = new StringBuilder(); ZipEntry e; int n = 0;
-            while ((e = z.getNextEntry()) != null) {
-                if (e.getName().equals("elneazh_backup.txt")) continue;
-                n++; sb.append(e.getName()).append('\n');
-            }
-            txt = "共 " + n + " 个文件：\n" + sb;
-        } catch (Throwable t) { txt = "读不了：" + t; }
-        new Pop(a, "备份内容").msg(txt)
-                .btn("返回", 3, new Runnable() { @Override public void run() { itemMenu(a, it); } }).show();
-    }
-
     private static void confirmDelete(final Activity a, final Item it) {
         new Pop(a, "删除备份")
-                .msg("确定删除「" + head(it) + "」？删了就找不回来了。")
+                .msg("删除「" + head(it) + "」？删了就找不回来了。")
                 .btn("删除", 2, new Runnable() { @Override public void run() {
                     boolean ok = false;
                     try {
                         if ("file".equals(it.uri.getScheme())) ok = new File(it.uri.getPath()).delete();
                         else ok = a.getContentResolver().delete(it.uri, null, null) > 0;
                     } catch (Throwable t) { Log.w(TAG, "delete", t); }
-                    toast(a, ok ? "已删除" : "删不掉（可能是重装前的旧备份，请用文件管理删除）");
+                    toast(a, ok ? "已删除" : "删不掉，请用文件管理删除");
                     manage(a);
                 }})
-                .btn("取消", 3, new Runnable() { @Override public void run() { itemMenu(a, it); } })
+                .btn("取消", 3, new Runnable() { @Override public void run() { manage(a); } })
                 .show();
     }
 
@@ -402,6 +378,56 @@ final class Backup {
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
             lp.topMargin = (int) (8 * d);
             rows.addView(b, lp);
+            return this;
+        }
+        /** One backup: text on the left, small 读取 / 删除 buttons on the right. */
+        Pop item(String head, String sub, final Runnable load, final Runnable del) {
+            LinearLayout b = new LinearLayout(a);
+            b.setOrientation(LinearLayout.HORIZONTAL);
+            b.setGravity(Gravity.CENTER_VERTICAL);
+            int p = (int) (10 * d);
+            b.setPadding((int) (12 * d), p, p, p);
+            b.setBackground(Support.round(Support.CREAM_DARK, Color.argb(0x99, 0x7A, 0x4B, 0x24), 1.5f * d, 10 * d));
+            LinearLayout txt = new LinearLayout(a);
+            txt.setOrientation(LinearLayout.VERTICAL);
+            TextView h = new TextView(a);
+            h.setText(head); h.setTextColor(Support.BROWN); h.setTextSize(14); h.setTypeface(Typeface.DEFAULT_BOLD);
+            txt.addView(h);
+            TextView s2 = new TextView(a);
+            s2.setText(sub); s2.setTextColor(Support.BROWN_TEXT); s2.setTextSize(12);
+            txt.addView(s2);
+            b.addView(txt, new LinearLayout.LayoutParams(0, -2, 1f));
+            b.addView(small("读取", Support.ORANGE, Support.ORANGE_DARK, load));
+            b.addView(small("删除", Color.rgb(0xC6, 0x3C, 0x2B), Color.rgb(0x8E, 0x22, 0x16), del));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+            lp.topMargin = (int) (8 * d);
+            rows.addView(b, lp);
+            return this;
+        }
+        private TextView small(String text, int fill, int stroke, final Runnable r) {
+            TextView t = new TextView(a);
+            t.setText(text); t.setTextColor(Color.WHITE); t.setTextSize(14); t.setTypeface(Typeface.DEFAULT_BOLD);
+            t.setGravity(Gravity.CENTER);
+            StateListDrawable st = new StateListDrawable();
+            st.addState(new int[]{android.R.attr.state_pressed}, Support.round(stroke, stroke, 2 * d, 8 * d));
+            st.addState(new int[0], Support.round(fill, stroke, 2 * d, 8 * d));
+            t.setBackground(st);
+            t.setClickable(true);
+            t.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { go(r); } });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams((int) (56 * d), (int) (36 * d));
+            lp.leftMargin = (int) (6 * d);
+            t.setLayoutParams(lp);
+            return t;
+        }
+        Pop link(String text, final Runnable r) {
+            TextView t = new TextView(a);
+            t.setText(text); t.setTextColor(Support.ORANGE_DARK); t.setTextSize(12); t.setGravity(Gravity.CENTER);
+            t.setPaintFlags(t.getPaintFlags() | android.graphics.Paint.UNDERLINE_TEXT_FLAG);
+            t.setClickable(true);
+            t.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { go(r); } });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+            lp.topMargin = (int) (10 * d);
+            rows.addView(t, lp);
             return this;
         }
         Pop btn(String text, int style, final Runnable r) {

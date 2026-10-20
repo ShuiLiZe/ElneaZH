@@ -116,14 +116,14 @@ final class Support {
             card.addView(qrBox, qlp);
         }
 
-        card.addView(button(a, d, "存档管理（备份 / 恢复 / 删除）", ORANGE, ORANGE_DARK, Color.WHITE, new View.OnClickListener() {
+        card.addView(button(a, d, "存档备份", ORANGE, ORANGE_DARK, Color.WHITE, new View.OnClickListener() {
             @Override public void onClick(View v) { Backup.manage(a); }
         }));
         TextView bk = new TextView(a);
         bk.setTextColor(BROWN_TEXT);
         bk.setTextSize(12);
         bk.setGravity(Gravity.CENTER);
-        bk.setText("备份默认在「Documents/" + Backup.DIR + "」，在存档管理里授权后改到根目录「/" + Backup.DIR + "」；卸载不丢，启动自动备份。");
+        bk.setText("每次启动自动备份，卸载游戏也不会丢。");
         LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-1, -2);
         bp.topMargin = (int) (6 * d);
         card.addView(bk, bp);
