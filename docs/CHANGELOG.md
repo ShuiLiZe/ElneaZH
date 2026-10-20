@@ -2,6 +2,43 @@
 
 > 这是给"接手的人或下一次会话"的交付文件：项目现在做到哪、怎么继续。每次有进展都会更新。
 
+## 2026-10-21 04:10 单机模式：扩展包 / 资源下载的放行规则（feat/offline-share）
+
+用户补充需求：已下载的扩展包单机必须照常可用；纯静态 CDN 下载可放行，带身份信息的一律拦并提示。
+
+**先查了事实，再定规则**（避免凭猜测开口子）：
+- `Assets/Script` 782 个 `.cs` 里网络相关的只有 `HttpSystem` / `HttpRequest` / `AssetBundleManager` /
+  `Unity5Purchase` / `UnityIAPManager`，全部走同一个 `HttpSystem`——**没有独立的扩展包下载通道**。
+- 资源清单与 bundle 基址**由服务器下发**（`HttpSystem.listURL` / `assetBundleURL` / `cacheFlag`，
+  `AssetBundleManager.getAssetBundleURL()`），客户端没有硬编码 CDN 基址。
+- `/sns04/` 四个入口都要 `key_header_info` + `addUniqArg` 鉴权头（含账号与设备标识）。
+- 游戏自身有「离线领取」分支（`OfflineData` / `IsOfflineActive` / `successOfflineHttp` 等），
+  说明它本来就预期「离线时沿用上次数据」。
+
+**结论**：client 拿不到「不带身份信息的纯静态下载地址」，所以**不给下载开口子**——
+开了只会变成「先发 listURL（带设备码）拿地址、再放行 bundle」的隐性上传通道。
+规则集中在 `Offline.allowWhileOffline(String)`：只放行「非游戏服务器 且 非资源下载形状」的地址。
+
+**改动**：
+- `Offline.java`：新增 `isAssetDownload()`（`.bundle`/`.unity3d`/`.ab`/`.assetbundle`/`assetbundle`/`manifest`）、
+  `downloadClass()`（`DL_ASSET`/`DL_SNSPHP`/`DL_OTHER`）、`allowWhileOffline()`、`downloadHint()`
+  （*「单机模式下不能下载资源/扩展包：请关闭单机模式，下载完再开启。已下载的内容可以照常游玩。」*）、
+  `host()`/`path()` 抽成独立纯函数；`limits()` 加一条「已下载的资源/扩展包照常可用」；WRITE 表补 `ad.php`。
+- `NetBlocker.java`：新增 `ASSET_HITS` 计数、`assetHits()`、`downloadTip()`；`note()` 里区分
+  ASSET 下载并单独打日志（`offline: intercepted ASSET download ... (先关单机模式再下载)`）。
+- `Support.java`：单机开着时多一行红棕提示「资源/扩展包：已下载的照常可用；要下载新的，请先关闭单机模式。」
+  开/关时同步显隐；`offlineText()` 单机时附带 `NetBlocker.downloadTip()`。
+- `SelfCheck.java`：probe 输出加 `asset=`，新增 `offline asset downloads blocked:` 与 `offline download hint:`。
+- 测试：`OfflineTest` 79 → **99 项**（新增资源下载拦截/识别/分类/提示语/非游戏服务器放行）；
+  `verify_offline.py` 65 → **75 项**（新增 allowWhileOffline 无「无条件放行」分支、闸门统计与提示接线）；
+  顺手修了 `verify_offline.py` 里一条因 `isGameServer` 重构后失效的小写规整断言
+  （改成查它调用的 `host()`）。
+- `HANDOFF.md`：新增「扩展包/资源下载在单机模式下的处理」一节，**写明放行/拦截的域名与路径清单**、
+  不开口子的理由、以及「游戏若每次启动都校验 bundle 版本则退回只拦写请求」的限制。
+
+本地验证：`verify_offline.py` 75/75、`OfflineTest` 99/99；`javac --release 8 -Xlint:all` 全绿；
+`d8 --min-api 21` 出 `classes.dex`（100,488 字节）；`manifest_zh.py` 对原版 axml 往返通过。
+
 ## 2026-10-21 03:40 第二批「单机模式」+ 第三批「分享 / 导出」（feat/offline-share）
 
 分支 `feat/offline-share`，从 `fix/anti-flag`（25d3f3e）切出，**不合并 main、不发 Release**。

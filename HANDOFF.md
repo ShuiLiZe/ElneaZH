@@ -34,6 +34,55 @@ _最后更新：2026-10-21 03:40 CST_
 - 若 Unity 确实绕过，下一步只能真机动态 hook（Frida/LSPatch）或在 native 层拦，
   那时才谈得上「彻底」。**没有**为了「看起来能拦」去伪造登录回包或改服务器侧状态。
 
+### 扩展包 / 资源下载在单机模式下的处理（2026-10-21 补充）
+
+**先说查到的事实**（免得下次再猜）：
+
+- 游戏**没有独立的扩展包下载通道**。`Assets/Script` 全表 782 个 `.cs`，网络相关的只有
+  `GameSystem/HttpSystem.cs`、`HttpRequest.cs`、`AssetBundleManager.cs`、`Unity5Purchase.cs`、
+  `UnityIAPManager.cs`，全部走同一个 `HttpSystem`。
+- 资源清单与 bundle 基址**是服务器下发的，客户端没有硬编码 CDN**：
+  global-metadata 里 `HttpSystem` 的 `listURL` / `assetBundleURL` / `cacheFlag` 三个字段，
+  以及 `AssetBundleManager.getAssetBundleURL()` / `getEnvironmentURL()` / `getManifestURL()` /
+  `initializeLoadAssetBundleInfo()` / `downloadingData` / `PreLoadData` / `assetCacheData`。
+  新增的 bundle（教程图、扭蛋横幅等）落在 `files/UnityCache/Shared/`（见本文件 153~154 行）。
+- `/sns04/` 的四个入口（`app-` / `cdn-` / `res-` / 裸域）都要 `key_header_info` + `addUniqArg`
+  的鉴权头（**带账号与设备标识**）。所以「不带身份信息的纯静态下载」在这游戏里根本拿不到地址。
+- 游戏自己有一套「离线领取」流程（`OfflineData` / `IsOfflineActive` /
+  `successOfflineHttp` / `successOfflineCheckHttp` / `errorOfflineCheckHttp`），
+  这也是判断「离线时哪些读取可以沿用上次结果」的依据。
+
+**据此的放行规则（当前实现）**：
+
+| 类别 | 例子 | 单机时 | 说明 |
+|---|---|---|---|
+| 已下载的 bundle / 存档 | `files/UnityCache/Shared/*`、本地存档 | **照常可用** | 纯本地读，不碰网络，本闸门也不拦 file:// |
+| 游戏服务器上的资源/扩展包下载 | `https://*althi.co.jp/sns04/**/*.bundle`、`*.unity3d`、`assetbundle`、`manifest` | **拦**（本机回 200 `{}`） | 地址要靠服务器下发，而下发请求带设备码 |
+| 游戏服务器上的 PHP 接口（读/写/登录） | `read.php` / `load.php` / `save2.php` / `login.php` … | **拦** | 真单机：一个字节都不出 |
+| 非游戏服务器的地址 | 广告、Unity 遥测、别人的 CDN | **不拦** | 与游戏存档/身份无关（Unity 遥测也发设备信息，但不在本闸门范围，见下） |
+
+- 规则集中在 `Offline.allowWhileOffline(String)` 一处，`Offline.isAssetDownload()` 做资源下载识别，
+  `Offline.downloadClass()` 分 `DL_ASSET` / `DL_SNSPHP` / `DL_OTHER`（只用于日志与提示）。
+- 单机时真拦到下载，`NetBlocker.assetHits()` 会加一，Support 弹窗里那行红字提示随之出现：
+  **「资源/扩展包：已下载的照常可用；要下载新的，请先关闭单机模式。」**
+  以及完整提示语 `Offline.downloadHint()`：*「单机模式下不能下载资源/扩展包：请关闭单机模式，
+  下载完再开启。已下载的内容可以照常游玩。」*
+- **为什么没给「纯静态 CDN 放行」开口子**：因为客户端拿不到「不带身份信息」的地址——
+  清单和基址都在服务器上，先要发 `listURL`（带设备码）才拿到 bundle URL。开口子就变成
+  「先上传身份换地址、再放行下载」的隐性通道，与「一个字节都不出手机」自相矛盾。
+  日后若真出现独立静态 CDN，只改 `Offline.allowWhileOffline` 这一处即可（有单测盯着它）。
+
+**放行的域名/路径清单**（写死在这里，改代码必须同步改这段）：
+- 放行：**非** `*.althi.co.jp` 且**非**资源下载形状的地址。即 host 不是 `althi.co.jp` / `.althi.co.jp`
+  后缀，且路径不以 `.bundle` `.unity3d` `.ab` `.assetbundle` 结尾、不含 `assetbundle` / `manifest`。
+- 拦截：host ∈ {`althi.co.jp`, `app-elnea.althi.co.jp`, `cdn-elnea.althi.co.jp`, `res-elnea.althi.co.jp`,
+  以及任何 `.althi.co.jp` 子域} **且** 路径含 `/sns04/` —— 覆盖 100% 的接口与资源下载入口。
+
+**已知限制（真机要验）**：已下载 bundle 能否在单机下直接用，取决于游戏是否每次启动都向服务器
+校验 bundle 版本/购买解锁状态。静态看 `AssetBundleManager` 会走 `manifest` 拉版本，一旦被拦，
+游戏可能报「需要下载」或退化成使用缓存。真机验证项见下方清单第 3 条；如果确认它每次都要校验，
+而拦掉后又不能进游戏，应退回「只拦写请求（save2/save/kpi 等）+ 放行读请求」，而不是伪造回包。
+
 ### 分享 / 导出（第三批）
 入口都在同一个 Support 弹窗的「分享 / 导出」区，三个按钮各自独立 try/catch，出错只 Toast：
 
@@ -52,9 +101,9 @@ _最后更新：2026-10-21 03:40 CST_
   （备份目录 `/sdcard/艾尔尼亚存档备份` 在 Android 10 上要能读）。
 
 ### 离线验证（CI 里跑，不需要手机）
-- `python tools/verify_offline.py`：65 项源码级护栏（判定范围/端点表/回包/文案/入口/try-catch）。
-- `java com.shuilize.elneazh.inj.OfflineTest`：79 项**真跑 Java**（`tools/offline_test/`，
-  android 类用极小 stub）。这两条已接进 `.github/workflows/build-check.yml`。
+- `python tools/verify_offline.py`：75 项源码级护栏（判定范围/端点表/回包/文案/入口/try-catch/下载放行规则）。
+- `java com.shuilize.elneazh.inj.OfflineTest`：99 项**真跑 Java**（`tools/offline_test/`，
+  android 类用极小 stub），含扩展包下载的单机拦截与放行边界。这两条已接进 `.github/workflows/build-check.yml`。
 
 ## 现在能用的版本
 - Release `latest` 的 ElneaZH.apk（每次推送自动构建）。装前先在游戏「Support → 存档数据」备份，卸载原版后安装汉化版（签名不同）。

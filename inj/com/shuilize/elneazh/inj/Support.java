@@ -202,6 +202,17 @@ final class Support {
         stp.topMargin = (int) (6 * d);
         card.addView(state, stp);
 
+        // 单机开着时再挂一行「资源下载要先关单机」，红棕色，点了不做事，纯粹提醒。
+        final TextView dl = new TextView(a);
+        dl.setTextColor(Color.rgb(0x8B, 0x2E, 0x1A));
+        dl.setTextSize(12);
+        dl.setLineSpacing(0, 1.25f);
+        dl.setText("资源/扩展包：已下载的照常可用；要下载新的，请先关闭单机模式。");
+        dl.setVisibility(on[0] ? View.VISIBLE : View.GONE);
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, -2);
+        dlp.topMargin = (int) (4 * d);
+        card.addView(dl, dlp);
+
         toggle.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 try {
@@ -215,7 +226,9 @@ final class Support {
                     toggle.setTextColor(next ? Color.WHITE : BROWN);
                     toggle.setBackground(round(next ? ORANGE : CREAM_DARK, next ? ORANGE_DARK : BROWN, 2.5f * d, 10 * d));
                     state.setText(offlineText(next));
-                    Toast.makeText(a, next ? "单机模式已开启：游戏完全离线，数据不外发" : "单机模式已关闭：恢复正常联网",
+                    dl.setVisibility(next ? View.VISIBLE : View.GONE);
+                    Toast.makeText(a, next ? "单机模式已开启：游戏完全离线，数据不外发（要下载资源请先关闭）"
+                                    : "单机模式已关闭：恢复正常联网",
                             Toast.LENGTH_SHORT).show();
                 } catch (Throwable t) {
                     Log.w(TAG, "offline toggle", t);
@@ -235,8 +248,14 @@ final class Support {
         StringBuilder b = new StringBuilder();
         b.append(Offline.summary(on)).append('\n');
         for (String s : Offline.limits()) b.append("· ").append(s).append('\n');
-        b.append(on ? "登录/上传等请求都在本机被接住，手机不发任何数据给游戏服务器。"
-                : "开启后游戏完全离线运行：连登录请求都不发，设备信息不外泄。\n导出/导入存档请用下面「存档备份」里的功能。");
+        if (on) {
+            b.append("登录/上传等请求都在本机被接住，手机不发任何数据给游戏服务器。");
+            String tip = NetBlocker.downloadTip();
+            if (!tip.isEmpty()) b.append('\n').append(tip);
+            b.append('\n').append("资源地址本来要连服务器才拿得到，所以下载要先关单机。");
+        } else {
+            b.append("开启后游戏完全离线运行：连登录请求都不发，设备信息不外泄。\n导出/导入存档请用下面「存档备份」里的功能。");
+        }
         return b.toString();
     }
 

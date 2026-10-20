@@ -76,8 +76,10 @@ if m_host and m_int:
 
     check("althi.co.jp" in host_body or "althi.co.jp" in off, "isGameServer 认 althi.co.jp")
     check("sns04" in host_body, "isGameServer 认 sns04")
-    check("toLowerCase" in host_body or "lc(" in host_body,
-          "isGameServer 做了小写规整（大写域名也拦得住）")
+    # host()/path() 里统一做小写规整（isGameServer 直接调它们）
+    norm = body_of(off, r"static\s+String\s+host\s*\(String\s+\w+\)\s*\{(.*?)\n    \}") or ""
+    check(("toLowerCase" in norm) or ("lc(" in norm),
+          "host() 做了小写规整（大写域名也拦得住；isGameServer 走 host()）")
     check("startsWith(\".\")" in host_body or "endsWith(\".\" +" in host_body or "\".\" + DOMAIN" in host_body,
           "isGameServer 按 host 后缀判定（不是 contains，防 althi.co.jp.evil.com）")
     check("contains(\"althi.co.jp\")" not in host_body,
@@ -145,6 +147,26 @@ if m_nt:
     check("\\t" in nb or "\\u0009" in nb, "对照表是 TAB 分隔（粘进表格不乱）")
     check("共 " in nb, "对照表末尾带条数统计")
     check("中文" in nb and "拼音" in nb, "对照表带表头说明")
+
+# ---------------------------------------------------------------- 扩展包 / 资源下载
+
+off_src = read("Offline.java")
+check("allowWhileOffline" in off_src, "Offline 有 allowWhileOffline（下载放行规则集中一处）")
+check("isAssetDownload" in off_src, "Offline 能识别资源/扩展包下载")
+check("downloadHint" in off_src, "Offline 提供「请关闭单机模式下载」提示语")
+check("关闭单机模式" in off_src, "提示语里写了要关闭单机模式")
+m_aw = re.search(r"static\s+boolean\s+allowWhileOffline\s*\(.*?\)\s*\{(.*?)\n    \}", off_src, re.S)
+check(m_aw is not None, "allowWhileOffline 有实现体")
+if m_aw:
+    body = m_aw.group(1)
+    check("isGameServer" in body, "放行规则里排除游戏服务器（不开口子）")
+    check("isAssetDownload" in body, "放行规则里排除资源下载")
+    check("return true" not in body.replace("return !", ""),
+          "没有「无条件放行」的分支（除!isGameServer&&!isAssetDownload 外）")
+
+nb = read("NetBlocker.java")
+check("assetHits" in nb, "闸门统计被拦下载（界面提示用）")
+check("downloadTip" in nb, "闸门能给界面一句下载提示")
 
 # ---------------------------------------------------------------- manifest
 

@@ -61,12 +61,15 @@ final class SelfCheck {
             for (String u : probes) {
                 r.append("  classify ").append(Offline.describe(u))
                         .append(" write=").append(Offline.isWriteRequest(u))
+                        .append(" asset=").append(Offline.isAssetDownload(u))
                         .append(" blockedWhenOffline=").append(!NetBlocker.allow(u, true))
                         .append(" allowedWhenOnline=").append(NetBlocker.allow(u, false))
                         .append('\n');
             }
             r.append("offline gate installed: ").append(NetBlocker.installed()).append('\n');
             r.append("offline blocked so far: ").append(NetBlocker.hits()).append('\n');
+            r.append("offline asset downloads blocked: ").append(NetBlocker.assetHits()).append('\n');
+            r.append("offline download hint: ").append(Offline.downloadHint()).append('\n');
             r.append("share: ").append(Share.describe()).append('\n');
             r.append("name table lines: ").append(Share.nameTableText(NameFix.aliasSnapshot()).split("\n").length).append('\n');
         } catch (Throwable t) {

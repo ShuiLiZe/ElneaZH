@@ -48,6 +48,7 @@ final class NetBlocker {
     private static Context APP;
     private static ProxySelector prevProxy;
     private static final AtomicInteger INTERCEPTED = new AtomicInteger();
+    private static final AtomicInteger ASSET_HITS = new AtomicInteger();
     private static final Set<String> SEEN = Collections.synchronizedSet(new java.util.HashSet<String>());
     private static final ConcurrentHashMap<String, Integer> HITS = new ConcurrentHashMap<>();
 
@@ -110,12 +111,27 @@ final class NetBlocker {
     private static void note(String url) {
         INTERCEPTED.incrementAndGet();
         String php = Offline.describe(url);
+        if (Offline.isAssetDownload(url)) {
+            ASSET_HITS.incrementAndGet();
+            if (SEEN.add("asset:" + php)) {
+                Log.i(TAG, "offline: intercepted ASSET download " + php
+                        + " -> local reply, nothing sent (先关单机模式再下载)");
+            }
+        }
         HITS.merge(php, 1, Integer::sum);
         if (SEEN.add(php)) {
-            Log.i(TAG, "offline: intercepted " + php + (Offline.isWriteRequest(url) ? " (upload)" : " (read)")
+            Log.i(TAG, "offline: intercepted " + php + (Offline.isWriteRequest(url) ? " (upload)"
+                    : Offline.isReadRequest(url) ? " (read)" : " (sns04)")
                     + " -> local reply, nothing sent");
         }
     }
+
+    /**
+     * 单机期间被拦下的「资源/扩展包下载」次数。
+     * 界面拿它在单机开着时提示「已下载的照常可用，新下载要先关单机」——
+     * 只有真发生了下载拦截才提示，避免每局都弹。
+     */
+    static int assetHits() { return ASSET_HITS.get(); }
 
     // ---------------- handler 工厂 ----------------
 
@@ -267,6 +283,13 @@ final class NetBlocker {
 
     /** 供 SelfCheck 打印。 */
     static String describe() {
-        return "factory=" + factoryInstalled + " proxy=" + proxyInstalled + " intercepted=" + INTERCEPTED.get();
+        return "factory=" + factoryInstalled + " proxy=" + proxyInstalled
+                + " intercepted=" + INTERCEPTED.get() + " assetBlocked=" + ASSET_HITS.get();
+    }
+
+    /** 单机开着时，界面要给的那句下载提示（没线索时返回空串）。 */
+    static String downloadTip() {
+        if (ASSET_HITS.get() <= 0) return "";
+        return Offline.downloadHint();
     }
 }

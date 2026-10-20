@@ -85,6 +85,31 @@ public final class OfflineTest {
         for (String w : new String[]{"云存档", "好友", "邮件", "PVP", "本地存档"}) {
             ok(limits.contains(w), "说明里写了「" + w + "」");
         }
+        // 7. 扩展包 / 资源下载：单机时一律拦，且说明里写明要先关单机
+        String[] assets = {
+                S + "pack/asset.bundle",
+                S + "assetbundle/manifest",
+                S + "res/abc.unity3d",
+                "https://app-elnea.althi.co.jp/sns04/ReadResourceInfo.php",
+                "https://res-elnea.althi.co.jp/sns04/bundle/AssetBundle",
+        };
+        for (String u : assets) {
+            ok(Offline.intercept(u, true), "单机时资源下载被拦: " + u);
+            ok(!Offline.allowWhileOffline(u), "allowWhileOffline=false: " + u);
+        }
+        ok(Offline.isAssetDownload(S + "pack/asset.bundle"), "bundle 后缀识别为资源下载");
+        ok(Offline.isAssetDownload(S + "assetbundle/manifest"), "assetbundle 路径识别为资源下载");
+        ok(!Offline.isAssetDownload(S + "save2.php"), "存档接口不算资源下载");
+        ok(Offline.downloadClass(S + "x.bundle") == Offline.DL_ASSET, "downloadClass=DL_ASSET");
+        ok(Offline.downloadClass(S + "save.php") == Offline.DL_SNSPHP, "downloadClass=DL_SNSPHP");
+        ok(Offline.downloadClass("https://cdn.example.com/a.zip") == Offline.DL_OTHER, "downloadClass=DL_OTHER");
+        ok(Offline.downloadHint().contains("关闭单机模式"), "下载提示语写明要先关单机");
+        ok(limits.contains("已下载"), "说明里写了「已下载的照常可用」");
+
+        // 非游戏服务器的下载不受单机影响（别的 App 的静态资源）
+        ok(Offline.allowWhileOffline("https://cdn.example.com/a.zip"), "非游戏服务器资源放行");
+        ok(!Offline.intercept("https://cdn.example.com/a.zip", true), "非游戏服务器不拦");
+
         System.out.println();
         System.out.println(n + " checks, " + fail + " failed");
         if (fail > 0) System.exit(1);
