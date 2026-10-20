@@ -28,6 +28,7 @@ public final class ZhInit extends ContentProvider {
     private static final String MAP_DIR = "UnityCache/Shared/map_large_en.android/9e41473f5b511831105ea0f1695a843f";
 
     @Override public boolean onCreate() {
+        try { Backup.auto(getContext()); } catch (Throwable t) { Log.e(TAG, "auto backup failed", t); }
         try { deploy(getContext()); } catch (Throwable t) { Log.e(TAG, "deploy failed", t); }
         try { Bundles.run(getContext()); } catch (Throwable t) { Log.e(TAG, "bundles failed", t); }
         try { SaveNames.run(getContext()); } catch (Throwable t) { Log.e(TAG, "names failed", t); }
