@@ -1,6 +1,6 @@
 # HANDOFF — 现状（只写当前状态；过程见 docs/CHANGELOG.md，规矩见 AGENTS.md）
 
-_最后更新：2026-10-20 11:50 CST_
+_最后更新：2026-10-20 12:45 CST_
 
 ## 现在能用的版本
 - Release `latest` 的 ElneaZH.apk（每次推送自动构建）。装前先在游戏「Support → 存档数据」备份，卸载原版后安装汉化版（签名不同）。
@@ -84,3 +84,9 @@ _最后更新：2026-10-20 11:50 CST_
 - 按钮字 SystemText s367「联系我们」→「交流群与支持」。账号设置里忘记密码的「联系」（AccountSettingPanel）保持原版网页表单，方便找回账号。
 - 首次启动弹窗也换成同一个对话框，KEY 改 shown_v2（老用户更新后再看到一次）。
 - 测：标题画面右下「支援」→「交流群与支持」应弹出对话框；点「加入 QQ 群」应跳 QQ/浏览器。若点了没反应：`adb logcat | grep -i -E "ElneaZH|elneazh|Unity"` 看 OpenURL 是否发出 intent。
+
+## 2026-10-20 12:45 新开档初始国王 =「杨广」（libil2cpp 补丁，待真机验证）
+- 新世界的国王不是开档时建的，而是每日阶段 dailyPhaseSupplementKing → KingData.CreateNewKing 里 CreateAdult(随机男/女名, 随机家族, NextSex) 新建（6 岁成年、单身）。
+- tools/so_patch_zh.py 新增：CreateNewKing 里的 `bl CreateAdult`（VA 0x1942590）→ king_stub（VA 0x1c43db0，TitlePanel 联系按钮函数的死代码尾部）。世界第一位国王（GenerationData.currentGeneration<0）改为 CreateAdult("杨广", 原家族, 男) + 肤色 Asia(黄)；其余情况原样。
+- 年龄 6（游戏成年年龄常量 6；5 岁是儿童，当国王风险大），出生日期游戏自己算；未婚有保证（新建人物，setupNewKing 无婚配）。老存档不受影响。详情 docs/king_research.md §8。
+- 测：装新版 → 标题「新游戏」开新档，捏完人进游戏，过完第一天（或开档后看国王/王宫、人物名册），国王应叫「杨广」、男、黄皮、6 岁、未婚。若开档就闪退或国王还是随机名：`adb logcat -b crash` 发来。

@@ -199,3 +199,9 @@
 - 方案：改 libil2cpp 两处函数体（TitlePanel 0x1c43d74、InfoMenuPanel 0x1c05ae4）为 `il2cpp_string_new("elneazh://support")` → `Application.OpenURL`（VA 0x333c0e8）；Unity 6000.3 的 OpenURL 发 ACTION_VIEW intent，由新加的透明 `SupportActivity` 接住，弹 `Support.java` 对话框。AccountSettingPanel（忘记密码）的联系不动。
 - 「联系原作者」改为 mailto 原作者支持邮箱（原网页表单无法从 Java 调起；邮箱取自 metadata 字面量 elnea_support_en@althi.co.jp）。
 - s367 联系我们 → 交流群与支持；About 首次弹窗复用 Support 对话框，KEY shown_v2。CI 增加 aapt2 检查 SupportActivity。
+
+
+## 2026-10-20 12:45 新开档初始国王「杨广」
+- 反汇编（文件偏移 = RVA − 0x4000，旧 king.md 用错偏移导致“符号错配”结论作废）：初始国王由 dailyPhaseSupplementKing(0x1952b24) → KingData.CreateNewKing(0x194249c) → GameSystem.CreateAdult(0x1a756d4) 新建，age=AgeAdult=6，外观随机，setupNewKing 无婚配。
+- so_patch_zh.py：0x1942590 bl CreateAdult → bl king_stub(0x1c43db0)；king_stub 判断 [[KingData+0x18]+0x18]<0（首代）时用 il2cpp_string_new("杨广")、Male、再 HumanData.ChangeSkinColor(Asia)；否则尾调用原 CreateAdult。stub 放在 TitlePanel.ContactButtonClick 被支援补丁替换后剩下的死代码里（已扫全 so 无外部分支跳入）。
+- 需求「约 5 岁」按游戏最小成年年龄 6 实现（5 岁为儿童）。DSH 复核会话 session-fb9f4490（Elnea-Localization 分组，11:55 开始）。

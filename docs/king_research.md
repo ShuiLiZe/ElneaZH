@@ -715,3 +715,31 @@ for rec in records:                      # 记录以 (id, name, data25, tail9|No
 6. `initGeneration` 字面值（`.cctor` 0x1943828）。
 7. `NameMale_en` 改后新开局是否立即生效（`NameData.loader` 缓存时机）。
 8. 长体/短体 family body 中 GameDate 位置不一致，`marriageDay` 与 `lastAccess` 哪个在前，未证实。
+
+
+---
+
+## 8. 2026-10-20 12:40 结论更正 + 新开档「杨广」补丁（已实现）
+
+**更正**：dump.cs 每个方法都标了 `Offset`，**文件偏移 = RVA − 0x4000**（代码段 LOAD vaddr 0x1555780 / offset 0x1551780）。上面 §1–§3.5 里“script.json/符号错配、函数头找不到”的说法，都是把 RVA 当文件偏移反汇编造成的，作废。按正确偏移反汇编，符号与函数体完全对得上。
+
+**初始国王怎么来（已证实，capstone 反汇编）**：
+- 新开档时 `CharacterCreatePanel.beginNewGame`（0x1b5a000）只调 `MakePlayer` 建玩家，不建国王。
+- 世界没有国王时，每日阶段 `dailyPhaseSupplementKing`（0x1952b24）调 `KingData.CreateNewKing`（0x194249c）。这是全 so 唯一调用 CreateNewKing 的地方。
+- CreateNewKing：已有国王（CurrentId≠0）直接返回；`recoverBeforeKing` 在 BeforeId=0（新世界）时返回 false；然后
+  `sex = SaveInfo.get_NextSex()`（男女交替）→ `GameSystem.CreateAdult(NameData.Name(sex), NameData.Family, sex)`（0x1a756d4；年龄 = `ProfileData.get_AgeAdult()` = **6**，外观传 null = 随机，新家族）→ GenerationData / NewGeneration → `setupNewKing`（0x1941fa0：newRoyal、职业、搬进王宫、DelCandidate 等，**没有任何婚配调用**）。
+  ⇒ 初始国王 = 新建的、单身的 6 岁成年人。这也解释了样本存档为什么没有 King 标志（国王还没在每日阶段生成）。
+- `KingData.ctor`（0x1941e50）建 `GenerationData(initGen=-1, who=0)`，所以“世界第一位国王”就是 `[[KingData+0x18]+0x18]`（currentGeneration）< 0 时创建的那个；之后无继承人的新国王 currentGeneration ≥ 0。
+- `ProfileData.set_IsKing` 只被 get_CostumeId 和 WorldData.Load 调用（读档修正），不是生成路径。
+
+**补丁（tools/so_patch_zh.py，ELSP 新增两项）**：
+| VA | 文件偏移 | 原 | 新 |
+|---|---|---|---|
+| 0x1942590 | 0x193e590 | `bl 0x1a756d4`（CreateAdult） | `bl 0x1c43db0`（king_stub） |
+| 0x1c43db0 | 0x1c3fdb0 | TitlePanel.ContactButtonClick 尾部死代码（前 0x34 字节已被「支援」补丁替换，函数到 0x1c43e1c；全 so 无其它分支跳入 0x1c43da8–0x1c43e1c） | king_stub（0x60 字节） |
+
+king_stub：`x19`=KingData（调用点处）。kingData 为空或 currentGeneration ≥ 0 → 原样尾调用 CreateAdult；否则
+`CreateAdult(il2cpp_string_new("杨广"), 原家族名, Male=2)` → `HumanData.ChangeSkinColor(Asia=1)`（0x19a5330 → ProfileData.ChangeSkinColor，改 appearance.skinCol）。
+
+**与需求的对应**：名=杨广（家族名仍随机，长名显示为「杨广」+家族名，短名就是杨广）；男；黄皮；**年龄 6**：游戏成年年龄就是 6（`get_AgeAdult` 返回常量 6），5 岁是学生/儿童，当国王会走儿童职业/上学逻辑，风险大，所以取最年轻的成年 6 岁（=“约 5 岁、年轻”），出生日期由 HumanData 构造函数按当日自动推算，无需手算；**未婚：保证**（新建人物、setupNewKing 无婚配）。外貌（五官、发型、发色）仍随机，没有强行指定。
+只影响新世界的第一位国王；老存档已有国王的不受影响；以后国王死且无继承人时新国王仍随机。

@@ -12,6 +12,9 @@ points to the game's own private dir (no root, no /sdcard):  /data/data/jp.co.al
             mov x1,xzr; bl UnityEngine.Application.OpenURL (VA 0x333c0e8); ldp x29,x30,[sp],#16; ret; str
             Unity sends ACTION_VIEW elneazh://support -> injected SupportActivity (manifest_zh.py) shows 交流与支持.
   0x1c01ae4 InfoMenuPanel.ContactButtonClick (VA 0x1c05ae4, in-game Support menu) -> same stub.
+  0x1c3fdb0 (VA 0x1c43db0, dead tail of TitlePanel.ContactButtonClick after the 0x34-byte support stub, func ends 0x1c43e1c)
+            -> king_stub: first king of a NEW world is 「杨广」, male, Asia(yellow) skin; see king_stub() below.
+  0x193e590 (VA 0x1942590) KingData.CreateNewKing: `bl GameSystem.CreateAdult` -> `bl king_stub`.
   (AccountSettingPanel.ContactButtonClick VA 0x1b8cf88, the forgot-password help, is left original.)
 Format: b'ELSP', u32 1, u32 n, n * (u32 off, u32 len, orig, u32 len, new). Usage: so_patch_zh.py libil2cpp.so out.elsp"""
 import struct, sys
@@ -36,11 +39,62 @@ def support_stub(va):
 # file offset = VA - 0x4000 in the code segment
 STUBS = [(0x1c43d74, 'fe57bea9f44f01a954f30090f5df0090f30300aa88067e39b5ae44f928010037e0df009000ac44f9e885eb97e0df00b000d040f9'),  # TitlePanel
          (0x1c05ae4, None)]  # InfoMenuPanel (in-game Support menu); AccountSettingPanel's contact (password help) stays original
+# ---- 初始国王「杨广」 ----
+# KingData.CreateNewKing (VA 0x194249c): when there is no king and no heir it does
+#   sex = SaveInfo.get_NextSex(); CreateAdult(NameData.Name(sex), NameData.Family, sex)  (age = AgeAdult = 6, random look)
+#   then GenerationData/NewGeneration + setupNewKing (no marriage anywhere -> a fresh, single adult).
+# KingData.ctor makes GenerationData(initGen=-1); so the FIRST king of a world is the one created while
+# [[KingData+0x18]+0x18] (currentGeneration) < 0. Only that case is changed; later heirless kings stay random.
+KING_CALL = 0x1942590          # bl CreateAdult inside CreateNewKing (x19 = KingData there)
+KING_STUB = 0x1c43db0
+CREATE_ADULT = 0x1a756d4       # GameSystem.CreateAdult(string pname, string fname, SexCode sex)
+STRING_NEW = 0x172cedc         # il2cpp_string_new (dynsym)
+HUMAN_SKIN = 0x19a5330         # HumanData.ChangeSkinColor(SkinColors) -> ProfileData.ChangeSkinColor
+KING_NAME = '杨广'.encode('utf-8') + b'\0'
+KING_SKIN = 1                  # AppearanceData.SkinColors: 0 Caucasian(白) / 1 Asia(黄)
+
+def king_stub(va):
+    bl = lambda pc, t: 0x94000000 | (((t - pc) >> 2) & 0x3FFFFFF)
+    b = lambda pc, t: 0x14000000 | (((t - pc) >> 2) & 0x3FFFFFF)
+    name_off = 0x58
+    ins = [0xF9400E68,                          # 00 ldr x8,[x19,#0x18]   (KingData.kingData)
+           0xB4000288,                          # 04 cbz x8, orig (+0x50)
+           0xB9401908,                          # 08 ldr w8,[x8,#0x18]   (currentGeneration)
+           0x36F80248,                          # 0c tbz w8,#31, orig (+0x48)
+           0xA9BE7BFD, 0x910003FD,              # 10 stp x29,x30,[sp,#-32]!; mov x29,sp
+           0xF9000BE1,                          # 18 str x1,[sp,#16]  (family name)
+           0x10000000 | (((name_off - 0x1c) >> 2) << 5),  # 1c adr x0,name
+           bl(va + 0x20, STRING_NEW),           # 20 x0 = "杨广"
+           0xF9400BE1,                          # 24 ldr x1,[sp,#16]
+           0x52800042,                          # 28 mov w2,#2 (Male)
+           0xAA1F03E3,                          # 2c mov x3,xzr
+           bl(va + 0x30, CREATE_ADULT),         # 30
+           0xF9000BE0,                          # 34 str x0,[sp,#16]
+           0xB40000A0,                          # 38 cbz x0, done (+0x14)
+           0x52800001 | (KING_SKIN << 5),       # 3c mov w1,#skin
+           0xAA1F03E2,                          # 40 mov x2,xzr
+           bl(va + 0x44, HUMAN_SKIN),           # 44
+           0xF9400BE0,                          # 48 done: ldr x0,[sp,#16]
+           0xA8C27BFD,                          # 4c ldp x29,x30,[sp],#32
+           0xD65F03C0,                          # 50 ret
+           b(va + 0x54, CREATE_ADULT)]          # 54 orig: tail-call CreateAdult unchanged
+    code = struct.pack('<%dI' % len(ins), *ins)
+    assert len(code) == name_off
+    code += KING_NAME
+    return code + bytes((-len(code)) % 8)
+
 so = open(sys.argv[1], 'rb').read()
 for va, orig in STUBS:
     o = so[va - 0x4000: va - 0x4000 + 0x34]
     if orig: assert o.hex() == orig, hex(va)
     P.append((va - 0x4000, o, support_stub(va)))
+# king: stub in the dead tail of TitlePanel.ContactButtonClick (bytes there are asserted below), then redirect the call
+ks = king_stub(KING_STUB)
+assert KING_STUB >= 0x1c43d74 + 0x34 and KING_STUB + len(ks) <= 0x1c43e1c
+P.append((KING_STUB - 0x4000, so[KING_STUB - 0x4000: KING_STUB - 0x4000 + len(ks)], ks))
+kc = so[KING_CALL - 0x4000: KING_CALL - 0x4000 + 4]
+assert struct.unpack('<I', kc)[0] == 0x94000000 | (((CREATE_ADULT - KING_CALL) >> 2) & 0x3FFFFFF), 'CreateNewKing call site moved'
+P.append((KING_CALL - 0x4000, kc, struct.pack('<I', 0x94000000 | (((KING_STUB - KING_CALL) >> 2) & 0x3FFFFFF))))
 out = b'ELSP' + struct.pack('<II', 1, len(P))
 for off, o, n in P:
     assert so[off:off+len(o)] == o, hex(off)
