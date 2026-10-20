@@ -127,16 +127,24 @@ jobs:
           name: ElneaZH-apk
           path: dist/ElneaZH.apk
 
-      - name: Publish release "latest"
+      - name: Publish versioned release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          NOTES="自动构建 #${{ github.run_number }}（${GITHUB_SHA::7}）。下载 ElneaZH.apk 安装到手机，打开后按步骤一键汉化。完全免费，禁止倒卖；汉化交流 QQ 群 790184852。"
-          git tag -f latest
-          git push -f origin latest
-          if gh release view latest >/dev/null 2>&1; then
-            gh release edit latest --title "艾尔尼亚汉化器（最新构建）" --notes "$NOTES" --prerelease=false
-            gh release upload latest dist/ElneaZH.apk --clobber
-          else
-            gh release create latest dist/ElneaZH.apk --title "艾尔尼亚汉化器（最新构建）" --notes "$NOTES" --latest
-          fi
+          V="v1.0.${{ github.run_number }}"
+          {
+            echo "## ${V}（${GITHUB_SHA::7}）"
+            echo
+            echo "**本次更新：** $(git log -1 --pretty=%s)"
+            echo
+            # 最新一段更新说明（docs/CHANGELOG.md 最后一个 "## " 小节）
+            awk '/^## /{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' docs/CHANGELOG.md
+            echo
+            echo "---"
+            echo "下载 ElneaZH.apk 装到手机，打开后按步骤一键汉化。完全免费，禁止倒卖；汉化交流 QQ 群 790184852。"
+          } > notes.md
+          # 旧的单一 "latest" 发布改为按版本发布，删一次即可
+          gh release delete latest --cleanup-tag -y >/dev/null 2>&1 || true
+          cp dist/ElneaZH.apk "dist/ElneaZH-${V}.apk"
+          gh release create "$V" "dist/ElneaZH-${V}.apk" dist/ElneaZH.apk --target "$GITHUB_SHA" \
+            --title "艾尔尼亚汉化器 ${V}" --notes-file notes.md --latest
