@@ -144,6 +144,12 @@ UUID_PLUGIN_CHECK = 0x1c8f490
 o = so[UUID_PLUGIN_CHECK - 0x4000: UUID_PLUGIN_CHECK - 0x4000 + 4]
 assert o.hex() == '80030036', 'GetUUID site moved ' + o.hex()
 P.append((UUID_PLUGIN_CHECK - 0x4000, o, bytes.fromhex('1f2003d5')))
+# GetUUID 生成新身份时 String.Format(fmt, 设备串(VA 0x18a2db4), 随机串).Substring(0,41)：设备串在前，截断后几乎只剩设备串，
+# 清数据也是同一身份。VA 0x1c8f4a8 `bl 0x18a2db4` -> `mov x0, xzr`：设备串为空，走 IsNullOrEmpty 分支直接保存随机串。
+DEV_STR_CALL = 0x1c8f4a8
+o = so[DEV_STR_CALL - 0x4000: DEV_STR_CALL - 0x4000 + 4]
+assert o.hex() == '434ef097', 'dev-str call moved ' + o.hex()
+P.append((DEV_STR_CALL - 0x4000, o, bytes.fromhex('000080d2')))
 out = b'ELSP' + struct.pack('<II', 1, len(P))
 for off, o, n in P:
     assert so[off:off+len(o)] == o, hex(off)
