@@ -89,9 +89,6 @@ final class Support {
         card.addView(button(a, d, "加入 QQ 群", ORANGE, ORANGE_DARK, Color.WHITE, new View.OnClickListener() {
             @Override public void onClick(View v) { joinQQ(a); }
         }));
-        card.addView(button(a, d, "复制群号 " + QQ, CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
-            @Override public void onClick(View v) { copy(a, "QQ群", QQ, "已复制 QQ 群号 " + QQ); }
-        }));
 
         Bitmap qr = null;
         try (InputStream in = a.getAssets().open("elneazh/about/qr.png")) { qr = BitmapFactory.decodeStream(in); } catch (Throwable ignored) {}

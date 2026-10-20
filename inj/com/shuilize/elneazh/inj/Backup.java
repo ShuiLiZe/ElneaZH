@@ -178,7 +178,7 @@ final class Backup {
         toast(a, "正在备份存档…");
         new Thread(new Runnable() { @Override public void run() {
             final String n = make(a, "手动");
-            toast(a, n == null ? "备份失败（手机存储不可写？）" : "已备份到 文档/" + DIR + "/" + n);
+            toast(a, n == null ? "备份失败（手机存储不可写？）" : "已备份到 Documents/" + DIR + "/" + n);
         }}).start();
     }
 
@@ -189,7 +189,7 @@ final class Backup {
             i.setType("*/*");
             i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/zip", "application/octet-stream"});
             a.startActivityForResult(i, REQ_RESTORE);
-            toast(a, "请到 文档/" + DIR + " 里选一个备份");
+            toast(a, "请到 Documents/" + DIR + " 里选一个备份");
         } catch (Throwable t) {
             Log.w(TAG, "pick", t);
             toast(a, "打不开文件选择器");
