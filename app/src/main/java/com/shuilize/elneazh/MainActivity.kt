@@ -298,7 +298,28 @@ private fun SupportCard() {
             clip.setText(AnnotatedString("790184852"))
             Toast.makeText(ctx, "已复制 QQ 群号 790184852", Toast.LENGTH_SHORT).show()
         }) { Text("复制 QQ 群号", color = Ink) }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = { openIdentityReset(ctx) }) { Text("更换游戏身份", color = Ink) }
+        Text(
+            "游戏一直卡「维护中」或强制输入账号时用：会在游戏里弹出确认，换成新身份，不用清除数据。",
+            fontSize = 12.sp, color = Muted, lineHeight = 18.sp, modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+        )
     }
+}
+
+/** Opens the injected SupportActivity inside the localized game with reset_id=true (Identity.confirm runs in the game process). */
+private fun openIdentityReset(ctx: android.content.Context) {
+    for (pkg in listOf("jp.co.althi.elnea.en", "jp.co.althi.elnea")) {
+        try {
+            val i = android.content.Intent().setClassName(pkg, "com.shuilize.elneazh.inj.SupportActivity")
+                .putExtra("reset_id", true)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            ctx.startActivity(i)
+            return
+        } catch (e: Exception) {
+        }
+    }
+    Toast.makeText(ctx, "没有找到汉化版游戏，请先安装汉化版", Toast.LENGTH_LONG).show()
 }
 
 @Composable

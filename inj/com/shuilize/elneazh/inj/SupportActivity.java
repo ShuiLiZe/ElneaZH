@@ -19,6 +19,10 @@ public final class SupportActivity extends Activity {
             try { Backup.pick(this); } catch (Throwable t) { done(); }
             return;
         }
+        if (getIntent() != null && getIntent().getBooleanExtra("reset_id", false)) {
+            Identity.confirm(this, new Runnable() { @Override public void run() { done(); } });
+            return;
+        }
         try {
             Dialog d = Support.build(this);
             d.setOnDismissListener(new DialogInterface.OnDismissListener() {

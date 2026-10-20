@@ -128,6 +128,18 @@ final class Support {
         bp.topMargin = (int) (6 * d);
         card.addView(bk, bp);
 
+        card.addView(button(a, d, "更换游戏身份", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
+            @Override public void onClick(View v) { Identity.confirm(a, null); }
+        }));
+        TextView idt = new TextView(a);
+        idt.setTextColor(BROWN_TEXT);
+        idt.setTextSize(12);
+        idt.setGravity(Gravity.CENTER);
+        idt.setText("一直卡「维护中」或强制输入账号时用，不用清除数据。");
+        LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(-1, -2);
+        ip.topMargin = (int) (6 * d);
+        card.addView(idt, ip);
+
         card.addView(button(a, d, "联系原作者（英文邮件）", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
             @Override public void onClick(View v) { mailDev(a); }
         }));
