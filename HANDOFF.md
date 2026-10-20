@@ -194,6 +194,52 @@ JVM 直跑 Harness: filterNames OK / blob 96 -> 88 roundtrip OK notLonger OK -> 
 - 「交流与支持」框加「备份存档」「从备份恢复存档」：恢复用系统文件选择器选 zip（重装后也能选旧备份）→ 确认 → 先备份当前 → 覆盖 → 关闭游戏，重开生效。只接受带 elneazh_backup.txt 的汉化版备份，路径防穿越。
 - 用户要求加入旧工作区的「假维护一键救援」（删服务器下发的作弊标记）/ 去掉维护检测：拒绝，属于绕过反作弊封禁。
 
+## 2026-10-21 04:10 上传前名字闸门：EncryptRJ256 入口把中文名换拼音（待真机验证）
+
+### 为什么
+上一版只有 Java 侧的过滤函数，没有任何挂点 —— 请求照样带着中文名出门，防封等于没做。
+这一版把闸门真正挂到游戏自己的加密函数上。
+
+### 加密入口（真机确认）
+- `Assembly-CSharp` 的 `Cipher::EncryptRJ256(string)`，`libil2cpp.so` VA `0x18ad7e4`（Decrypt 在 `0x18ad984`）。
+- 入参是**完整明文 JSON**，返回值就是抓包里的 `acc=`（base64）。
+- 明文里 `save2.php` 的 `savedata` 字段是「字符串里套 JSON」，内层每个 `ws_*` 的值是 `base64(zlib(二进制存档))`，
+  中文名就躺在 zlib 解出来的记录里；`login/check/pvp/mail/gift/kpi` 等请求本来就没有中文。
+
+### 实现（native/elneagate → libelneagate.so，arm64-v8a + armeabi-v7a）
+- `elneagate.c`：`JNI_OnLoad` 里对 `0x18ad7e4` 做 inline hook（vendor/And64InlineHook），
+  原函数执行前拿明文，过滤后再交给原函数；hook 不上就什么都不做，只打日志。
+- `eg_names.c`：
+  - `eg_filter_raw()`：扫存档记录里的名字槽（`0x01` + 1 字节长度 + UTF-8 字节），按表替换；
+    长度字节同步改写，替换只许变短或等长，超长/格式不符**原样不动**；
+  - `eg_filter_zlib()`：inflate → 过滤 → deflate(9)，结果比原 base64 长就放弃；
+  - `eg_rewrite_nested()` / `eg_filter_json()`：在明文里找 `\"key\":\"<base64>\"` 这种嵌套字面量，
+    只碰长得像 zlib+base64 的值，其它字段（uuid、lang…）一个字节都不动；纯 ASCII 明文直接返回 NULL（不处理）。
+  - 映射表 = `assets/elneazh/data/names.tsv`（NPC 中文名 → 英文原文）+ 玩家别名（中文 → 拼音），
+    由 Java 侧 `NameGate.pushNames()` 在 `NameFix.load()` 之后整表灌进来，两边同一份。
+- Java 侧：`NameGate.java`（把 `assets/elneagate/lib<abi>/libelneagate.so` 解到 `files/lib/` 后 `System.load`，
+  后台线程重试到 `libil2cpp` 加载完）、`NameFix.pairs()`（映射快照）、`NameFix.ascii()` 里每新增一条别名就同步给 native。
+- 日志标签 `ElneaGate` / `ElneaZH-NET`。
+
+### 只改请求，不改本地
+本地存档、界面、服务器回包都不经过这道闸门 —— 游戏里看到的名字仍然是中文，
+只有加密前那一刻的中文名被换成拼音。同一个名字每次换出的拼音固定，服务器侧看起来就是稳定用英文名。
+
+### 验证
+- `python tools/build_gate.py`：双 ABI 编译 + strip，arm64-v8a 27,272 B / armeabi-v7a 15,044 B。
+- `python tools/verify_gate.py`：26 项全 PASS（C 夹具 5 个名字逐字节、幂等、zlib 路径、
+  JSON 层 uuid/lang 不动、解压回 EXPECT、纯 ASCII 零改动、产物 ELF + 含日志标签）。
+- `python tools/ci_inj.py`：javac OK，60 个类。
+- `python tools/verify_upload_names.py`：29 项全 PASS。
+- 本地 `gradle assembleRelease` BUILD SUCCESSFUL，APK 内含 `assets/elneagate/{arm64-v8a,armeabi-v7a}/libelneagate.so`。
+- CI：`.github/workflows/build.yml` 与 `build-check.yml` 都加了 `tools/build_gate.py` + `tools/verify_gate.py` 两步。
+
+### 未验证 / 风险
+- **真机没验证**：hook 能否在游戏进程里成功装上（`il2cpp` 加载时机、arm64 指令改写、内存页权限）只有真机能确认。
+  装失败的表现是「日志里有 ElneaGate 的失败原因、游戏照常跑、请求仍带中文名」，不会崩。
+- 明文里如果出现非 `\"k\":\"v\"` 形态的中文名（例如直接写在顶层），这道闸门不处理 —— 目前抓包没见到。
+- 名字槽扫描是启发式的（`0x01` + 长度 + UTF-8 名字），存档格式若变体会漏掉，不会改坏。
+
 ## 2026-10-20 23:55 更换游戏身份：先备份 + 清空本地数据（待真机验证）
 
 - 抓包结论：旧存档 + 新 uuid → login.php 回 `already login!` → 弹账号框。**只抹 uuid 没用**，服务器是拿存档里的账号信息认人的，必须整套本地数据重来。
