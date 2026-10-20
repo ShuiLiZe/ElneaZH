@@ -743,3 +743,5 @@ king_stub：`x19`=KingData（调用点处）。kingData 为空或 currentGenerat
 
 **与需求的对应**：名=杨广（家族名仍随机，长名显示为「杨广」+家族名，短名就是杨广）；男；黄皮；**年龄 6**：游戏成年年龄就是 6（`get_AgeAdult` 返回常量 6），5 岁是学生/儿童，当国王会走儿童职业/上学逻辑，风险大，所以取最年轻的成年 6 岁（=“约 5 岁、年轻”），出生日期由 HumanData 构造函数按当日自动推算，无需手算；**未婚：保证**（新建人物、setupNewKing 无婚配）。外貌（五官、发型、发色）仍随机，没有强行指定。
 只影响新世界的第一位国王；老存档已有国王的不受影响；以后国王死且无继承人时新国王仍随机。
+
+**DSH 复核（会话 session-fb9f4490，2026-10-20 11:55–12:55 CST，报告 `_hark\king_newgame.md`）**：0x1942590 原字节 `51 cc 04 94` = bl 0x1a756d4【已证实】；全 so 无分支跳入 0x1c43da8–0x1c43e1c【已证实】；HumanData.ChangeSkinColor 参数 x0=human、w1=skin【已证实】；set_IsKing 只有 0x19f3e00 / 0x1a69dd0 两个调用点，不在建国王路径【已证实】；setupNewKing 无 SetMarriage【已证实】。枚举取值从 dump.cs 核对：SkinColors Caucasian=0 / Asia=1，SexCode Female=1 / Male=2；get_AgeAdult = `mov w0,#6`。（DSH 报告里说名字串用 UTF-16，不对：il2cpp_string_new 吃 UTF-8，补丁按 UTF-8 写。）样本存档里认不出 King 记录，与“国王在每日阶段才生成”一致。
