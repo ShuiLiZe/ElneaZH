@@ -1,7 +1,18 @@
 package com.shuilize.elneazh.inj;
 
 import android.app.Activity;
-import android.app.AlertDialog;
+import android.app.Dialog;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.Window;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.SharedPreferences;
@@ -18,24 +29,72 @@ import android.util.Log;
 final class Identity {
     static final String KEY = "uuid";
 
+    /** Confirmation drawn in the same game-popup style as {@link Support} (cream panel, brown frame, orange buttons). */
     static void confirm(final Activity a, final Runnable onCancel) {
         try {
-            AlertDialog.Builder b = new AlertDialog.Builder(a);
-            b.setTitle("更换游戏身份");
-            b.setMessage("只在游戏一直卡「维护中」或强制要求输入账号时使用。\n\n"
-                    + "会生成一个新的游戏身份（服务器上相当于新号）。更换前会自动备份当前存档，"
-                    + "想换回原来的身份，在「存档备份」里恢复这份备份即可。\n\n"
+            final float d = a.getResources().getDisplayMetrics().density;
+            final Dialog dlg = new Dialog(a);
+            dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
+            dlg.setCanceledOnTouchOutside(true);
+            final boolean[] ok = {false};
+
+            LinearLayout card = new LinearLayout(a);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setGravity(Gravity.CENTER_HORIZONTAL);
+            card.setBackground(Support.round(Support.CREAM, Support.BROWN, 3 * d, 14 * d));
+            int pad = (int) (18 * d);
+            card.setPadding(pad, (int) (14 * d), pad, (int) (16 * d));
+
+            TextView title = new TextView(a);
+            title.setText("更换游戏身份");
+            title.setTextColor(Support.BROWN);
+            title.setTextSize(19);
+            title.setTypeface(Typeface.DEFAULT_BOLD);
+            title.setGravity(Gravity.CENTER);
+            title.setPadding(0, 0, 0, (int) (8 * d));
+            card.addView(title, new LinearLayout.LayoutParams(-1, -2));
+
+            View line = new View(a);
+            line.setBackgroundColor(Color.argb(0x66, 0x7A, 0x4B, 0x24));
+            LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(-1, Math.max(1, (int) (1.5f * d)));
+            llp.bottomMargin = (int) (10 * d);
+            card.addView(line, llp);
+
+            TextView tv = new TextView(a);
+            tv.setTextColor(Support.BROWN_TEXT);
+            tv.setTextSize(14);
+            tv.setLineSpacing(0, 1.25f);
+            tv.setText("只在游戏一直卡「维护中」或强制要求输入账号时使用。\n\n"
+                    + "会换成一个新的游戏身份（服务器上相当于新号）。更换前自动备份当前存档，"
+                    + "想换回原来的身份，在「存档备份」里恢复「换身份前」那份即可。\n\n"
                     + "更换后游戏会自动关闭，请重新打开。");
-            b.setPositiveButton("确定更换", new DialogInterface.OnClickListener() {
-                @Override public void onClick(DialogInterface d, int w) { reset(a); }
+            card.addView(tv, new LinearLayout.LayoutParams(-1, -2));
+
+            card.addView(Support.button(a, d, "确定更换", Support.ORANGE, Support.ORANGE_DARK, Color.WHITE, new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    ok[0] = true;
+                    try { dlg.dismiss(); } catch (Throwable ignored) {}
+                    reset(a);
+                }
+            }));
+            card.addView(Support.button(a, d, "取消", Support.BROWN, Color.rgb(0x4E, 0x2F, 0x14), Color.WHITE, new View.OnClickListener() {
+                @Override public void onClick(View v) { try { dlg.dismiss(); } catch (Throwable ignored) {} }
+            }));
+
+            dlg.setOnDismissListener(new DialogInterface.OnDismissListener() {
+                @Override public void onDismiss(DialogInterface di) { if (!ok[0] && onCancel != null) onCancel.run(); }
             });
-            b.setNegativeButton("取消", new DialogInterface.OnClickListener() {
-                @Override public void onClick(DialogInterface d, int w) { if (onCancel != null) onCancel.run(); }
-            });
-            b.setOnCancelListener(new DialogInterface.OnCancelListener() {
-                @Override public void onCancel(DialogInterface d) { if (onCancel != null) onCancel.run(); }
-            });
-            b.show();
+            ScrollView sv = new ScrollView(a);
+            sv.setVerticalScrollBarEnabled(false);
+            sv.addView(card, new FrameLayout.LayoutParams(-1, -2));
+            dlg.setContentView(sv);
+            Window w = dlg.getWindow();
+            if (w != null) {
+                w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+                int sw = a.getResources().getDisplayMetrics().widthPixels;
+                w.setLayout(Math.min((int) (sw * 0.86f), (int) (360 * d)), ViewGroup.LayoutParams.WRAP_CONTENT);
+            }
+            dlg.show();
         } catch (Throwable t) {
             Log.e(Support.TAG, "identity confirm", t);
             if (onCancel != null) onCancel.run();
