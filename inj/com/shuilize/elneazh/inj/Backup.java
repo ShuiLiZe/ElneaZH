@@ -132,7 +132,40 @@ final class Backup {
         return false;
     }
 
+    /** /sdcard/艾尔尼亚存档备份 — used when the app has all-files access (or legacy storage permission). */
+    static File rootDir() { return new File(Environment.getExternalStorageDirectory(), DIR); }
+
+    static boolean rootOk(Context ctx) {
+        try {
+            if (Build.VERSION.SDK_INT >= 30) return Environment.isExternalStorageManager();
+            if (Build.VERSION.SDK_INT == 29) return false; // scoped storage, no legacy flag
+            return ctx.checkCallingOrSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        } catch (Throwable t) { return false; }
+    }
+
+    /** Opens the system page to grant all-files access (Android 11+) or asks the legacy permission. */
+    static void askRoot(Activity a) {
+        try {
+            if (Build.VERSION.SDK_INT >= 30) {
+                Intent i = new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:" + a.getPackageName()));
+                try { a.startActivity(i); }
+                catch (Throwable t) { a.startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)); }
+                toast(a, "请打开「允许管理所有文件」，返回后再点存档管理");
+            } else if (Build.VERSION.SDK_INT == 29) {
+                toast(a, "安卓 10 不支持放根目录，备份仍在 Documents/" + DIR);
+            } else if (Build.VERSION.SDK_INT >= 23) {
+                a.requestPermissions(new String[]{android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, 0x4E5B);
+            }
+        } catch (Throwable t) { Log.w(TAG, "askRoot", t); toast(a, "打不开授权页面"); }
+    }
+
     private static OutputStream openOut(Context ctx, String name) throws Exception {
+        if (rootOk(ctx)) {
+            File d = rootDir();
+            if (d.isDirectory() || d.mkdirs()) return new FileOutputStream(new File(d, name));
+        }
         if (Build.VERSION.SDK_INT >= 29) {
             ContentValues v = new ContentValues();
             v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
@@ -148,6 +181,15 @@ final class Backup {
 
     /** Keeps only the newest AUTO_KEEP automatic backups this install created; manual ones are never touched. */
     private static void prune(Context ctx) {
+        try {
+            if (rootOk(ctx)) {
+                File[] ls = rootDir().listFiles();
+                List<String> autos = new ArrayList<>();
+                if (ls != null) for (File f : ls) if (f.getName().startsWith("存档_自动_")) autos.add(f.getName());
+                java.util.Collections.sort(autos, java.util.Collections.reverseOrder());
+                for (int i = AUTO_KEEP; i < autos.size(); i++) new File(rootDir(), autos.get(i)).delete();
+            }
+        } catch (Throwable t) { Log.w(TAG, "prune root", t); }
         try {
             if (Build.VERSION.SDK_INT >= 29) {
                 ContentResolver cr = ctx.getContentResolver();
@@ -180,6 +222,14 @@ final class Backup {
     static List<Item> list(Context ctx) {
         List<Item> r = new ArrayList<>();
         try {
+            if (rootOk(ctx)) {
+                File[] ls = rootDir().listFiles();
+                if (ls != null) for (File f : ls) if (f.getName().endsWith(".zip")) {
+                    Item it = new Item(); it.name = f.getName(); it.uri = Uri.fromFile(f); it.size = f.length(); r.add(it);
+                }
+            }
+        } catch (Throwable t) { Log.w(TAG, "list root", t); }
+        try {
             if (Build.VERSION.SDK_INT >= 29) {
                 Uri col = MediaStore.Files.getContentUri("external");
                 try (Cursor c = ctx.getContentResolver().query(col,
@@ -200,11 +250,11 @@ final class Backup {
                 if (ls != null) for (File f : ls) if (f.getName().endsWith(".zip")) {
                     Item it = new Item(); it.name = f.getName(); it.uri = Uri.fromFile(f); it.size = f.length(); r.add(it);
                 }
-                java.util.Collections.sort(r, new java.util.Comparator<Item>() {
-                    @Override public int compare(Item x, Item y) { return y.name.compareTo(x.name); }
-                });
             }
         } catch (Throwable t) { Log.w(TAG, "list", t); }
+        java.util.Collections.sort(r, new java.util.Comparator<Item>() {
+            @Override public int compare(Item x, Item y) { return y.name.compareTo(x.name); }
+        });
         return r;
     }
 
@@ -231,7 +281,7 @@ final class Backup {
             String[] labels = new String[items.size()];
             for (int i = 0; i < labels.length; i++) labels[i] = label(items.get(i));
             AlertDialog.Builder b = new AlertDialog.Builder(a)
-                    .setTitle(items.isEmpty() ? "还没有备份" : "存档备份（" + items.size() + " 份，点一个操作）")
+                    .setTitle(items.isEmpty() ? "还没有备份" : "存档备份 " + items.size() + " 份（" + (rootOk(a) ? "根目录" : "Documents") + "）")
                     .setPositiveButton("立即备份", new DialogInterface.OnClickListener() {
                         @Override public void onClick(DialogInterface d, int w) {
                             toast(a, "正在备份存档…");
@@ -245,8 +295,15 @@ final class Backup {
                     .setNeutralButton("从文件选择", new DialogInterface.OnClickListener() {
                         @Override public void onClick(DialogInterface d, int w) { Support.restore(a); }
                     })
-                    .setNegativeButton("关闭", null);
-            if (items.isEmpty()) b.setMessage("备份会放在手机存储 Documents/" + DIR + "。重装过游戏的话，旧备份这里可能列不出来，点「从文件选择」去找。");
+                    ;
+            final boolean root = rootOk(a);
+            if (root) b.setNegativeButton("关闭", null);
+            else b.setNegativeButton("改存根目录", new DialogInterface.OnClickListener() {
+                @Override public void onClick(DialogInterface d, int w) { askRoot(a); }
+            });
+            String where = root ? "备份位置：手机存储根目录 /" + DIR
+                    : "备份位置：Documents/" + DIR + "。想放根目录 /" + DIR + "，点「改存根目录」授权一次。";
+            if (items.isEmpty()) b.setMessage(where + "\n重装过游戏的话旧备份可能列不出来，点「从文件选择」去找。");
             else b.setItems(labels, new DialogInterface.OnClickListener() {
                 @Override public void onClick(DialogInterface d, int w) { itemMenu(a, items.get(w)); }
             });
@@ -298,7 +355,7 @@ final class Backup {
         toast(a, "正在备份存档…");
         new Thread(new Runnable() { @Override public void run() {
             final String n = make(a, "手动");
-            toast(a, n == null ? "备份失败（手机存储不可写？）" : "已备份到 Documents/" + DIR + "/" + n);
+            toast(a, n == null ? "备份失败（手机存储不可写？）" : "已备份：" + n);
         }}).start();
     }
 
@@ -309,7 +366,7 @@ final class Backup {
             i.setType("*/*");
             i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/zip", "application/octet-stream"});
             a.startActivityForResult(i, REQ_RESTORE);
-            toast(a, "请到 Documents/" + DIR + " 里选一个备份");
+            toast(a, "备份在 " + (rootOk(a) ? "根目录/" : "Documents/") + DIR + " 里");
         } catch (Throwable t) {
             Log.w(TAG, "pick", t);
             toast(a, "打不开文件选择器");

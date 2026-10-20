@@ -5,6 +5,11 @@ A = '{http://schemas.android.com/apk/res/android}'
 ax, _ = pyaxml.AXML.from_axml(open(sys.argv[1], 'rb').read())
 x = ax.to_xml()
 app = x.find('application')
+# 存档备份放根目录 /sdcard/艾尔尼亚存档备份 需要「所有文件访问」（用户在存档管理里手动授权；不授权就退回 Documents）
+_have = {e.get(A + 'name') for e in x.findall('uses-permission')}
+for perm in ('android.permission.MANAGE_EXTERNAL_STORAGE', 'android.permission.WRITE_EXTERNAL_STORAGE', 'android.permission.READ_EXTERNAL_STORAGE'):
+    if perm not in _have:
+        u = etree.Element('uses-permission'); u.set(A + 'name', perm); app.addprevious(u)
 p = etree.SubElement(app, 'provider')
 p.set(A + 'name', 'com.shuilize.elneazh.inj.ZhInit')
 p.set(A + 'exported', 'false')
@@ -27,6 +32,6 @@ ax2 = pyaxml.AXML(); ax2.from_xml(x); ax2.compute()
 out = ax2.pack()
 chk, _ = pyaxml.AXML.from_axml(out)
 _t = etree.tostring(chk.to_xml())
-assert b'zhinit' in _t and b'SupportActivity' in _t and b'elneazh' in _t
+assert b'MANAGE_EXTERNAL_STORAGE' in _t and b'zhinit' in _t and b'SupportActivity' in _t and b'elneazh' in _t
 open(sys.argv[2], 'wb').write(out)
 print('manifest ok', len(out))

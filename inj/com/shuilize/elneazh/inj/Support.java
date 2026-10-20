@@ -123,7 +123,7 @@ final class Support {
         bk.setTextColor(BROWN_TEXT);
         bk.setTextSize(12);
         bk.setGravity(Gravity.CENTER);
-        bk.setText("备份在手机存储「Documents/" + Backup.DIR + "」（不在根目录），卸载游戏也不会丢；每次启动也会自动备份。");
+        bk.setText("备份默认在「Documents/" + Backup.DIR + "」，在存档管理里授权后改到根目录「/" + Backup.DIR + "」；卸载不丢，启动自动备份。");
         LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-1, -2);
         bp.topMargin = (int) (6 * d);
         card.addView(bk, bp);
