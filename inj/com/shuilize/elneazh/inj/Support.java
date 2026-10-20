@@ -116,17 +116,14 @@ final class Support {
             card.addView(qrBox, qlp);
         }
 
-        card.addView(button(a, d, "备份存档", ORANGE, ORANGE_DARK, Color.WHITE, new View.OnClickListener() {
-            @Override public void onClick(View v) { Backup.manual(a); }
-        }));
-        card.addView(button(a, d, "从备份恢复存档", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
-            @Override public void onClick(View v) { restore(a); }
+        card.addView(button(a, d, "存档管理（备份 / 恢复 / 删除）", ORANGE, ORANGE_DARK, Color.WHITE, new View.OnClickListener() {
+            @Override public void onClick(View v) { Backup.manage(a); }
         }));
         TextView bk = new TextView(a);
         bk.setTextColor(BROWN_TEXT);
         bk.setTextSize(12);
         bk.setGravity(Gravity.CENTER);
-        bk.setText("备份在手机「文档/" + Backup.DIR + "」，卸载游戏也不会丢，可存多份；每次启动也会自动备份。");
+        bk.setText("备份在手机存储「Documents/" + Backup.DIR + "」（不在根目录），卸载游戏也不会丢；每次启动也会自动备份。");
         LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-1, -2);
         bp.topMargin = (int) (6 * d);
         card.addView(bk, bp);

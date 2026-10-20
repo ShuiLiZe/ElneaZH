@@ -172,6 +172,126 @@ final class Backup {
         } catch (Throwable t) { Log.w(TAG, "prune", t); }
     }
 
+    // ---------------- 存档管理 ----------------
+
+    static final class Item { String name; Uri uri; long size; }
+
+    /** Lists backups this install can see (newest first). */
+    static List<Item> list(Context ctx) {
+        List<Item> r = new ArrayList<>();
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                Uri col = MediaStore.Files.getContentUri("external");
+                try (Cursor c = ctx.getContentResolver().query(col,
+                        new String[]{MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.SIZE},
+                        MediaStore.MediaColumns.RELATIVE_PATH + " LIKE ?",
+                        new String[]{Environment.DIRECTORY_DOCUMENTS + "/" + DIR + "%"},
+                        MediaStore.MediaColumns.DISPLAY_NAME + " DESC")) {
+                    if (c != null) while (c.moveToNext()) {
+                        Item it = new Item();
+                        it.uri = ContentUris.withAppendedId(col, c.getLong(0));
+                        it.name = c.getString(1);
+                        it.size = c.getLong(2);
+                        if (it.name != null && it.name.endsWith(".zip")) r.add(it);
+                    }
+                }
+            } else {
+                File[] ls = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), DIR).listFiles();
+                if (ls != null) for (File f : ls) if (f.getName().endsWith(".zip")) {
+                    Item it = new Item(); it.name = f.getName(); it.uri = Uri.fromFile(f); it.size = f.length(); r.add(it);
+                }
+                java.util.Collections.sort(r, new java.util.Comparator<Item>() {
+                    @Override public int compare(Item x, Item y) { return y.name.compareTo(x.name); }
+                });
+            }
+        } catch (Throwable t) { Log.w(TAG, "list", t); }
+        return r;
+    }
+
+    private static String label(Item it) {
+        String n = it.name.replace("存档_", "").replace(".zip", "");
+        String[] p = n.split("_");
+        if (p.length >= 3 && p[1].length() == 8 && p[2].length() >= 4) {
+            n = p[0] + "  " + p[1].substring(0, 4) + "-" + p[1].substring(4, 6) + "-" + p[1].substring(6, 8)
+                    + " " + p[2].substring(0, 2) + ":" + p[2].substring(2, 4);
+        }
+        return n + "  (" + Math.max(1, it.size / 1024) + " KB)";
+    }
+
+    /** In-game backup manager: list, back up now, restore, delete. */
+    static void manage(final Activity a) {
+        new Thread(new Runnable() { @Override public void run() {
+            final List<Item> items = list(a);
+            new Handler(Looper.getMainLooper()).post(new Runnable() { @Override public void run() { showList(a, items); }});
+        }}).start();
+    }
+
+    private static void showList(final Activity a, final List<Item> items) {
+        try {
+            String[] labels = new String[items.size()];
+            for (int i = 0; i < labels.length; i++) labels[i] = label(items.get(i));
+            AlertDialog.Builder b = new AlertDialog.Builder(a)
+                    .setTitle(items.isEmpty() ? "还没有备份" : "存档备份（" + items.size() + " 份，点一个操作）")
+                    .setPositiveButton("立即备份", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int w) {
+                            toast(a, "正在备份存档…");
+                            new Thread(new Runnable() { @Override public void run() {
+                                String n = make(a, "手动");
+                                toast(a, n == null ? "备份失败（手机存储不可写？）" : "已备份：" + n);
+                                if (n != null) manage(a);
+                            }}).start();
+                        }
+                    })
+                    .setNeutralButton("从文件选择", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int w) { Support.restore(a); }
+                    })
+                    .setNegativeButton("关闭", null);
+            if (items.isEmpty()) b.setMessage("备份会放在手机存储 Documents/" + DIR + "。重装过游戏的话，旧备份这里可能列不出来，点「从文件选择」去找。");
+            else b.setItems(labels, new DialogInterface.OnClickListener() {
+                @Override public void onClick(DialogInterface d, int w) { itemMenu(a, items.get(w)); }
+            });
+            b.show();
+        } catch (Throwable t) { Log.w(TAG, "showList", t); }
+    }
+
+    private static void itemMenu(final Activity a, final Item it) {
+        try {
+            new AlertDialog.Builder(a)
+                    .setTitle(label(it))
+                    .setItems(new String[]{"恢复这个备份", "删除这个备份"}, new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int w) {
+                            if (w == 0) confirmRestore(a, it.uri);
+                            else confirmDelete(a, it);
+                        }
+                    })
+                    .setNegativeButton("返回", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int w) { manage(a); }
+                    }).show();
+        } catch (Throwable t) { Log.w(TAG, "itemMenu", t); }
+    }
+
+    private static void confirmDelete(final Activity a, final Item it) {
+        try {
+            new AlertDialog.Builder(a)
+                    .setTitle("删除备份")
+                    .setMessage("确定删除「" + label(it) + "」？删了就找不回来了。")
+                    .setNegativeButton("取消", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int w) { manage(a); }
+                    })
+                    .setPositiveButton("删除", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int w) {
+                            boolean ok = false;
+                            try {
+                                if ("file".equals(it.uri.getScheme())) ok = new File(it.uri.getPath()).delete();
+                                else ok = a.getContentResolver().delete(it.uri, null, null) > 0;
+                            } catch (Throwable t) { Log.w(TAG, "delete", t); }
+                            toast(a, ok ? "已删除" : "删不掉（可能是重装前的旧备份，请用文件管理删除）");
+                            manage(a);
+                        }
+                    }).show();
+        } catch (Throwable t) { Log.w(TAG, "confirmDelete", t); }
+    }
+
     // ---------------- UI ----------------
 
     static void manual(final Activity a) {
