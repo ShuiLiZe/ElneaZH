@@ -1,6 +1,6 @@
 # HANDOFF — 现状（只写当前状态；过程见 docs/CHANGELOG.md，规矩见 AGENTS.md）
 
-_最后更新：2026-10-20 10:50 CST_
+_最后更新：2026-10-20 11:50 CST_
 
 ## 现在能用的版本
 - Release `latest` 的 ElneaZH.apk（每次推送自动构建）。装前先在游戏「Support → 存档数据」备份，卸载原版后安装汉化版（签名不同）。
@@ -75,3 +75,12 @@ _最后更新：2026-10-20 10:50 CST_
 - 14 张下载包贴图已汉化（教程图 5 张 + 活动/扭蛋/琥珀横幅 9 张；地图之前已做 = 共 15 张，缓存里带英文的全部做完）。脚本 `tools/imgzh/bundle_tex.py`，成品 `content_zh/bundles/`，注入 `inj/.../Bundles.java` 启动时覆盖 UnityCache（所有已有 hash 目录）。
 - 待真机验证：装新版后看新手引导图/扭蛋横幅是否中文；若游戏校验 CRC 而重新下载英文版，logcat 看 `ElneaZH: bundles:`，再考虑 hook 下载 URL。
 - 下一步：教程图共 107 张（c_guide 引用），缓存只有 5 张。需要用户在游戏里翻一遍「指南」各页、看看活动页，再把手机 Android/data/jp.co.althi.elnea.en/files/UnityCache/Shared 整个拷到电脑，交给 bundle_tex.py 补框。
+
+## 2026-10-20 11:50 标题画面「支援」里加「交流群与支持」（待真机验证）
+- 原版「联系我们」（TitlePanel.ContactButtonClick）是游戏内网页面板 AddWebPanel(URLType.Contact)，不走安卓 Intent，Java 层拦不到。
+- 做法：libil2cpp 补丁（tools/so_patch_zh.py）把 TitlePanel 和游戏内 InfoMenuPanel 的 ContactButtonClick 改成 `Application.OpenURL("elneazh://support")`；
+  manifest_zh.py 加透明 `SupportActivity`（intent-filter elneazh://support，exported=true）；它弹 `inj/.../Support.java` 画的原版风格对话框（米黄底、棕边、橙按钮）：
+  加入 QQ 群（打开群分享链接，失败就复制群号）、复制群号、微信收款码、免费/自愿说明、「联系原作者（英文邮件）」（mailto elnea_support_en@althi.co.jp，没邮件 App 就复制邮箱）、关闭。
+- 按钮字 SystemText s367「联系我们」→「交流群与支持」。账号设置里忘记密码的「联系」（AccountSettingPanel）保持原版网页表单，方便找回账号。
+- 首次启动弹窗也换成同一个对话框，KEY 改 shown_v2（老用户更新后再看到一次）。
+- 测：标题画面右下「支援」→「交流群与支持」应弹出对话框；点「加入 QQ 群」应跳 QQ/浏览器。若点了没反应：`adb logcat | grep -i -E "ElneaZH|elneazh|Unity"` 看 OpenURL 是否发出 intent。

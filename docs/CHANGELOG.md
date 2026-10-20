@@ -192,3 +192,10 @@
 - CI：build.yml 把 content_zh/bundles 拷到 assets/elneazh/bundles 并生成 index.tsv；Pipeline 把 bundles/ 打进游戏包。
 - 已知：大字抹除处在人物图上有涂抹痕迹；缓存里没有 fig_002…fig_107（教程图共 107 张）和其他活动横幅，要用户在手机上把对应教程看一遍后再拷 UnityCache/Shared 才能继续做。
 
+
+
+## 2026-10-20 11:50 「支援」弹窗接入交流群与支持
+- 调查：TitlePanel.ContactButtonClick（VA 0x1c43d74）= playSE + Root.AddWebPanel(URLType.Contact=5)，即 gree unity-webview 的游戏内网页，不经过 startActivity，Java 注入无法拦截。
+- 方案：改 libil2cpp 两处函数体（TitlePanel 0x1c43d74、InfoMenuPanel 0x1c05ae4）为 `il2cpp_string_new("elneazh://support")` → `Application.OpenURL`（VA 0x333c0e8）；Unity 6000.3 的 OpenURL 发 ACTION_VIEW intent，由新加的透明 `SupportActivity` 接住，弹 `Support.java` 对话框。AccountSettingPanel（忘记密码）的联系不动。
+- 「联系原作者」改为 mailto 原作者支持邮箱（原网页表单无法从 Java 调起；邮箱取自 metadata 字面量 elnea_support_en@althi.co.jp）。
+- s367 联系我们 → 交流群与支持；About 首次弹窗复用 Support 对话框，KEY shown_v2。CI 增加 aapt2 检查 SupportActivity。

@@ -103,6 +103,8 @@ jobs:
           mkdir -p build/mt && cp app/src/main/assets/elneazh/AndroidManifest.xml build/mt/
           (cd build/mt && zip -q ../mt.apk AndroidManifest.xml)
           $BT/aapt2 dump xmltree --file AndroidManifest.xml build/mt.apk | grep -B2 -A8 zhinit
+          $BT/aapt2 dump xmltree --file AndroidManifest.xml build/mt.apk | grep -A14 SupportActivity | tee build/sa.txt
+          grep -q 'elneazh' build/sa.txt
           ls -la app/src/main/assets/elneazh
 
       # ubuntu-latest already ships the Android SDK (ANDROID_HOME); AGP fetches missing platforms itself.
