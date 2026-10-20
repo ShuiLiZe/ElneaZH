@@ -9,12 +9,18 @@ Section 1 = string literal data.
 Changing a literal's length: rewrite section 1, shift later idx, and add delta to every section offset after section 1.
 
 translations/metadata_literals.json: {"<original literal, exact>": "<中文>"}  (matched by exact text, all occurrences)
-Special: NAME_WHITELIST (the in-game allowed-name characters) gets every GB2312 hanzi + common CJK punctuation appended,
-so player-typed Chinese names pass the character check (the glyph check is handled by bmfont_zh.py's BitmapFont-Name).
+Special: NAME_WHITELIST (the in-game allowed-name characters) is left exactly as shipped — no hanzi appended,
+because Chinese names get written into the save and uploaded via read.php / pvp.php / friend lists.
+NPC name tables (NameMale_en / NameFemale_en / NameFamily_en) are never translated.
 """
 import struct, json, argparse, os
 
+# 原版「允许取名」字符白名单。**保持出厂原样**：汉字不再追加进去。
+# 中文名会写进存档并随 read.php / pvp.php / 好友列表上传，服务器侧一眼可疑 —— 防封优先。
 NAME_WHITELIST = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ' 0123456789-!:"
+
+# NPC 名字表必须保持原版英文（它们会被写进存档再上传）
+NO_TRANSLATE = ('NameMale_en', 'NameFemale_en', 'NameFamily_en')
 
 
 def gb2312_hanzi():
@@ -73,11 +79,13 @@ def main():
         json.dump([s.decode('utf-8', 'replace') for s in lits], open(a.dump, 'w', encoding='utf-8'), ensure_ascii=False, indent=0)
     tr = json.load(open(a.tr, encoding='utf-8')) if os.path.exists(a.tr) else {}
     tr = {k: v for k, v in tr.items() if not k.startswith('//')}
-    n = 0; wl = 0
+    n = 0; wl = 0; skip = 0
     for i, s in enumerate(lits):
         t = s.decode('utf-8', 'replace')
         if t == NAME_WHITELIST:
-            lits[i] = (t + gb2312_hanzi() + '·').encode('utf-8'); wl += 1
+            wl += 1                       # 只计数，不改写（保持出厂字符集）
+        elif any(t.startswith(k) or t.endswith(k) for k in NO_TRANSLATE):
+            skip += 1; continue           # 名字表不翻译
         elif t in tr and tr[t]:
             lits[i] = tr[t].encode('utf-8'); n += 1
     new, delta = save(b, secs, lits)
@@ -88,7 +96,7 @@ def main():
         o, sz, _ = secs[i]; o2, sz2, _ = secs2[i]
         assert new[o2:o2 + sz2] == b[o:o + sz], f'section {i} moved wrong'
     open(a.out, 'wb').write(new)
-    print(f'metadata: {n} literals translated, name whitelist x{wl}, size delta {delta}')
+    print(f'metadata: {n} literals translated, name whitelist kept as shipped (x{wl}), skipped name tables {skip}, size delta {delta}')
 
 
 if __name__ == '__main__':

@@ -10,6 +10,48 @@ _最后更新：2026-10-20 12:45 CST_
 - 签名本来就固定（app/keystore/elneazh.p12），只有第一次从商店版换汉化版要卸载。
 - App 现在会：检测已装游戏是否是自己签名的汉化版 → 是就提示直接覆盖安装；第一次汉化成功后把原版 APK 存到 App 私有目录（filesDir/orig），以后用它打补丁。没存过的话让用户手动选原版 APK（仓库 base/apk 有）。
 
+## 2026-10-21 00:30 名字：本地存档保持中文，只在上传时换成拼音（单向）
+策略定稿：**不改存档、不改显示**。玩家和 NPC 的中文名照旧留在本地、照旧在界面上显示中文；
+只在数据离开设备（上传 `sns04/*.php`）时把明文里的中文名换成固定拼音；服务器响应里回来的拼音原样显示，不做反向还原。
+
+- 停用旧的「老存档人名转中文」：删除 `inj/.../SaveNames.java`，`ZhInit.onCreate` 里不再调用它。
+  （旧版 CI #62 / 909e224e 那套把存档里的人名改成中文，正是被标记的来源之一。）
+- 名字表不再做英文化：`tools/bmfont_zh.py`、`tools/metadata_zh.py`、`tools/build_patch.py` 保持原样
+  （即 Name 字体与取名白名单仍放行汉字、NPC 名字表仍是中文译文），因为中文现在只留在本地。
+- 新增 `inj/.../NameFix.java`：中文名 → **恒定**拼音。别名表（`SharedPreferences` `elneazh_names`，键 `n:<拼音>`）优先，
+  未命中则用 `names.tsv` 的中文→英文原文，再没有就逐字拼音（纯函数，同输入同输出），并写回别名表；
+  别名表在 `shared_prefs/` 下，`Backup` 已会随备份/恢复一起带走。
+- 新增 `inj/.../Pinyin.java`：`android.icu.text.Transliterator("Han-Latin; Latin-ASCII")`（反射调用，API 29+），
+  API 24–28 退回打包的 `assets/elneazh/data/pinyin.tsv`（GB2312 6763 字，`tools/pinyin_tables.py` 生成）。
+- `inj/.../NetGuard.java` 重写为**单向**闸门：`body()` 只清洗请求体键值里的非 ASCII，`resp()` 原样返回。
+  **代码位置已找到但 Java 侧挂不上**（证据见下），所以闸门目前是「备用+可离线自测」状态，
+  真正的防线在「名字进入游戏前就已经是 ASCII 之外无他」这条路上——见下一条。
+- 新增 `inj/.../SelfCheck.java`：启动时把词表规模、拼音恒定性、闸门行为写进 `files/elneazh_selfcheck.txt`
+  并打 `ElneaZH-SELF` 日志，便于真机一次 `adb logcat -d -s ElneaZH-SELF ElneaZH-NET` 验证。
+
+### 网络栈与加密入口的静态结论（找不到可挂点，记录以免重复挖）
+- 游戏 HTTP 走 `UnityWebRequest`（APK 的 `ScriptingAssemblies.json` 含 `UnityEngine.UnityWebRequestModule.dll`，
+  `libunity.so` 有 41 个 `UnityEngine.Networking.UnityWebRequest::*` 符号）；传输是 native curl，
+  **不经过 okhttp / java.net**——所以拦 Java 的 `CallServerInterceptor`、`HttpURLConnection` 一律无效。
+- `libil2cpp.so`（61MB）里 `acc=` / `lang=` / `sns04` / `althi` / `POST` **0 命中**；`libunity.so` 同样 0 命中。
+  请求体是 C# 层用 `il2cpp_string_new` 内联拼的代码（例：`pvp.php` 唯一引用点 VA 0x17fc6a8 是
+  `mov x8,wzr; stp x21,xzr,[x0]; adrp x20,#0x8d6000; add x20,#0x27c; mov w19,#0x15` 这种对象构造），
+  没有可替换的命名导出函数；il2cpp 的字符串表指针（`0x389c9a8`/`0x389c9b0`）静态初值为 0、运行时才填，
+  **静态定位不到加密入口**。要真正在加密前截明文，只能真机动态 hook（Frida/LSPatch）+ 一条抓包 `acc=` 样本。
+- 已知的接口名（`tools/metadata_zh.py --dump` 可从字面量表取到）：`http://app-elnea.althi.co.jp/sns04/`（字面量 #12315）、
+  `res-elnea`(#12320)、`cdn-elnea`(#12316)，参数名 `acc`(#10187) / `lang`(#12806)，接口 `read.php`/`save2.php`/
+  `recov2.php`/`pvp.php`/`rename.php`/`token.php` 等 27 个 `.php`。
+
+### 未验证 / 风险
+- 闸门在 Java 侧无挂点（上面已说明），所以**上传时是否真的没有汉字，取决于名字进入游戏前是否已转 ASCII**；
+  当前版本没有强制转换玩家输入（取名白名单仍放行汉字），这一点是有意保留的（用户要求本地保持中文）。
+- 真正要收敛风险，下一步应做动态 hook 或要求玩家取名用英文/拼音；等用户给 `acc=` 样本后可继续做解密侧验证。
+
+## 2026-10-20 23:30 已移除：888 好友上限（防封）
+- 移除 tools/so_patch_zh.py 里的 FRIEND_MIN/FRIEND_MAX/FRIEND_LIMIT 与 `mov w0,#888`/`mov w1,#888` 两个补丁字节；VA 0x19a48d4 / 0x19a48d8 现已恢复原指令 `mov w0,#52` / `mov w1,#102`（脚本里只留断言，输入 .so 若已被改过会直接报错）。
+- 原因：原版客户端交友上限就是 102，888 是服务器侧一眼可辨的非法值；get_limitFriendCount 又是每次存档/上传统计都会走到的数据来源，属于典型的“客户端数据与原版不一致”特征。本地多交友的收益远小于封号风险。
+- 国王补丁（CreateNewKing 首个国王「杨广」）与 SelectTalkFriend 补丁保留。注意：补丁本身不含中文，“杨广”两个汉字是 libil2cpp 里 `il2cpp_string_new` 从 so 内字面量构造的，不走存档名字段；若以后发现服务器会看到王的名字，需要再改。
+
 ## 2026-10-20 19:30 真机卡维护 / 强制输入账号（OurPlay 正常）
 - 根因：UuidPlugin.GetUUID 在 PlayerPrefs 没缓存时采用 AndroidUuidPlugin 按设备算出的 ID（清数据、卸载重装都不变），服务器对该身份下发了维护锁（规则模式→维护页；全局模式→登录失败 10 次弹账号框）。OurPlay 沙盒设备 ID 不同所以正常。
 - 修复：tools/so_patch_zh.py 新增 VA 0x1c8f490 `tbz` → nop，不再采用设备 ID，首次随机 makeUUID 后缓存。装新版后需清一次游戏数据（或全新安装）才会换身份。v1.0.81 仍卡维护：新身份 = String.Format(设备串 VA 0x18a2db4, 随机串).Substring(0,41)，设备串在前，截断后仍绑设备。
@@ -116,3 +158,43 @@ _最后更新：2026-10-20 12:45 CST_
 - 自动：ZhInit 最先执行，距上次超过 6 小时且有存档就备份一次（改名处理之前），自动的只留最近 10 份；手动、恢复前的备份永不删。
 - 「交流与支持」框加「备份存档」「从备份恢复存档」：恢复用系统文件选择器选 zip（重装后也能选旧备份）→ 确认 → 先备份当前 → 覆盖 → 关闭游戏，重开生效。只接受带 elneazh_backup.txt 的汉化版备份，路径防穿越。
 - 用户要求加入旧工作区的「假维护一键救援」（删服务器下发的作弊标记）/ 去掉维护检测：拒绝，属于绕过反作弊封禁。
+
+## 2026-10-20 23:55 更换游戏身份：先备份 + 清空本地数据（待真机验证）
+
+- 抓包结论：旧存档 + 新 uuid → login.php 回 `already login!` → 弹账号框。**只抹 uuid 没用**，服务器是拿存档里的账号信息认人的，必须整套本地数据重来。
+- inj/Identity.java（重写 `reset`）：
+  1. 后台线程跑 `Backup.backupForIdentity(a)`：`make(a,"换身份前")` 返回非 null，且再校验这份 zip 里真有 `name="uuid"` 或 `name="login_key"`，两者都成立才返回 uri；否则**中止，一个字节都不动**，只弹「备份失败，未更换」。
+  2. `Backup.wipeForIdentity(a, uri)`：按备份里 `elneazh_backup.txt` 的文件清单删 —— `files/`、`shared_prefs/`、`ext/` 下登记过的文件，外加 `shared_prefs/<pkg>.v2.playerprefs.xml`（uuid/login_key）、`databases/` 里的 login/token/user 类文件、`sv1_*` 与 `*.ntmp/*.rtmp`。**保留**：汉化主表 22 张（`zh/Contents` 里我们投放的 c_* 表）、我们自己的 `shared_prefs/elneazh_*`（含 `elneazh_names`）、`UnityCache`/`il2cpp` 缓存。
+  3. 2 秒后 `finishAffinity` + `killProcess`，重开即新人物新身份。
+- 备份侧（inj/Backup.java）：
+  - 新增 `prefsName(ctx)` = `<pkg>.v2.playerprefs`（文件名依据：`libunity.so` 字面量 `.v2.playerprefs`，Unity 的 SharedPreferences 名就是 `<pkg>.v2.playerprefs`，落盘为 `shared_prefs/<pkg>.v2.playerprefs.xml`）。
+  - `addPrefsFile()`：即使真实 prefs 文件不在 `/data/data/<pkg>/shared_prefs`（可能在 `/data/user_de/<n>/` 或 `/data/user/<n>/`），也用 `findPrefsFile()` 找到原文件整份写进 zip；再找不到就按 SharedPreferences 的 xml 结构从 `getAll()` 手写一份。zip 里重复条目合法，读取方按后者为准。
+  - `addIdentFiles()`：`databases/`、`no_backup/`、`files/` 根下名含 login/token/user/account/uuid/session 的文件一并备份。
+  - `elneazh_backup.txt` 增加 `identity=uuid=xxxx…xxxx login_key=true keys=N`（uuid 打码），列表里显示在大小后面，方便一眼分清哪份是哪个身份。
+  - `restore()` 结束后调用 `restoreIdentityFile()` 把备份里的 `uuid`/`login_key` 等键 `commit()` 回 SharedPreferences（**旧身份解封后恢复即回去**）；同时把「当前存在、但备份没登记」的 `sv1_*` 清掉，避免新旧两份存档混在一起。
+- `tools/verify_identity.py`：复刻 wipe 的保留/删除判定，实测 22 张汉化表 keep、`sv1_*`/playerprefs/login 库 delete、`elneazh_*` keep → `wipe rules OK`。
+- 编译：`python tools/ci_inj.py`（等价 CI 的 `javac --release 8 -cp android.jar`）→ `javac OK, 58 classes`。
+- 未验证：真机。风险点：某些机型 `shared_prefs` 目录被 SELinux 保护读不到时只能走「从内存手写 xml」分支（格式与 SharedPreferences 一致，恢复时由 `restoreIdentityFile` 重新 commit，理论可行）；`databases/` 里的登录库若被游戏打开着，删除后需重开进程生效（本流程本来就会 kill）。
+
+## 2026-10-21 00:05 更换身份：改成最小删除集合（绝不碰数据包）
+
+- 上一版（commit db2e97e）按备份清单整目录删，风险太大：`ext/UnityCache` 就是下载的 AssetBundle 缓存，删了要重下数据包。
+- 现在 `Backup.wipeForIdentity` 只删「明确是登录凭证 / 旧存档」的东西，**白名单式最小删除**：
+
+| 类别 | 处理 | 依据 |
+| --- | --- | --- |
+| `files/{zh,Contents,save,saves}` 及 ext 同位置的 `sv1_*`、`*.ntmp/*.rtmp` | 删 | 存档本体（旧身份的角色/家族/世界状态） |
+| PlayerPrefs 登录键：`uuid` `login_key` `althi_uniq` `token` `token_id` `user_id` `user_uniq` `user_pass` `user_name` `user_rename` `account` `session` `session_id` `device_id` | 逐键 remove | global-metadata 字面量表：`althi_uniq`=10282、`login_key`=12937、`uuid`=15217、`token`=14859、`user_id`=15196、`user_uniq`=15205，与 `already login!`(10275)、`login.php`(12935)、`create.php`(11131) 同属登录流程；libil2cpp.so 与 dex 里 0 命中 → 确认是 C# 字面量（只存在于 metadata） |
+| `shared_prefs/althi_uniq.xml`、`files/althi_uniq` 等独立凭证文件 | 删 | `althi_uniq` 有时单独存一个 xml / 无扩展名文件 |
+| `databases/` 里名字含 login/account/token/user/session/althi 的 `.db*` | 删 | 账号库 |
+| **`UnityCache/Shared/<bundle>/<hash>/{__data,__info}`** | **保留** | libunity.so 原生 AssetBundle 缓存（字面量 `UnityCache` / `__data` / `__info`），与登录无关 |
+| **汉化主表 `c_*`（22 张）** | **保留** | 我们投放的 `zh/Contents` 表 |
+| **`shared_prefs/elneazh_*`（含 `elneazh_names`、`elneazh_backup`）** | **保留** | 我们自己的设置 |
+| **PlayerPrefs 资源/版本键（`assetbundle_version`=10436 等）** | **保留** | 只 remove 登录键，不整体清空 prefs |
+
+- 附带修复：`Backup.add()` 原来的 `SKIP_DIRS` 只跳第 1 层，`ext/UnityCache` 这种深一层的仍会被打进备份 zip（备份因此巨大且慢）→ 改成任意层按名字跳。
+- `restore()` 里"清掉备份没登记的 sv1_*"也收窄为**只碰 `sv1_*`**，不碰缓存与汉化表。
+- 自检：`python tools/verify_identity.py` → `minimal wipe OK`（14 条文件规则 + 9 条 prefs 键规则，含 `UnityCache/__data` keep、`assetbundle_version` keep、`althi_uniq` delete）。
+- 编译：`python tools/ci_inj.py` → `javac OK, 58 classes`。
+- 目标达成路径：删掉登录键后 `UuidPlugin.GetUUID`（so_patch_zh.py 补丁：无缓存 id 就生成随机）会给新 uuid，`althi_uniq` 清空后重新取，AssetBundle 缓存仍在 → **重开不需要重新下载数据包，直接新建人物**。
+- 未验证：真机。若某些机型把资源版本键也放进了上述独立凭证 xml（`althi_uniq.xml`），那份会被整个删掉 → 最坏是重新校验一次版本，不会重下整包（`UnityCache` 在）。

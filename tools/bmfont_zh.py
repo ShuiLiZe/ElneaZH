@@ -286,7 +286,9 @@ def apply(env_file, ttf_path, extra_chars=(), log=print):
 
     area_glyphs = [glyph(i, gid) for gid, i in area_ids.items()]
     name_glyphs = [glyph(i, gid) for gid, i in name_ids.items()]
-    name_glyphs += [glyph(i, gid) for gid, i in area_ids.items() if is_han(chr(gid)) and gid not in name_ids]
+    # 汉字只进 Area 字体（显示），不进 Name 字体。
+    # Name 字体就是游戏校验「允许取的字符」的字形集，把汉字塞进去等于允许玩家用中文取名；
+    # 中文名会写进存档并随 read.php / pvp.php / 好友列表上传，服务器侧一眼可疑。
 
     # ----- write objects -----
     vw, vh = W, RH                                    # virtual font texture = the sheet itself
