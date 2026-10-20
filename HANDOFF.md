@@ -1,193 +1,129 @@
 # HANDOFF — 现状（只写当前状态；过程见 docs/CHANGELOG.md，规矩见 AGENTS.md）
 
-_最后更新：2026-10-21 05:55 CST_
+_最后更新：2026-10-21 06:15 CST_
 
-## 2026-10-21 05:55 单机模式改走 native：面板入口 + 请求发送在 il2cpp 层挡住（待真机验证）
+## 2026-10-21 06:15 单机模式：六族 native 钩子，联网/付费入口照常显示但置成不可用（待真机验证）
 
-上一节里那条「已知风险：Unity 自建连接、Java 侧工厂可能拦不到」现在有了正面解法：
-**在 il2cpp 运行时按名字解析游戏自己的方法，挂 inline hook**。新增的东西全部在
-`libelneagate.so` 里（和上传前的名字闸门共用同一个 .so），Java 侧只是外壳。
+上一版（05:55）只挂两族：`Add*Panel` 直接返回 NULL（入口**不创建**）、`HttpSystem` 请求返回 0。
+问题很明显：**返回 NULL 的入口一旦被调用方解引用就会空引用**，而「入口整个消失」也不符合
+「提示单机模式不可用」的要求。这一版改成六族，**入口照常显示、在原生层置成不可用**。
 
-### 为什么非得走 native（别再重复调研）
-- 游戏 UI 与网络都在 il2cpp（`lib/arm64-v8a/libil2cpp.so`，61 MB）；**Java 层反射拿不到**
-  `MenuCell.EnableFlag` / `AbstractPanel.SetPanelEnabled`，`base.apk` 的 dex 里
-  `AndroidUuidPlugin`/`AndroidTools`/`GetUUID` 等 **0 命中**，也没有可用的 JNI 出口。
-- `libil2cpp.so` 的代码段和字符串里 **grep 不到** `MenuCell`/`AddShopPanel`/`HttpSystem` 明文，
-  名字只存在于 `global-metadata.dat`。→ 只能运行时用 il2cpp 的导出 API 按名字查。
+### 六族钩子（编号 = Java `OfflineGate.TARGET_*` = C `EG_TARGET_*`，两处必须一致）
 
-### 怎么做的
-`native/elneagate/eg_offline.c`（新）：
-1. `dlsym` 取 `il2cpp_domain_get` → `il2cpp_domain_get_assemblies` →
-   `il2cpp_assembly_get_image` → `il2cpp_class_from_name` → `il2cpp_class_get_method_from_name`；
-2. 遍历**所有** assembly 找 `ns::class`（表里命名空间写 `*` 表示不限），按 0..6 个参数
-   依次试 `il2cpp_class_get_method_from_name`，取 `MethodInfo` 的**第一个字段**当函数地址；
-3. 用 `A64HookFunction`（vendor/And64InlineHook）挂上去，每族留 64 个 hook 槽；
-4. hook 里现读开关值（`eg_of_set_state` 灌进来的 `'1'/'0'`）：
-   - **面板族**（target 1）→ 直接 `return NULL`，面板**不创建**（比「打开再关掉」安全，
-     不会留半初始化实例）；
-   - **请求族**（target 2）→ 也返回「失败」，让游戏走它**原本的**通信失败分支
-     （游戏自带 `OfflineData`/`IsOfflineActive`/`errorOfflineCheckHttp` 那一套离线状态）。
-5. **解析不到就跳过并打 `ElneaOffline` 日志**，绝不崩、绝不空指针调用；开关关了立刻回到原函数。
+| # | 名字 | 挂什么 | 单机时怎么做 |
+|---|------|--------|--------------|
+| 1 | PANEL | 纯「打开面板」的入口（`OpenShopPanel` 等 12 条） | 返回 NULL，入口不创建（返回值没人用） |
+| 2 | HTTP | `HttpSystem.httpConnect`/`connectWWW`/`AddHttpQueue`/`StartHttpQueue`/`UpdateUserInfoPair` | 返回 0，一个字节都不发，交给游戏自己的通信失败/离线分支 |
+| 3 | GATE | 47 个 `Add*Panel` 工厂（商店/内购/邮箱/好友/PVP/排行/公告/活动/广告…） | 面板照常创建，创建后立刻 `set_PanelEnabled(false)` |
+| 4 | BUTTON | 34 个 `*ButtonClick` 入口回调 | 原函数照常跑（不改游戏自己的显隐判断），再 `set_interactable(false)` |
+| 5 | FLAG | `MenuCell.set_EnableFlag`/`set_ActiveFlag`、`InfoMenuPanel.set_isActiveCheckBrokenPanelButton` | 原逻辑跑完后 EnableFlag=0、ActiveFlag=null |
+| 6 | MASKS | `AbstractPanel.addMaskCollider*`/`addNowLoadingPanel` | 不加遮罩，玩家不会被困在提示后面那层黑幕里 |
 
-`inj/.../OfflineGate.java`（新）：加载 .so、重试安装（il2cpp 起得比 ContentProvider 晚，
-最多等 `waitMs`，**绝不拖住启动**）、开关切换时 `push` 新状态、`stats()`/`describe()`/`probe()`。
-白名单两张表（`panelTable()` 41 条、`httpTable()` 3 条）都在这里，改名字只改这一个文件。
+**为什么不用「全部返回 NULL」**：`Add*Panel` 的返回值调用方会立刻使用（`var p = AddMailPanel(...)`），
+返回 NULL 就是空指针；而 `set_PanelEnabled(false)` 是面板自己的开关，对象合法存在、内部按钮全禁用，
+崩不了。这条是本版最重要的设计判断。
 
-挂的面板（`Add*Panel` 工厂方法族，全部取自语义明确的名字）：
-商店/内购（`AddShopPanel`、`AddShopMenuPanel`、`AddShopBuyConfirmPanel`、
-`AddShopBuyPreviewConfirmPanel`、`AddDropItemBuyPanel`、`AddGemBuyListPanel`、
-`AddTradeShopListPanel`、`AddPremiumPanel`、`AddChargesShopListPanel`，
-以及 `AddGachaPanel`/`AddGachaEffectPanel`/`AddCostumeGachaPanel`/`AddFightGachaPanel`/`AddInteriorGachaPanel`）、
-邮箱/序列码（`AddMailPanel`/`AddMailDetailsPanel`/`AddMailInputPanel`/`AddSerialCodeInputPanel`）、
-好友/结盟（`AddFriendListPanel`/`AddAlliancePanel`/`AddTouchAlliancePanel`）、
-PVP/对战/联赛（`AddPvpPreparePanel`/`AddPvpResultPanel`/`AddMatchPreparePanel`/
-`AddTournamentPanel`/`AddVoteListPanel`/`AddLeaguePanel`）、
-排行（`AddKingdomRankingPanel`/`AddGunnerRankingPanel`/`AddFishingRankingListPanel`/
-`AddLimitedEventRankingListPanel`）、
-公告/活动（`AddNoticeInfoPanel`/`AddNoticeDetailsPanel`/`AddEventPanel`/
-`AddLimitedEventPanel`/`AddLimitedEventPortalPanel`/`AddGroupEventListPanel`）、
-广告/网页/账号/迁移/举报（`AddAdPanel`/`AddWebPanel`/`AddAccountSettingPanel`/
-`AddAccountInputPanel`/`AddMigrantPasswordIssueListPanel`/`AddReportPanel`）。
+### 怎么做的（`native/elneagate/eg_offline.c`）
+1. `dlsym` 取 `il2cpp_domain_get` → `il2cpp_domain_get_assemblies` → `il2cpp_assembly_get_image`
+   → `il2cpp_class_from_name` → `il2cpp_class_get_method_from_name`；
+   另取 `il2cpp_object_get_class`（**从实例拿类**才能找到 setter，静态类型往往是 `object`）
+   和 `il2cpp_thread_attach`（在非游戏线程调托管方法前必须 attach）。
+2. 遍历所有 assembly 找类（表里命名空间写 `*` 表示不限），按 0..8 个参数依次试解析方法名，
+   取 `MethodInfo` 的**第一个字段**当函数地址。
+3. `A64HookFunction` 挂上去；`EG_MAX` 96 个槽，转发函数 `eg_hook_0..95` 用宏生成。
+4. `eg_invoke(self, "set_PanelEnabled", 1, NULL, NULL)` 这种按名字调 setter 的小工具；
+   所有单机时的追加动作都在 `eg_dispatch` 里按 `target_kind` 分派。
+5. 开关值 `'1'/'0'` 由 Java 侧 `push` 灌入、**每次回调现读**，切开关不用重进游戏。
+6. 解析不到的条目：`resolve miss: ...` 打一行日志并跳过，**绝不崩**。
+
+白名单全部在 `inj/.../OfflineGate.java`（`buttonTable()`/`gateTable()`/`panelTable()`/
+`httpTable()`/`flagTable()`/`masksTable()`），改名单只改这一个文件。
 
 ### 接线
-- `ZhInit.onCreate`：`OfflineGate.install(getContext(), 1)`，**自己的 try/catch**，排在
-  `NameGate.install` 与 `NetBlocker.install` 之后、`SelfCheck.run` 之前。
-- `Support` 支援弹窗：开关翻转时先 `OfflineGate.push(next)` 再改界面（hook 现读，立刻生效）；
-  单机时多一行原生闸门现状（`OfflineGate.summary()`：挂了几个入口、已挡几次）。
-- `SelfCheck`：新增 `offline native: ...` / `offline native api: n/8` / 两族条目数。
+- `ZhInit.onCreate`：`OfflineGate.install(getContext(), 1)`，自己的 try/catch，
+  排在 `NameGate.install` / `NetBlocker.install` 之后、`SelfCheck.run` 之前。
+- `Support` 支援弹窗：开关翻转时先 `OfflineGate.push(next)` + `OfflineGate.resetStats()` 再改界面；
+  单机时多一行 `OfflineGate.summary()`（挂了几个点、已挡几次请求/置灰几次入口）。
+- `SelfCheck`：`offline native: ...`、`offline native api: n/5`、六族条目数、`offline native per target: [...]`。
 
 ### 边界（刻意保留的，别改）
-- **不伪造服务器回包**：native 侧没有任何组包逻辑，`verify_offline.py` 里有一条断言专门钉住
-  「`native/elneagate/eg_offline.c` 里不许出现 `il2cpp_object_new` / 造 JSON 字符串」。
-- 不删服务器标记、不改设备码、不绕反作弊；已购/已解锁内容沿用本机上次记录，不查服务器。
-- **armv7 没有 hook 引擎**（And64InlineHook 只有 AArch64 实现）：armv7 设备上原生族直接跳过
-  （`nativeInstall` 返回 -4），只剩 Java 层的 `NetBlocker` 兜底。真机以 arm64 为准。
+- **不伪造服务器回包**：native 侧没有任何组包/造响应对象的逻辑；`verify_offline.py` 有断言钉住
+  「`eg_offline.c`/`OfflineGate.java` 里不许出现 `il2cpp_object_new` / `il2cpp_string_new('{')`」。
+- 不做破解内购、不改设备码、不删服务器标记、不绕反作弊。
+  已购/已解锁内容沿用本机上次记录（`Offline.purchaseHint()`），不向服务器查询。
+- **资源下载不动**：下载走 `AssetBundleManager`，不带身份信息，边玩边下照旧。
+- **armv7 没有 hook 引擎**（And64InlineHook 只有 AArch64）：armv7 上 `nativeInstall` 返回 -4，
+  整族跳过，只剩 Java 层 `NetBlocker` 兜底。真机以 arm64 为准。
 
-### 必须先确认的（由你判断，我不擅自改）
-1. **面板 hook 会不会让菜单缺项甚至崩**：`Add*Panel` 返回 NULL，游戏里如果有代码
-   `var p = AddMailPanel(...); p.something()` 就会空引用。真机先开单机模式、把主菜单每个入口点一遍。
-   崩了就把对应条目从 `panelTable()` 删掉重发（条目独立，不影响别的）。**没有**为了「保险」去伪造回包或改游戏逻辑。
-2. **请求族 hook 的返回值语义**：`httpConnect` 在 C# 里可能是 `IEnumerator`/`void`/`bool`，
-   返回 NULL 对前两者是合法的（协程不跑 / 直接返回），对 `bool` 是 false。
-   若真机上表现为「卡在网络等待」，就先只留 Java 层 `NetBlocker`（把 `httpTable()` 清空）。
-3. **资源下载**：下载走 `AssetBundleManager`（另一条路径，不带身份信息），本闸门**没碰它**，
-   边玩边下照旧。若某版本改成「先请求带身份 php 拿临时 URL」，那条 php 会被面板/请求族挡住 —— 那时再登记例外。
+### 必须先确认的（真机才知道，我不擅自改）
+1. **`set_PanelEnabled` / `set_interactable` / `set_EnableFlag` 是不是这些类型的真实成员名**：
+   名字全部来自 `global-metadata.dat`（`AbstractPanel` 22949 行起、`MenuCell` 27487 行起），
+   但**能不能在运行期的具体实例上解析到**只有真机日志能确认。
+   看 `adb logcat -s ElneaOffline`：有 `resolve miss: *\tK\tm` 就是该条没解析上（跳过，无害）；
+   有 `greyed`/`made inert`/`built but disabled` 就是生效了。
+2. **置灰后面板是否仍可正常关闭**：`set_PanelEnabled(false)` 会不会让面板连关闭按钮都点不动。
+   若会，把那几个 `Add*Panel` 从 `gateTable()` 移到 `panelTable()`（改成返回 NULL），或直接删掉该条。
+3. **`httpConnect` 的返回值语义**：返回 0 对 `IEnumerator`（协程不跑）/`void`（直接返回）合法，
+   对 `bool` 是 false。真机若表现为「一直转圈等网络」，把 `httpTable()` 清空，
+   只留 Java 层 `NetBlocker`（`Offline.allowWhileOffline` 那条闸）。
+4. **启动是否强依赖登录回包**：若开单机后卡在标题/维护画面，说明登录流程必须拿到服务器回包。
+   那就**不要伪造回包**，改为只挡写操作（`Offline.WRITE` 表里的 `save2`/`save`/`kpi` 等），
+   读类放行 —— 这条限制从第一版就写在 `Offline.limits()` 里。
 
+## 2026-10-21 05:55 单机模式改走 native（已被上面 06:15 版取代，只留结论）
+
+事实与 06:15 版相同，不再重复：Java 层反射不到 `MenuCell.EnableFlag`/`AbstractPanel`；
+`libil2cpp.so` 里 grep 不到这些名字（只在 `global-metadata.dat`）；
+`base.apk` 的 dex 里 `AndroidUuidPlugin`/`AndroidTools`/`GetUUID` **0 命中**。→ UI 与网络只能走 il2cpp。
+那版的「面板族返回 NULL」已被证明不够安全，见 06:15 节表格。
 
 ## 2026-10-21 03:40 单机模式 + 分享/导出（分支 feat/offline-share，待真机验证）
 
 ### 单机模式：开关，默认关，开了就真的一个字节都不出手机
 入口：游戏内 `Support`（汉化设置/支援弹窗）→「单机模式」开关。状态存
-`shared_prefs/elneazh_settings.xml`（键 `offline`），**随存档备份/恢复一起走**（Backup 已覆盖 shared_prefs）。
+`shared_prefs/elneazh_settings.xml`（键 `offline`），`Backup` 会跟着存档一起备份/恢复。
 
-- `inj/.../Offline.java`：状态 + 服务器判定 + 本机回包（全纯函数，可离线测）。
-  `isGameServer()` 按 **host 后缀**（`althi.co.jp` 或 `.althi.co.jp`）**且** 路径含 `/sns04/` 判定，
-  覆盖 metadata 里的四个入口（app- / cdn- / res- / 裸域）；**不用 contains**，`althi.co.jp.evil.com` 不算。
-- `inj/.../NetBlocker.java`：进程内网络闸门。
-  1. `URL.setURLStreamHandlerFactory` 接管 http/https：命中游戏服务器 → **不建立任何 socket**，
-     由 `LocalConnection` 就地给出本机生成的离线回包；上传方向的 `getOutputStream` 直接吞掉。
-  2. 兜底 `ProxySelector.setDefault`：漏网的请求代理指向 `127.0.0.1:1`（连不上=不发出去）。
-  3. 放行分支用 ThreadLocal 保镖 + 重新 `new URL(...)` 回默认 handler，避免 https 自递归。
-  `ZhInit.onCreate` 里 `NetBlocker.install` 单独 try/catch，装不上只打日志。
-- 界面文案（`Offline.limits()`）明确写出：单机时**云存档、好友、邮件、PVP、礼物不可用**；
-  存档只在本机、本地存档照常读写；服务器请求全部在本机拦下（含登录）、设备信息不外发；
-  关掉开关立刻恢复联网、无需重开游戏。
+判定「游戏服务器」：`Offline.isGameServer()` 按 **host 后缀**认 `althi.co.jp` 及其所有子域
+（**不用 contains** —— 会把 `althi.co.jp.evil.com` 误判成自家服务器），且路径含 `/sns04/`。
+Java 层闸门 `NetBlocker`（`URL.setURLStreamHandlerFactory` + `ProxySelector`）每个请求现读开关，
+命中就本地接住、不发出去。native 闸门（上一节）是更强的一层。
 
 ### 不做 / 边界（刻意保留的）
-- **不伪造服务器业务数据**：离线回包一律 `HTTP 200` + `{}`（kpi/cheater_flag 类给 `ok`），
-  不含存档、角色、物品，也不含设备/账号信息；它只是「服务器答了，但什么都没有」，让 C# 层走
-  「没有字段 → 默认值」分支而不是网络错误分支。
-- 不删服务器标记、不改设备码、不绕反作弊。
-- **已知风险（真机必须先验这条）**：游戏 HTTP 走 `UnityWebRequest`，传输层是 native curl，
-  静态看**不经过 java.net**。如果真机上 `adb logcat -s ElneaZH-NET` 一直不出现
-  `offline: intercepted ...`，说明 Unity 自建了连接、Java 侧工厂拦不到，
-  那么单机模式下仍可能有请求发出（此时开关只是一个「界面声明」，不能当保证）。
-  SelfCheck 会写 `offline blocked so far: ...`，`none` 就是没拦到。
-- 若 Unity 确实绕过，下一步只能真机动态 hook（Frida/LSPatch）或在 native 层拦，
-  那时才谈得上「彻底」。**没有**为了「看起来能拦」去伪造登录回包或改服务器侧状态。
+- 不伪造服务器业务数据（存档、角色、物品都不是编的）、不改设备码、不删服务器标记、不绕反作弊。
+- `Offline.limits()` 里写清了单机时不可用的东西：云存档、好友、邮件、PVP、礼物。
 
-### 扩展包 / 资源下载在单机模式下的处理（2026-10-21 补充）
+### 扩展包 / 资源下载在单机模式下的处理（2026-10-21 补充，别再改回去）
+**结论：资源下载放行。** 依据（写进代码注释与 `Offline` 的类注释，勿推翻）：
+- 下载走 `AssetBundleManager.downloadAndCache` → `get_Url` → `UnityWebRequest`，
+  由 `getEnvironmentURL()`/`getAssetBundleURL()`/`getManifestURL()` 拼地址，**不经过 HttpSystem**；
+- `AssetBundleManager` 整块的字段/成员里 `user_number`/`crypt_key`/`UserNumberOnServer`/
+  `CryptKeyOnServer`/`key_header_info`/`addUniqArg`/`uniq`/`uuid`/`playerId`/`token`
+  **全部 0 次命中** —— 即这条下载路径不带任何账号或设备标识；
+- 身份参数只存在于 `HttpSystem`（即 `/sns04/*.php`）。
 
-**先说查到的事实**（免得下次再猜）：
+放行/拦截规则（`Offline.allowWhileOffline`）：
+- **放行**：非游戏服务器 且 非资源宿主的地址；althi 宿主上「资源形状」的路径
+  （`.bundle`/`.unity3d`/`.ab`/`.assetbundle`/名字含 `assetbundle`/末段是 `manifest` 或 `*.manifest`）；
+  `*.php` 被显式排除在「资源形状」之外。
+- **拦截**：althi 宿主 + `/sns04/` + `*.php`（登录、存档上传、排行、邮件、PVP…）。
 
-- 游戏**没有独立的扩展包下载通道**。`Assets/Script` 全表 782 个 `.cs`，网络相关的只有
-  `GameSystem/HttpSystem.cs`、`HttpRequest.cs`、`AssetBundleManager.cs`、`Unity5Purchase.cs`、
-  `UnityIAPManager.cs`。其中 **`AssetBundleManager` 是独立的下载路径**，不经过 `HttpSystem`。
-- 资源清单与 bundle 基址**是服务器下发的，客户端没有硬编码 CDN**：
-  global-metadata 里 `HttpSystem` 的 `listURL` / `assetBundleURL` / `cacheFlag` 三个字段，
-  以及 `AssetBundleManager.getAssetBundleURL()` / `getEnvironmentURL()` / `getManifestURL()` /
-  `initializeLoadAssetBundleInfo()` / `downloadAndCache` / `get_Url` / `downloadingData` /
-  `PreLoadData` / `assetCacheData`。
-  新增的 bundle（教程图、扭蛋横幅等）落在 `files/UnityCache/Shared/`（见本文件 153~154 行）。
-- **只有 `/sns04/*.php` 这条路上带身份**：`HttpSystem.addUniqArg` + `key_header_info` +
-  `user_number` / `crypt_key`（账号与设备标识）。**bundle 下载那条路一次都不出现这些字段**——
-  这是「资源照常下载」能成立的依据，明细见下方「证据」。
-- 游戏自己有一套「离线领取」流程（`OfflineData` / `IsOfflineActive` /
-  `successOfflineHttp` / `successOfflineCheckHttp` / `errorOfflineCheckHttp`），
-  这也是判断「离线时哪些读取可以沿用上次结果」的依据。
-
-**据此的放行规则（2026-10-21 按用户要求改定：边玩边下载必须可用）**：
-
-| 类别 | 例子 | 单机时 | 说明 |
-|---|---|---|---|
-| 已下载的 bundle / 存档 | `files/UnityCache/Shared/*`、本地存档 | **照常可用** | 纯本地读，不碰网络，本闸门也不拦 file:// |
-| **资源 / 扩展包 bundle 下载** | `res-elnea.althi.co.jp/**/x.bundle`、`cdn-elnea/**/AssetBundle`、`*.unity3d`、`*.ab`、`*.assetbundle`、`*/manifest` | **放行**（真的发出去） | 该路径**不带任何身份信息**（证据见下） |
-| 游戏服务器上的 PHP 接口（读/写/登录/资源清单） | `read.php` `load.php` `save2.php` `login.php` `ReadResourceInfo.php` … | **拦**（本机回 200 `{}`） | 这些走 `HttpSystem.addUniqArg`，带 `user_number` / `crypt_key` |
-| 非游戏服务器的地址 | 广告、他人的 CDN | **不拦** | 与游戏存档/身份无关 |
-
-**「下载不带身份」的证据**（这是这次改动的核心依据，别拍脑袋推翻）：
-把 global-metadata 里 `AssetBundleManager` 整块字段名数一遍，下列**全部出现 0 次**：
-`user_number`、`crypt_key`、`UserNumberOnServer`、`CryptKeyOnServer`、
-`key_header_info`、`addUniqArg`、`uniq`、`uuid`、`playerId`、`token`。
-下载实际走 `AssetBundleManager.downloadAndCache` → `get_Url` → `UnityWebRequest`，
-由 `getEnvironmentURL()` / `getAssetBundleURL()` / `getManifestURL()` 拼地址，
-**不经过** `HttpSystem`，所以也不带任何身份参数。
-身份参数只出现在 `HttpSystem`（`addUniqArg` / `key_header_info` / `user_number` / `crypt_key`）那条路上，
-即所有 `/sns04/*.php` —— 这些照旧全拦。
-
-- 规则集中在 `Offline.allowWhileOffline(String)` 一处：
-  `if (isAssetDownload(url)) return true;` 之后才 `return !intercept(url, true);`
-  `Offline.isAssetHost()` 限定只有 althi 那批宿主；`Offline.isAssetDownload()` 做资源形状识别，
-  **显式排除 `.php`**（接口不算资源）；`downloadClass()` 分 `DL_ASSET` / `DL_SNSPHP` / `DL_OTHER`（日志用）。
-- 放行的下载会在 logcat 记一条 `offline: pass through ASSET download <name> (no identity info, allowed)`，
-  `NetBlocker.assetAllowed()` 计数；真的拦到「需要身份的资源接口」时 `NetBlocker.assetHits()` 加一。
-- 已购 / 已解锁内容：单机时沿用本机上次记录，不向服务器查询（`Offline.purchaseHint()`）。
-
-**放行名单（改代码必须同步改这段）**
-- **放行（不带身份）**：
-  - host ∈ `res-elnea.althi.co.jp`、`cdn-elnea.althi.co.jp`、`althi.co.jp`、任意 `*.althi.co.jp`
-    **且** 路径是资源形状：以 `.bundle` / `.unity3d` / `.ab` / `.assetbundle` 结尾，
-    或路径含 `assetbundle`，或末段是 `manifest` / `*.manifest`。
-  - 任何非 `althi.co.jp` 域的地址（别人的 CDN / 广告）。
-- **拦截（带身份）**：host ∈ 上面同一批 althi 宿主 **且** 路径含 `/sns04/` 且末段是 `*.php`
-  （登录、存档、排行、邮件、PVP、资源清单接口……），以及所有其它 `/sns04/` 非资源路径。
-
-**已知限制（真机要验）**：若游戏某次版本把 bundle 地址改成「先请求一个带身份的 php 拿临时 URL」，
-那一步会被拦，表现为资源下载失败但已缓存内容照常能玩；这时应把该 php 加入
-`Offline` 的放行例外并在此处登记（前提是它只回 URL、不含写操作）。**不伪造回包**。
+已知限制：若某个版本改成「先请求带身份的 php 拿临时 URL 再下载」，那条 php 会被挡。
+届时应把它加进放行例外并在本节登记，**不伪造回包**。
 
 ### 分享 / 导出（第三批）
-入口都在同一个 Support 弹窗的「分享 / 导出」区，三个按钮各自独立 try/catch，出错只 Toast：
+入口：`Support` 弹窗「分享 / 导出」区，三个按钮，各自独立 try/catch，出错只 Toast。
+- 导出存档：`Backup.make()` 现做一个 zip → `Share.stage()` 落到 `files/image_provider/`
+  → `FileProvider`（authority `jp.co.althi.elnea.en.zhfiles`）→ `ACTION_SEND` + `createChooser`。
+- 导入存档：`ACTION_OPEN_DOCUMENT` 选 zip → **先自动备份当前存档** → 走已有 restore。
+- 导出名字对照表：`elneazh_names` 别名表（中文↔拼音）→ `艾尔尼亚名字对照表.txt` → 分享。
 
-| 功能 | 入口 | 实现 |
-|---|---|---|
-| 导出存档 | Support →「导出存档」 | 先 `Backup.make(a,"导出")` 打一份新备份（后台线程），拷到 `files/image_provider/`，再用 `ACTION_SEND`（`application/zip`）走系统分享面板 → 微信/QQ/文件 |
-| 导入存档 | Support →「导入存档」 | `ACTION_OPEN_DOCUMENT` 选 zip → 已有的 `Backup.confirmRestore` → 先自动备份当前存档（`Backup.make(a,"恢复前")`）再恢复 |
-| 导出名字对照表 | Support →「导出名字对照表」 | `elneazh_names` 别名表 → `中文<TAB>拼音` 的 txt（UTF-8，带表头和条数）→ 同一套分享面板（`text/plain`） |
-
-- `inj/.../Share.java`：分享实现。uri 走 FileProvider；
-  authority = `jp.co.althi.elnea.en.zhfiles`，由 `tools/manifest_zh.py` 写进游戏 manifest
-  （`grantUriPermissions="true"`，paths 指向原包已有的 `@xml/image_share_filepaths` =
-  `files-path path="image_provider/"`）。
-- `Backup.uriOf(ctx,name)` 新增：把备份文件名换成 uri（找不到返回 null，不抛）。
-- `manifest_zh.py` 另加：`SupportActivity` 加 `noHistory`；Application 加 `requestLegacyExternalStorage`
-  （备份目录 `/sdcard/艾尔尼亚存档备份` 在 Android 10 上要能读）。
-
-### 离线验证（CI 里跑，不需要手机）
-- `python tools/verify_offline.py`：**88 项**源码级护栏（判定范围/端点表/回包/文案/入口/try-catch/下载放行规则）。
-- `java com.shuilize.elneazh.inj.OfflineTest`：**132 项**真跑 Java（`tools/offline_test/`，
-  android 类用极小 stub），含：资源 bundle 在单机时**放行**、`*.php` 接口在单机时**照拦**、
-  已购内容沿用本机记录、提示语措辞。这两条已接进 `.github/workflows/build-check.yml`。
+## 离线验证（CI 里跑，不需要手机）
+- `python tools/verify_offline.py` —— **165 项**源码级护栏（含六族表的格式/互不冲突、
+  资源下载不在拦截名单、不伪造回包的负向断言）。
+- `tools/offline_test/` 的 `OfflineTest`（JDK 直跑）—— **198 项**：六族编号、表格式、
+  去重、交叉冲突、覆盖面、native 未加载时「安静失败不抛」。
+- `python tools/verify_gate.py` —— .so 里必须含 `ElneaOffline` 标签、7 个 JNI 导出、
+  六族钩子的日志字符串（只在 arm64 检查，armv7 没有 hook 引擎）。
 
 ## 现在能用的版本
 - Release `latest` 的 ElneaZH.apk（每次推送自动构建）。装前先在游戏「Support → 存档数据」备份，卸载原版后安装汉化版（签名不同）。

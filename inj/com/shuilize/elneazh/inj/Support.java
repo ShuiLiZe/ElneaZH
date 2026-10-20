@@ -249,8 +249,10 @@ final class Support {
                     }
                     on[0] = next;
                     // 先把新状态推给原生闸门再改界面：hook 那边是现读的，推完立刻生效。
+                    // 顺便把上一轮的拦截计数清零，真机看日志时能分清是这一轮挡的。
                     try {
                         OfflineGate.push(next);
+                        OfflineGate.resetStats();
                     } catch (Throwable t) {
                         Log.w(TAG, "offline gate push", t);
                     }
@@ -275,7 +277,7 @@ final class Support {
                             dl.setText(blocked);
                         }
                     }
-                    Toast.makeText(a, next ? "单机模式已开启：面板入口已挡，请求不发出去"
+                    Toast.makeText(a, next ? "单机模式已开启：联网入口全部置灰，请求不发出去"
                                     : "单机模式已关闭：恢复正常联网",
                             Toast.LENGTH_SHORT).show();
                 } catch (Throwable t) {
@@ -300,7 +302,7 @@ final class Support {
             b.append("带账号/设备信息的接口（登录、存档、排行、邮件等）全部在本机被接住，不发出去。");
             b.append('\n').append("资源与扩展包边走边下不受影响：这条下载路径不带任何身份信息。");
             b.append('\n').append("游戏内商店、邮箱、好友、PVP、排行、公告、活动、广告的入口"
-                    + "会在原生层直接不创建（打不开），不走服务器。");
+                    + "照常显示，但在原生层被置成不可用（变灰、点不开），不发任何请求。");
             try {
                 String gate = OfflineGate.summary();
                 if (gate.length() > 0) b.append('\n').append(gate).append('。');

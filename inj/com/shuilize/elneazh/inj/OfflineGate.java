@@ -14,16 +14,18 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>和名字闸门 {@link NameGate} 共用同一个 {@code libelneagate.so}，但挂的是完全不同的东西：
  * 用 il2cpp 运行时 API（{@code il2cpp_domain_get} → {@code il2cpp_domain_get_assemblies} →
  * {@code il2cpp_assembly_get_image} → {@code il2cpp_class_from_name} →
- * {@code il2cpp_class_get_method_from_name}）**按名字**把游戏自己的方法解析出来，再挂 inline hook：
+ * {@code il2cpp_class_get_method_from_name}，必要时再用 {@code il2cpp_object_get_class}）
+ * <b>按名字</b>把游戏自己的方法解析出来，再 inline hook。六族钩子的分工见下面 {@code TARGET_*}：
  *
  * <ol>
- *   <li><b>面板入口（target 1）</b>：{@code AddXxxPanel} 这一族工厂方法。单机时直接返回 NULL，
- *       入口不创建 → 商店 / 邮箱 / 好友 / PVP / 排行 / 公告 / 活动 / 广告等面板打不开。
- *       这比「打开再关掉」安全：不会有一个半初始化的面板实例留在游戏里。</li>
- *   <li><b>请求发送（target 2）</b>：{@code HttpSystem.httpConnect} / {@code AddHttpQueue} /
- *       {@code connectWWW}。单机时不发，直接返回「失败」，让游戏自己走它原本的通信失败分支
- *       （游戏里有 {@code OfflineData}/{@code IsOfflineActive} 与 {@code errorOfflineCheckHttp}
- *       那一套离线状态，交给它处理）。**不伪造任何服务器回包。**</li>
+ *   <li>{@link #TARGET_BUTTON} / {@link #TARGET_GATE}：商店、内购、邮箱、好友、PVP、排行、公告、
+ *       活动、广告的入口。单机时入口<b>照常显示</b>，但按钮变灰、面板一造出来就置为不可用
+ *       —— 用原生层把界面改掉，不改游戏自己的显隐判断，也不伪造任何服务器内容。</li>
+ *   <li>{@link #TARGET_HTTP}：{@code HttpSystem.httpConnect} / {@code AddHttpQueue} /
+ *       {@code connectWWW}。单机时不发，直接返回「失败」，让游戏走它自己的通信失败/离线分支
+ *       （游戏里有 {@code OfflineData}/{@code IsOfflineActive}、{@code errorOfflineCheckHttp}）。
+ *       <b>不伪造任何服务器回包。</b></li>
+ *   <li>{@link #TARGET_FLAG} / {@link #TARGET_MASKS}：菜单项旗帜与遮罩，兜底用。</li>
  * </ol>
  *
  * <p>为什么必须走 native：游戏的 UI 与网络都在 il2cpp 里，Java 层既反射不到
@@ -43,8 +45,8 @@ final class OfflineGate {
 
     private static boolean loaded;
     private static boolean loadTried;
-    private static volatile int panelResult = Integer.MIN_VALUE;
-    private static volatile int httpResult = Integer.MIN_VALUE;
+    private static volatile int[] lastResults = new int[0];
+    private static volatile boolean installedAny;
 
     private OfflineGate() {}
 
@@ -58,92 +60,250 @@ final class OfflineGate {
 
     private static native int[] nativeStats();
 
+    private static native int nativeResetStats();
+
     private static native int nativeProbe();
 
     private static native boolean nativeResolvable(String ns, String klass, String method);
 
-    // ---------------- 挂哪些方法 ----------------
+    private static native boolean nativeClassPresent(String klass);
+
+    // ---------------- 六族钩子 ----------------
+
+    /** 入口不创建（返回 NULL）。只用在「返回 NULL 也安全」的路径上。 */
+    static final int TARGET_PANEL = 1;
+    /** 请求发送：单机时不发。 */
+    static final int TARGET_HTTP = 2;
+    /** 面板造出来后立刻置为不可用（PanelEnabled=0）。 */
+    static final int TARGET_GATE = 3;
+    /** 按钮点击回调：单机时追加 set_interactable(false)。 */
+    static final int TARGET_BUTTON = 4;
+    /** 菜单项旗帜：EnableFlag=0 / ActiveFlag=null。 */
+    static final int TARGET_FLAG = 5;
+    /** 遮罩：单机时不加，页面保持可用。 */
+    static final int TARGET_MASKS = 6;
+
+    // ---------------- 该挂哪些方法 ----------------
 
     /**
-     * 面板入口白名单。名字全部来自 global-metadata.dat 里 {@code Add*Panel} 那一族工厂方法，
-     * 每行 {@code 命名空间 \t 类 \t 方法}；方法头字段表示「名字确定、参数个数待试」，
-     * native 侧会按 0..6 个参数依次尝试解析。
+     * 全部名单，形如 {@code {target, 一次性字符串}}，交给 native 逐行解析。
      *
-     * <p>{@code target} 用 {@link #TARGET_PANEL}。
+     * <p>名字全部来自 global-metadata.dat（面板类名、成员名、{@code Add*Panel} 工厂方法族），
+     * 每行 {@code 命名空间 \t 类 \t 方法}；命名空间写 {@code *} 表示不限。
+     * 解析不到的条目由 native 记一笔日志跳过，不影响其它条目。
      */
-    static String panelTable() {
-        StringBuilder b = new StringBuilder(4096);
-        // 商店 / 内购 / 付费
-        addEntry(b, "Shop", "AddShopPanel");
-        addEntry(b, "Shop", "AddShopMenuPanel");
-        addEntry(b, "Shop", "AddShopBuyConfirmPanel");
-        addEntry(b, "Shop", "AddShopBuyPreviewConfirmPanel");
-        addEntry(b, "Shop", "AddDropItemBuyPanel");
-        addEntry(b, "Shop", "AddGemBuyListPanel");
-        addEntry(b, "Shop", "AddTradeShopListPanel");
-        addEntry(b, "Shop", "AddPremiumPanel");
-        addEntry(b, "Shop", "AddGachaPanel");
-        addEntry(b, "Shop", "AddGachaEffectPanel");
-        addEntry(b, "Shop", "AddCostumeGachaPanel");
-        addEntry(b, "Shop", "AddFightGachaPanel");
-        addEntry(b, "Shop", "AddInteriorGachaPanel");
-        addEntry(b, "Charges", "AddChargesShopListPanel");
-        // 邮箱 / 礼物 / 序列码
-        addEntry(b, "Mail", "AddMailPanel");
-        addEntry(b, "Mail", "AddMailDetailsPanel");
-        addEntry(b, "Mail", "AddMailInputPanel");
-        addEntry(b, "Info", "AddSerialCodeInputPanel");
-        // 好友 / 结盟 / PVP / 对战
-        addEntry(b, "Friend", "AddFriendListPanel");
-        addEntry(b, "Alliance", "AddAlliancePanel");
-        addEntry(b, "Alliance", "AddTouchAlliancePanel");
-        addEntry(b, "Pvp", "AddPvpPreparePanel");
-        addEntry(b, "Pvp", "AddPvpResultPanel");
-        addEntry(b, "Match", "AddMatchPreparePanel");
-        addEntry(b, "Tournament", "AddTournamentPanel");
-        addEntry(b, "Tournament", "AddVoteListPanel");
-        // 排行 / 联赛
-        addEntry(b, "Ranking", "AddKingdomRankingPanel");
-        addEntry(b, "Ranking", "AddGunnerRankingPanel");
-        addEntry(b, "Ranking", "AddFishingRankingListPanel");
-        addEntry(b, "Ranking", "AddLimitedEventRankingListPanel");
-        addEntry(b, "League", "AddLeaguePanel");
-        // 公告 / 活动（服务器下发的）
-        addEntry(b, "Notice", "AddNoticeInfoPanel");
-        addEntry(b, "Notice", "AddNoticeDetailsPanel");
-        addEntry(b, "Event", "AddEventPanel");
-        addEntry(b, "Event", "AddLimitedEventPanel");
-        addEntry(b, "Event", "AddLimitedEventPortalPanel");
-        addEntry(b, "Event", "AddGroupEventListPanel");
-        // 广告 / 网页 / 账号 / 迁移 / 举报
-        addEntry(b, "Ad", "AddAdPanel");
-        addEntry(b, "Web", "AddWebPanel");
-        addEntry(b, "Account", "AddAccountSettingPanel");
-        addEntry(b, "Account", "AddAccountInputPanel");
-        addEntry(b, "Migrant", "AddMigrantPasswordIssueListPanel");
-        addEntry(b, "Report", "AddReportPanel");
+    static int[][] groups() {
+        return new int[][] {
+                { TARGET_BUTTON, 0 }, { TARGET_GATE, 0 }, { TARGET_PANEL, 0 },
+                { TARGET_HTTP, 0 }, { TARGET_FLAG, 0 }, { TARGET_MASKS, 0 },
+        };
+    }
+
+    /** 按 target 取名单。参数 {@code target} 必须是上面六个常量之一。 */
+    static String table(int target) {
+        switch (target) {
+            case TARGET_BUTTON: return buttonTable();
+            case TARGET_GATE: return gateTable();
+            case TARGET_PANEL: return panelTable();
+            case TARGET_HTTP: return httpTable();
+            case TARGET_FLAG: return flagTable();
+            case TARGET_MASKS: return masksTable();
+            default: return "";
+        }
+    }
+
+    /**
+     * 按钮 / 入口的点击回调（{@link #TARGET_BUTTON}）。
+     *
+     * <p>这些是「点了就打开付费/联网面板」的按钮函数，名字取自 global-metadata.dat 里
+     * {@code UI\Menu\InfoMenuPanel}、{@code UI\Shop\*} 等类的成员表。原函数照常执行，
+     * 单机时再去把按钮本身设成不可点 —— 游戏自己的显隐判断一概不动。
+     */
+    static String buttonTable() {
+        StringBuilder b = new StringBuilder(2048);
+        add(b, "ShopFooterButtonClick");
+        add(b, "shopButtonClick");
+        add(b, "GiftBoxButtonClick");
+        add(b, "boardMenuOpenButtonClick");
+        add(b, "BoardMenuOpenButtonClick");
+        add(b, "SerialCodeInputButtonClick");
+        add(b, "ChargeButtonClick");
+        add(b, "chargeButtonClick");
+        add(b, "gemBuyButtonClick");
+        add(b, "GemShopButtonClick");
+        add(b, "buyButtonClick");
+        add(b, "BuyButtonClick");
+        add(b, "mailButtonClick");
+        add(b, "MailButtonClick");
+        add(b, "friendButtonClick");
+        add(b, "FriendButtonClick");
+        add(b, "pvpButtonClick");
+        add(b, "PvpButtonClick");
+        add(b, "rankingButtonClick");
+        add(b, "RankingButtonClick");
+        add(b, "noticeButtonClick");
+        add(b, "NoticeButtonClick");
+        add(b, "whatsNewButtonClick");
+        add(b, "WhatsNewButtonClick");
+        add(b, "adButtonClick");
+        add(b, "AdButtonClick");
+        add(b, "premiumButtonClick");
+        add(b, "PremiumButtonClick");
+        add(b, "gachaButtonClick");
+        add(b, "GachaButtonClick");
+        add(b, "allianceButtonClick");
+        add(b, "AllianceButtonClick");
+        add(b, "tournamentButtonClick");
+        add(b, "TournamentButtonClick");
+        add(b, "accountButtonClick");
+        add(b, "AccountButtonClick");
+        add(b, "webButtonClick");
+        add(b, "WebButtonClick");
         return b.toString();
     }
 
     /**
-     * 请求发送白名单（{@code HttpSystem} 的成员，取自 global-metadata 的类成员表）。
-     * 只挑「真正把请求发出去」的那几个；解析不到的自动跳过。
+     * 面板创建后置灰（{@link #TARGET_GATE}）：这些 {@code Add*Panel} 有返回值、
+     * 调用方会立刻使用返回的对象，所以**不能**返回 NULL，改成「造出来但禁用」。
+     */
+    static String gateTable() {
+        StringBuilder b = new StringBuilder(3072);
+        // 商店 / 内购 / 付费
+        add(b, "AddShopPanel");
+        add(b, "AddShopMenuPanel");
+        add(b, "AddShopBuyConfirmPanel");
+        add(b, "AddShopBuyPreviewConfirmPanel");
+        add(b, "AddDropItemBuyPanel");
+        add(b, "AddGemBuyListPanel");
+        add(b, "AddTradeShopListPanel");
+        add(b, "AddChargesShopListPanel");
+        add(b, "AddPremiumPanel");
+        add(b, "AddGachaPanel");
+        add(b, "AddGachaMenuPanel");
+        add(b, "AddGachaEffectPanel");
+        add(b, "AddCostumeGachaPanel");
+        add(b, "AddFightGachaPanel");
+        add(b, "AddInteriorGachaPanel");
+        // 邮箱 / 礼物 / 序列码
+        add(b, "AddMailPanel");
+        add(b, "AddMailDetailsPanel");
+        add(b, "AddMailInputPanel");
+        add(b, "AddSerialCodeInputPanel");
+        // 好友 / 结盟 / PVP / 对战
+        add(b, "AddFriendListPanel");
+        add(b, "AddAlliancePanel");
+        add(b, "AddTouchAlliancePanel");
+        add(b, "AddPvpPreparePanel");
+        add(b, "AddPvpResultPanel");
+        add(b, "AddMatchPreparePanel");
+        add(b, "AddTournamentPanel");
+        add(b, "AddVoteListPanel");
+        // 排行 / 联赛
+        add(b, "AddKingdomRankingPanel");
+        add(b, "AddGunnerRankingPanel");
+        add(b, "AddKnightReceiptPanel");
+        add(b, "AddGunnerReceiptPanel");
+        add(b, "AddFishingRankingListPanel");
+        add(b, "AddLimitedEventRankingListPanel");
+        add(b, "AddLeaguePanel");
+        // 公告 / 活动（服务器下发的内容）
+        add(b, "AddNoticeInfoPanel");
+        add(b, "AddNoticeDetailsPanel");
+        add(b, "AddEventPanel");
+        add(b, "AddLimitedEventPanel");
+        add(b, "AddLimitedEventPortalPanel");
+        add(b, "AddGroupEventListPanel");
+        add(b, "AddInfoMenuPanel");
+        // 广告 / 网页 / 账号 / 迁移 / 举报
+        add(b, "AddAdPanel");
+        add(b, "AddWebPanel");
+        add(b, "AddAccountSettingPanel");
+        add(b, "AddAccountInputPanel");
+        add(b, "AddMigrantPasswordIssueListPanel");
+        add(b, "AddReportPanel");
+        return b.toString();
+    }
+
+    /**
+     * 入口不创建（{@link #TARGET_PANEL}）：纯「副作用型」的打开入口，返回值没人用，
+     * 返回 NULL 只是「没打开」，游戏照常运行。
+     */
+    static String panelTable() {
+        StringBuilder b = new StringBuilder(1024);
+        add(b, "OpenShopPanel");
+        add(b, "OpenMailPanel");
+        add(b, "OpenFriendListPanel");
+        add(b, "OpenAlliancePanel");
+        add(b, "OpenPvpPanel");
+        add(b, "OpenRankingPanel");
+        add(b, "OpenNoticePanel");
+        add(b, "OpenEventPanel");
+        add(b, "OpenGachaPanel");
+        add(b, "OpenPremiumPanel");
+        add(b, "OpenAdPanel");
+        add(b, "OpenWebPanel");
+        return b.toString();
+    }
+
+    /**
+     * 请求发送（{@link #TARGET_HTTP}）：{@code HttpSystem} 里真正把请求发出去的成员
+     * （取自 global-metadata.dat 第 7670 行起的类成员表）。
      */
     static String httpTable() {
         StringBuilder b = new StringBuilder(512);
-        addEntry(b, "HttpSystem", "httpConnect");
-        addEntry(b, "HttpSystem", "connectWWW");
-        addEntry(b, "HttpSystem", "AddHttpQueue");
+        add(b, "HttpSystem", "httpConnect");
+        add(b, "HttpSystem", "connectWWW");
+        add(b, "HttpSystem", "AddHttpQueue");
+        add(b, "HttpSystem", "StartHttpQueue");
+        add(b, "HttpSystem", "UpdateUserInfoPair");
         return b.toString();
     }
 
-    /** 命名空间写 {@code *} 表示「不限」：native 侧会遍历所有 assembly 找同名类。 */
-    private static void addEntry(StringBuilder b, String cls, String method) {
-        b.append('*').append('\t').append(cls).append('\t').append(method).append('\n');
+    /**
+     * 菜单项旗帜（{@link #TARGET_FLAG}）：{@code MenuCell} 的 ActiveFlag/EnableFlag 写入路径
+     * （类名与成员名见 global-metadata.dat 27487 行起）。原逻辑跑完再清零。
+     */
+    static String flagTable() {
+        StringBuilder b = new StringBuilder(512);
+        add(b, "MenuCell", "set_EnableFlag");
+        add(b, "MenuCell", "set_ActiveFlag");
+        add(b, "InfoMenuPanel", "set_isActiveCheckBrokenPanelButton");
+        return b.toString();
     }
 
-    static final int TARGET_PANEL = 1;
-    static final int TARGET_HTTP = 2;
+    /**
+     * 遮罩（{@link #TARGET_MASKS}）：{@code AbstractPanel} 的遮罩系列
+     * （成员名见 global-metadata.dat 22949 行起）。单机时不加遮罩，避免玩家被
+     * 「不可用」提示后面那层黑幕困住。
+     */
+    static String masksTable() {
+        StringBuilder b = new StringBuilder(768);
+        add(b, "AbstractPanel", "addMaskCollider");
+        add(b, "AbstractPanel", "addMaskColliderBlack");
+        add(b, "AbstractPanel", "addMaskColliderWhite");
+        add(b, "AbstractPanel", "addMaskColliderClear");
+        add(b, "AbstractPanel", "addNowLoadingPanel");
+        return b.toString();
+    }
+
+    private static void add(StringBuilder b, String method) {
+        add(b, "*", method);
+    }
+
+    private static void add(StringBuilder b, String klass, String method) {
+        b.append('*').append('\t').append(klass).append('\t').append(method).append('\n');
+    }
+
+    /** 名单里一共有多少行（不含空行/注释），测试与自检用。 */
+    static int countLines(String table) {
+        if (table == null || table.isEmpty()) return 0;
+        int n = 0;
+        for (String line : table.split("\n")) {
+            String s = line.trim();
+            if (!s.isEmpty() && !s.startsWith("#")) n++;
+        }
+        return n;
+    }
 
     // ---------------- 加载 ----------------
 
@@ -198,24 +358,21 @@ final class OfflineGate {
     // ---------------- 安装 ----------------
 
     /**
-     * 安装两族 hook。放后台线程并最多等 {@code waitMs} 毫秒：il2cpp 比 ContentProvider 起得晚，
+     * 安装六族 hook。放后台线程并最多等 {@code waitMs} 毫秒：il2cpp 比 ContentProvider 起得晚，
      * 早到的调用会拿不到 API 指针，需要重试。
      *
      * <p>本方法**绝不抛异常**，也绝不让游戏的启动等太久（最长一次等 {@code waitMs}）。
      *
-     * @return 两族合计挂上的方法数；0 或负数表示这次没成（日志里有原因码）
+     * @return 六族合计挂上的方法数；0 或负数表示这次没成（日志里有原因码）
      */
     static int install(final Context ctx, int waitMs) {
         if (!load(ctx)) return -100;
         push(ctx);
-        final AtomicInteger panel = new AtomicInteger(Integer.MIN_VALUE);
-        final AtomicInteger http = new AtomicInteger(Integer.MIN_VALUE);
         final CountDownLatch done = new CountDownLatch(1);
         Thread t = new Thread(new Runnable() {
             @Override public void run() {
                 try {
-                    panel.set(installRetry(TARGET_PANEL, panelTable()));
-                    http.set(installRetry(TARGET_HTTP, httpTable()));
+                    installAll();
                 } catch (Throwable e) {
                     Log.w(TAG, "install failed", e);
                 } finally {
@@ -231,16 +388,35 @@ final class OfflineGate {
             Thread.currentThread().interrupt();
         } catch (Throwable ignored) {
         }
-        panelResult = panel.get();
-        httpResult = http.get();
-        int total = Math.max(0, panelResult) + Math.max(0, httpResult);
-        Log.i(TAG, "install done: panel=" + panelResult + " http=" + httpResult
-                + " total=" + total + " stats=" + describe());
+        int total = 0;
+        for (int r : lastResults) total += Math.max(0, r);
+        Log.i(TAG, "install done: " + describe());
         return total;
+    }
+
+    /** 逐个 target 装，每个都单独 try/catch：一族失败不影响其它族。 */
+    private static void installAll() {
+        int[][] gs = groups();
+        int[] results = new int[gs.length];
+        boolean any = false;
+        for (int i = 0; i < gs.length; i++) {
+            int target = gs[i][0];
+            try {
+                int n = installRetry(target, table(target));
+                results[i] = n;
+                if (n > 0) any = true;
+            } catch (Throwable t) {
+                results[i] = -102;
+                Log.w(TAG, "install target " + target + " threw: " + t);
+            }
+        }
+        lastResults = results;
+        installedAny = any;
     }
 
     /** 反复重试直到拿到正的挂载数（说明 il2cpp 已经起来、名字也解析上了）。 */
     private static int installRetry(int target, String table) {
+        if (table == null || table.isEmpty()) return 0;
         int last = Integer.MIN_VALUE;
         for (int i = 0; i < 60; i++) {
             try {
@@ -249,7 +425,8 @@ final class OfflineGate {
                 Log.w(TAG, "nativeInstall(" + target + ") threw: " + t);
                 return -102;
             }
-            if (last > 0) return last;
+            // 负数里只有 -1（il2cpp 还没可见）值得重试；-4/-5 是永久性的
+            if (last != -1) return last;
             try {
                 Thread.sleep(500);
             } catch (InterruptedException e) {
@@ -260,7 +437,7 @@ final class OfflineGate {
         return last;
     }
 
-    /** 卸掉所有 hook（关掉单机模式时也可以用；正常路径靠开关值就够，不必卸）。 */
+    /** 卸掉所有 hook（正常路径靠开关值就够，不必卸）。 */
     static int uninstall() {
         if (!loaded) return -1;
         try {
@@ -271,13 +448,22 @@ final class OfflineGate {
         }
     }
 
-    /** 运行时探测：我们依赖的 il2cpp API 能 dlsym 到几个（期望 8）。 */
+    /** 运行时探测：我们依赖的 il2cpp API 能 dlsym 到几个（期望 5）。 */
     static int probe() {
         if (!loaded) return -1;
         try {
             return nativeProbe();
         } catch (Throwable t) {
             return -2;
+        }
+    }
+
+    /** 清空拦截计数（切开关时调一次，真机看日志更直观）。 */
+    static void resetStats() {
+        if (!loaded) return;
+        try {
+            nativeResetStats();
+        } catch (Throwable ignored) {
         }
     }
 
@@ -291,7 +477,17 @@ final class OfflineGate {
         }
     }
 
-    /** {@code [已挂数量, 面板拦截次数, 请求拦截次数, 解析失败数]}；未加载返回 null。 */
+    /** 自检用：某个类在不在运行时里（不调用任何方法）。 */
+    static boolean classPresent(String klass) {
+        if (!loaded) return false;
+        try {
+            return nativeClassPresent(klass);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** {@code [已挂, 入口不创建, 请求拦截, 置灰, 遮罩, 解析失败, 回调异常]}；未加载返回 null。 */
     static int[] stats() {
         if (!loaded) return null;
         try {
@@ -305,8 +501,8 @@ final class OfflineGate {
 
     /**
      * 把 {@code assets/elneagate/lib<abi>/lib<name>.so} 解到私有目录再加载。
-     * 逻辑与 {@link NameGate.Libs#ensure} 一致（同一个 .so，同一份 assets），
-     * 这里单独放一份是为了让本类能在纯 JDK 环境里被测（不牵扯 NameGate 的其它依赖）。
+     * 逻辑与 {@link NameGate} 的一致（同一个 .so，同一份 assets），这里单独放一份是为了
+     * 让本类能在纯 JDK 环境里被测（不牵扯 NameGate 的其它依赖）。
      */
     static String unpack(Context ctx, String name) {
         String abi = android.os.Build.SUPPORTED_ABIS.length > 0
@@ -355,9 +551,12 @@ final class OfflineGate {
         if (s == null) return "native: not loaded";
         List<String> parts = new ArrayList<>();
         parts.add("hooked=" + s[0]);
-        parts.add("panel=" + s[1]);
-        parts.add("http=" + s[2]);
-        parts.add("miss=" + s[3]);
+        parts.add("skip=" + s[1]);
+        parts.add("req=" + s[2]);
+        parts.add("grey=" + s[3]);
+        parts.add("mask=" + s[4]);
+        parts.add("miss=" + s[5]);
+        parts.add("fault=" + s[6]);
         return "native: " + parts;
     }
 
@@ -368,6 +567,18 @@ final class OfflineGate {
         }
         int[] s = stats();
         if (s == null) return "原生闸门未就绪";
-        return "原生闸门已挂钩 " + s[0] + " 个入口，已挡面板 " + s[1] + " 次、请求 " + s[2] + " 次";
+        if (s[0] <= 0) return "原生闸门未挂上（il2cpp 未就绪）";
+        return "原生闸门已挂钩 " + s[0] + " 处：挡请求 " + s[2] + " 次、置灰入口 " + s[3]
+                + " 次、不放遮罩 " + s[4] + " 次";
+    }
+
+    /** 每一族的挂载结果（自检用，顺序与 {@link #groups()} 一致）。 */
+    static int[] results() {
+        int[] r = lastResults;
+        return r == null ? new int[0] : r.clone();
+    }
+
+    static boolean installedAny() {
+        return installedAny;
     }
 }

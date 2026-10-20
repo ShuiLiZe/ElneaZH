@@ -72,14 +72,19 @@ final class SelfCheck {
             r.append("offline asset downloads blocked: ").append(NetBlocker.assetHits()).append('\n');
             r.append("offline asset downloads allowed: ").append(NetBlocker.assetAllowed()).append('\n');
             r.append("offline download hint: ").append(Offline.downloadHint()).append('\n');
-            // 5) 原生单机闸门：il2cpp API 能拿到几个、面板/请求两族 hook 挂了几个。
+            // 5) 原生单机闸门：il2cpp API 能拿到几个、六族 hook 各挂了多少。
             //    本机若拿不到 il2cpp（示例进程里就是这样），probe 会是 0，属正常 —— 只有真机跑游戏时才有值。
             r.append("offline native: ").append(OfflineGate.describe()).append('\n');
-            r.append("offline native api: ").append(OfflineGate.probe()).append("/8\n");
-            r.append("offline native panel entries: ")
-                    .append(OfflineGate.panelTable().split("\n").length).append('\n');
-            r.append("offline native http entries: ")
-                    .append(OfflineGate.httpTable().split("\n").length).append('\n');
+            r.append("offline native api: ").append(OfflineGate.probe()).append("/5\n");
+            r.append("offline native hooked total: ").append(OfflineGate.installedAny()).append('\n');
+            r.append("offline native per target: ")
+                    .append(java.util.Arrays.toString(OfflineGate.results())).append('\n');
+            r.append("offline native button entries: ").append(OfflineGate.countLines(OfflineGate.buttonTable())).append('\n');
+            r.append("offline native gate entries: ").append(OfflineGate.countLines(OfflineGate.gateTable())).append('\n');
+            r.append("offline native panel entries: ").append(OfflineGate.countLines(OfflineGate.panelTable())).append('\n');
+            r.append("offline native http entries: ").append(OfflineGate.countLines(OfflineGate.httpTable())).append('\n');
+            r.append("offline native flag entries: ").append(OfflineGate.countLines(OfflineGate.flagTable())).append('\n');
+            r.append("offline native mask entries: ").append(OfflineGate.countLines(OfflineGate.masksTable())).append('\n');
             r.append("share: ").append(Share.describe()).append('\n');
             r.append("name table lines: ").append(Share.nameTableText(NameFix.aliasSnapshot()).split("\n").length).append('\n');
             // 2b) 存档区块名字槽：0x01 + 长度 + UTF-8 —— 中文名换拼音，其它字节必须不动

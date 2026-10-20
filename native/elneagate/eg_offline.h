@@ -1,40 +1,62 @@
-// ElneaZH · 单机模式 native 闸门（il2cpp 按名解析 + inline hook）
+// ElneaZH · 单机模式 native 闸门（接口）
 //
-// 由 elneagate.c 的 JNI 入口驱动（OfflineGate.java 调用）。两张钩子表：
-//   1) 面板入口族 Add*Panel：单机时回调直接返回 NULL —— onAdd 不执行，面板不会建出来，
-//      点主菜单里商店 / 邮箱 / 好友 / PVP / 排行 / 公告 / 活动 / 广告 / 内购那些入口没反应，
-//      底层也不会去请求服务器；线程池任务（如 AddGemBuyListPanel 的 Param 回调）被挡在源头。
-//   2) HttpSystem 的发送函数：单机时不发，直接按游戏自己的「通信失败」处理（回调 false）；
-//      资源/扩展包下载（AssetBundleManager）不在这一层，照常放行。
+// 与名字闸门（eg_names / NameGate）同一个 .so，但挂的是完全不同的一批方法：
+// 用 il2cpp 运行时 API 按**名字**解析出来，再 inline hook。
 //
-// 安全阀：按名字解析不到就跳过 + 打日志，绝不 hook 错函数；开关是运行时现读（OfflineGate.isOff()）。
-#ifndef EG_OFFLINE_H
-#define EG_OFFLINE_H
-
-#include <stddef.h>
+// 钩子族编号（Java 侧 OfflineGate.TARGET_* 必须一致）：
+//   1 PANEL   Add*Panel 入口：单机时返回 NULL，入口不创建
+//   2 HTTP    HttpSystem 发送方法：单机时返回 0（不发，走游戏自己的失败分支）
+//   3 GATE    Add*Panel 带返回值的：面板造出来后立刻置为不可用
+//   4 BUTTON  按钮点击回调：单机时追加 set_interactable(false)
+//   5 FLAG    菜单项旗帜切换：单机时 EnableFlag=0 / ActiveFlag=null
+//   6 MASKS   AbstractPanel 遮罩：单机时不加遮罩，页面保持可用
+#ifndef ELNEAZH_EG_OFFLINE_H
+#define ELNEAZH_EG_OFFLINE_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// 安装：解析 names 里的类/方法并挂第一个能解析的方法。返回 0 成功 / 负数为原因码。
-//   names 每行一条：<namespace>\t<class>\t<method>，method 空表示「类的 .cctor」
+#define EG_TARGET_PANEL  1
+#define EG_TARGET_HTTP   2
+#define EG_TARGET_GATE   3
+#define EG_TARGET_BUTTON 4
+#define EG_TARGET_FLAG   5
+#define EG_TARGET_MASKS  6
+
+// 挂一族钩子。names 是若干 "命名空间\t类名\t方法名" 行（'\n' 分隔，'#' 开头为注释）。
+// 返回新挂上的数量；<0 表示整族失败：
+//   -1 il2cpp API 还看不到（libil2cpp 未加载）
+//   -4 当前 ABI 没有 hook 引擎（armeabi-v7a）
+//   -5 target 编号非法
 int eg_of_install(int target, const char *names);
 
-// 取消安装（把第一次安装的钩子摘掉）。返回被摘掉的数量。
+// 还原所有 hook，返回还原数量
 int eg_of_uninstall(void);
 
-// 统计：[0]=已挂数量 [1]=面板拦截次数 [2]=HTTP 拦截次数 [3]=解析尝试的老版本数
-void eg_of_stats(int out[4]);
+// 开关：'1' 开 / '0' 关。hook 回调每次现读，切换不用重进游戏
+void eg_of_set_state(const char *state);
 
-// 单个函数按名字调用（自检用）：返回 1 表示调用成功。
-int eg_of_call(const char *ns, const char *klass, const char *method, int argc, void **argv);
+// 总闸（调试用）：0 时无论 state 是什么都不拦
+void eg_of_set_enabled(int on);
 
-// 运行时探测：libil2cpp.so 里能 dlsym 到几个我们依赖的 API。结果写成 "a,b,c" 计数用。
+// 统计：out[0]=已挂 out[1]=入口不创建 out[2]=请求拦截 out[3]=面板/按钮置灰
+//       out[4]=遮罩挡住 out[5]=解析失败 out[6]=回调异常
+void eg_of_stats(int out[7]);
+
+void eg_of_reset_stats(void);
+
+// 依赖的 il2cpp API 能 dlsym 到几个（期望 5）
 int eg_of_api_probe(void);
+
+// 只解析不调用：能不能按名字找到 ns::klass::method（ns 传 "*" 表示不限）
+int eg_of_resolvable(const char *ns, const char *klass, const char *method);
+
+// 只查不调用：这个类在不在运行时里（不区分命名空间）
+int eg_of_class_present(const char *klass);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif  // EG_OFFLINE_H
+#endif  // ELNEAZH_EG_OFFLINE_H

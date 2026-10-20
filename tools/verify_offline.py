@@ -221,19 +221,34 @@ for name, src in (("ZhInit", zh), ("Support", sup)):
 og = read("OfflineGate.java")
 check("nativeInstall" in og, "OfflineGate 把 hook 安装交给 native")
 check("nativePush" in og, "OfflineGate 把开关状态推给 native（切开关立刻生效，不用重进游戏）")
-check("TARGET_PANEL" in og and "TARGET_HTTP" in og, "两族 hook 分开装：面板入口 + 请求发送")
-check("AddShopPanel" in og, "面板名单含商店入口")
-check("AddMailPanel" in og, "面板名单含邮箱入口")
-check("AddFriendListPanel" in og, "面板名单含好友入口")
-check("AddPvpPreparePanel" in og, "面板名单含 PVP 入口")
-check("AddKingdomRankingPanel" in og, "面板名单含排行入口")
-check("AddNoticeInfoPanel" in og, "面板名单含公告入口")
-check("AddEventPanel" in og, "面板名单含活动入口")
-check("AddAdPanel" in og, "面板名单含广告入口")
+for t, msg in ((1, "入口不创建"), (2, "请求拦截"), (3, "面板置灰"), (4, "按钮失效"),
+               (5, "菜单旗帜"), (6, "遮罩")):
+    check(("TARGET_%d" % t) in og or ("TARGET_" + ["", "PANEL", "HTTP", "GATE", "BUTTON",
+                                                   "FLAG", "MASKS"][t]) in og,
+          "第 %d 族 hook 存在（%s）" % (t, msg))
+for name in ("TARGET_PANEL", "TARGET_HTTP", "TARGET_GATE", "TARGET_BUTTON", "TARGET_FLAG",
+             "TARGET_MASKS"):
+    check(name + " = " in og, "常量 %s 有固定值" % name)
+check("set_interactable" in og, "按钮失效走 Unity UI 的 set_interactable")
+# 置灰/失效/变灰用到的 setter 名字：真正的调用在 native 的 eg_invoke/eg_suppress_* 里，
+# Java 侧的表格与文档也要提到同一批名字，两边一旦走偏就静默不生效，这里把它钉住。
+check("PanelEnabled" in og and "EnableFlag" in og and "ActiveFlag" in og,
+      "置灰用到的成员名（PanelEnabled / EnableFlag / ActiveFlag）在 OfflineGate 有据可查")
+for bad in ("il2cpp_object_new", "il2cpp_string_new"):
+    check(bad not in og, "OfflineGate 侧也不造任何服务器对象（无 %s）" % bad)
+for panel in ("AddShopPanel", "AddMailPanel", "AddFriendListPanel", "AddPvpPreparePanel",
+              "AddKingdomRankingPanel", "AddNoticeInfoPanel", "AddEventPanel", "AddAdPanel",
+              "AddPremiumPanel", "AddGachaPanel", "AddSerialCodeInputPanel", "AddAlliancePanel"):
+    check("\"" + panel + "\"" in og, "面板名单含 %s" % panel)
 check("httpConnect" in og, "请求族含 HttpSystem.httpConnect")
 check("AddHttpQueue" in og, "请求族含 HttpSystem.AddHttpQueue")
-check(og.count("try") >= 6, "OfflineGate 处处 try/catch（%d 处）" % og.count("try"))
+check("connectWWW" in og, "请求族含 HttpSystem.connectWWW")
+check("AssetBundleManager" not in og and "downloadAndCache" not in og,
+      "资源下载路径不在拦截名单里（边玩边下必须可用）")
+check(og.count("try") >= 10, "OfflineGate 处处 try/catch（%d 处）" % og.count("try"))
 check("done.await(waitMs" in og, "安装不等太久（最多等 waitMs，绝不拖住启动）")
+check("countLines" in og, "名单行数可数（测试/自检用）")
+check("nativeResetStats" in og, "切开关时能清零计数（真机看日志更直观）")
 
 zh2 = read("ZhInit.java")
 check("OfflineGate.install" in zh2, "ZhInit 启动时装原生闸门")
@@ -262,7 +277,15 @@ if eg:
         check(api in eg, "native 用到 %s（按名字解析，不写死偏移）" % api)
     check("dlsym" in eg, "il2cpp API 用 dlsym 取（版本变了只是解析不到，不会崩）")
     check("ElneaOffline" in eg, "native 日志 TAG 是 ElneaOffline")
-    check("!e->orig" in eg, "没挂上就原样返回（绝不拿空指针去调）")
+    check("if (!orig) return NULL" in eg or "!orig" in eg,
+          "没挂上就原样返回（绝不拿空指针去调）")
+    for t in ("EG_TARGET_PANEL", "EG_TARGET_HTTP", "EG_TARGET_GATE", "EG_TARGET_BUTTON",
+              "EG_TARGET_FLAG", "EG_TARGET_MASKS"):
+        check(t in eg, "native 有 %s 分支" % t)
+    check("il2cpp_object_get_class" in eg, "native 用 il2cpp_object_get_class 从实例拿类再找 setter")
+    check("il2cpp_thread_attach" in eg, "调托管方法前先 attach 到 il2cpp 线程")
+    check("eg_is_off()" in eg, "每次回调都现读开关（切开关立刻生效）")
+    check("pthread_mutex_lock" in eg, "安装过程加锁（后台线程装、主线程读）")
     check("g_offline_flag" in eg, "开关值缓存在 native，hook 现读")
     check("MethodInfo" in eg, "注释里写清「地址 = MethodInfo 首个字段」（不依赖头文件布局）")
     # 不伪造回包：native 侧不许出现任何组包/造响应对象的逻辑
@@ -275,8 +298,10 @@ if os.path.isfile(fp):
     egc = io.open(fp, encoding="utf-8").read()
 check("eg_offline.h" in egc, "elneagate.c 引了 eg_offline.h")
 for jni in ("OfflineGate_nativeInstall", "OfflineGate_nativePush", "OfflineGate_nativeStats",
-            "OfflineGate_nativeProbe", "OfflineGate_nativeResolvable"):
+            "OfflineGate_nativeProbe", "OfflineGate_nativeResolvable",
+            "OfflineGate_nativeResetStats", "OfflineGate_nativeClassPresent"):
     check(jni in egc, "JNI 导出 %s" % jni)
+
 
 bg = io.open(os.path.join(ROOT, "tools", "build_gate.py"), encoding="utf-8").read()
 check("eg_offline.c" in bg, "build_gate.py 把 eg_offline.c 编进 libelneagate.so")

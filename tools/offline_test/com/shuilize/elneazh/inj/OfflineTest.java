@@ -136,53 +136,134 @@ public final class OfflineTest {
         //    native 相关的方法在 JDK 下必然「安静失败」，这里正好把「失败也绝不抛异常」钉住。
         ok(!OfflineGate.push(true), "native 未加载时 push 返回 false 而不是抛异常");
         ok(!OfflineGate.push(false), "native 未加载时 push(false) 也不抛");
-        ok(OfflineGate.stats() == null || OfflineGate.stats().length == 4, "stats 要么 null 要么 4 项");
+        ok(OfflineGate.stats() == null || OfflineGate.stats().length == 7, "stats 要么 null 要么 7 项");
         ok(OfflineGate.describe() != null && OfflineGate.describe().length() > 0, "describe 有内容");
+        ok(OfflineGate.summary() != null && OfflineGate.summary().length() > 0, "summary 有内容");
         ok(OfflineGate.probe() < 0, "native 未加载时 probe 返回负数（不假装已就绪）");
         ok(!OfflineGate.resolvable("*", "HttpSystem", "httpConnect"), "native 未加载时 resolvable=false");
+        ok(!OfflineGate.classPresent("HttpSystem"), "native 未加载时 classPresent=false");
         ok(OfflineGate.uninstall() < 0, "native 未加载时 uninstall 返回负数");
         ok(OfflineGate.install(null, 1) < 0, "没有 Context 时 install 直接失败，不抛异常");
-        ok(OfflineGate.TARGET_PANEL == 1 && OfflineGate.TARGET_HTTP == 2, "两族 target 常量固定为 1/2");
+        ok(!OfflineGate.loaded(), "JDK 环境下 native 库加载不上（这是预期，真机才有）");
+        ok(!OfflineGate.installedAny(), "没挂上时 installedAny=false");
+        ok(OfflineGate.results().length == 0, "没挂上时 results 为空");
+        OfflineGate.resetStats();   // 未加载时也必须静默
+        ok(true, "resetStats 在未加载时静默返回");
 
-        // 14. 原生闸门的白名单表：格式、去重、覆盖面
-        String gp = OfflineGate.panelTable();
-        String htp = OfflineGate.httpTable();
-        java.util.Set<String> uniq = new java.util.HashSet<String>();
-        int cnt = 0, bad = 0;
-        for (String line : gp.split("\n")) {
-            if (line.isEmpty()) continue;
-            String[] f = line.split("\t");
-            if (f.length != 3 || !f[2].startsWith("Add") || !line.startsWith("*\t")) bad++;
-            if (!uniq.add(f[1] + "." + f[2])) bad++;
-            cnt++;
+        // 12. 六族钩子的编号：Java 与 native 头文件必须一一对上
+        ok(OfflineGate.TARGET_PANEL == 1, "TARGET_PANEL=1");
+        ok(OfflineGate.TARGET_HTTP == 2, "TARGET_HTTP=2");
+        ok(OfflineGate.TARGET_GATE == 3, "TARGET_GATE=3");
+        ok(OfflineGate.TARGET_BUTTON == 4, "TARGET_BUTTON=4");
+        ok(OfflineGate.TARGET_FLAG == 5, "TARGET_FLAG=5");
+        ok(OfflineGate.TARGET_MASKS == 6, "TARGET_MASKS=6");
+        ok(OfflineGate.groups().length == 6, "一共 6 族");
+        java.util.Set<Integer> tset = new java.util.HashSet<Integer>();
+        for (int[] g : OfflineGate.groups()) tset.add(g[0]);
+        ok(tset.size() == 6 && tset.contains(1) && tset.contains(2) && tset.contains(3)
+                && tset.contains(4) && tset.contains(5) && tset.contains(6),
+                "groups() 覆盖 1..6 且不重复");
+        ok(OfflineGate.table(0).isEmpty() && OfflineGate.table(7).isEmpty(),
+                "非法 target 返回空表而不是抛异常");
+        ok(OfflineGate.countLines("") == 0, "空表行数为 0");
+        ok(OfflineGate.countLines("# 注释\n\nns\tK\tm1\nns\tK\tm2\n") == 2, "注释行和空行不计入");
+        ok(OfflineGate.countLines(null) == 0, "null 表行数为 0");
+
+        // 13. 每一族的表格式：三列、命名空间用 *、方法名/类名不含空白、行内不重复
+        String[] tn = {"", "button", "gate", "panel", "http", "flag", "masks"};
+        int totalLines = 0;
+        for (int t = 1; t <= 6; t++) {
+            String tb = OfflineGate.table(t);
+            ok(!tb.isEmpty(), "第 " + t + " 族（" + tn[t] + "）表非空");
+            java.util.Set<String> seen = new java.util.HashSet<String>();
+            int nln = 0, badf = 0, dup = 0;
+            for (String line : tb.split("\n")) {
+                if (line.isEmpty()) continue;
+                String[] f = line.split("\t");
+                if (f.length != 3) { badf++; continue; }
+                if (!f[0].equals("*")) badf++;
+                if (f[1].isEmpty() || f[2].isEmpty()) badf++;
+                if (f[1].indexOf(' ') >= 0 || f[2].indexOf(' ') >= 0) badf++;
+                if (!seen.add(f[1] + "." + f[2])) dup++;
+                nln++;
+            }
+            totalLines += nln;
+            ok(badf == 0, "第 " + t + " 族格式对（三列、*、无空格；问题 " + badf + " 行）");
+            ok(dup == 0, "第 " + t + " 族行内不重复（重复 " + dup + " 行）");
+            ok(OfflineGate.countLines(tb) == nln, "第 " + t + " 族 countLines 与实际行数一致");
         }
-        ok(bad == 0, "面板表格式对、不重复、命名空间用 *（问题行 " + bad + "）");
-        ok(cnt >= 35, "面板表至少 35 条（实际 " + cnt + "）");
-        StringBuilder miss = new StringBuilder();
+        ok(totalLines >= 80, "六族合计至少 80 条（实际 " + totalLines + "）");
+
+        // 14. 面板族（GATE + PANEL）必须覆盖玩家会碰到的那些联网/付费入口
+        String gate = OfflineGate.gateTable();
+        String pan = OfflineGate.panelTable();
+        String allPanels = gate + pan;
         String[] mustPanel = {
-                "AddShopPanel", "AddGemBuyListPanel", "AddPremiumPanel", "AddGachaPanel",
-                "AddMailPanel", "AddMailDetailsPanel", "AddFriendListPanel", "AddAlliancePanel",
-                "AddPvpPreparePanel", "AddMatchPreparePanel", "AddTournamentPanel",
-                "AddKingdomRankingPanel", "AddLeaguePanel", "AddNoticeInfoPanel",
-                "AddEventPanel", "AddLimitedEventPanel", "AddAdPanel", "AddWebPanel",
-                "AddAccountSettingPanel", "AddSerialCodeInputPanel", "AddReportPanel",
-                "AddVoteListPanel", "AddMigrantPasswordIssueListPanel",
+                // 商店 / 内购 / 付费
+                "AddShopPanel", "AddShopMenuPanel", "AddGemBuyListPanel", "AddPremiumPanel",
+                "AddGachaPanel", "AddTradeShopListPanel", "AddShopBuyConfirmPanel",
+                // 邮箱 / 礼物 / 序列码
+                "AddMailPanel", "AddMailDetailsPanel", "AddMailInputPanel", "AddSerialCodeInputPanel",
+                // 好友 / 结盟 / PVP / 对战
+                "AddFriendListPanel", "AddAlliancePanel", "AddPvpPreparePanel",
+                "AddMatchPreparePanel", "AddTournamentPanel", "AddVoteListPanel",
+                // 排行
+                "AddKingdomRankingPanel", "AddGunnerRankingPanel", "AddLeaguePanel",
+                // 公告 / 活动 / 广告 / 网页 / 账号 / 举报 / 迁移
+                "AddNoticeInfoPanel", "AddEventPanel", "AddLimitedEventPanel", "AddAdPanel",
+                "AddWebPanel", "AddAccountSettingPanel", "AddReportPanel",
+                "AddMigrantPasswordIssueListPanel",
         };
-        for (String m : mustPanel) if (!gp.contains("\t" + m + "\n")) miss.append(m).append(' ');
-        ok(miss.length() == 0, "面板表覆盖必须挡的入口" + (miss.length() == 0 ? "" : "，缺：" + miss));
-        int hc = 0;
+        StringBuilder miss2 = new StringBuilder();
+        for (String m : mustPanel) if (allPanels.indexOf("\t" + m + "\n") < 0) miss2.append(m).append(' ');
+        ok(miss2.length() == 0, "面板族覆盖必须挡的入口" + (miss2.length() == 0 ? "" : "，缺：" + miss2));
+        ok(pan.indexOf("\tAddShopPanel\n") < 0, "AddShopPanel 只出现在 GATE 族（有返回值，不能返回 NULL）");
+
+        // 15. 请求族只挂 HttpSystem，且必须含真正发请求的那几个
+        String htp = OfflineGate.httpTable();
         StringBuilder hbad = new StringBuilder();
+        int hc = 0;
         for (String line : htp.split("\n")) {
             if (line.isEmpty()) continue;
             String[] f = line.split("\t");
             if (f.length != 3 || !"HttpSystem".equals(f[1])) hbad.append(line).append(' ');
             hc++;
         }
-        ok(hbad.length() == 0, "HTTP 表只挂 HttpSystem" + (hbad.length() == 0 ? "" : "，问题：" + hbad));
-        ok(hc >= 3, "HTTP 表至少 3 条（实际 " + hc + "）");
+        ok(hbad.length() == 0, "请求族只挂 HttpSystem" + (hbad.length() == 0 ? "" : "，问题：" + hbad));
+        ok(hc >= 3, "请求族至少 3 条（实际 " + hc + "）");
         for (String m : new String[] {"httpConnect", "connectWWW", "AddHttpQueue"}) {
-            ok(htp.contains("\t" + m + "\n"), "HTTP 表含 " + m);
+            ok(htp.indexOf("\t" + m + "\n") >= 0, "请求族含 " + m);
         }
+        ok(htp.indexOf("AssetBundleManager") < 0 && htp.indexOf("downloadAndCache") < 0,
+                "资源下载路径不在拦截名单里（边玩边下必须可用）");
+
+        // 16. 按钮族 / 旗帜族 / 遮罩族：都挂在正确的目标类上
+        String btn = OfflineGate.buttonTable();
+        ok(btn.indexOf("GiftBoxButtonClick") >= 0, "按钮族含邮箱入口 GiftBoxButtonClick");
+        ok(btn.indexOf("SerialCodeInputButtonClick") >= 0, "按钮族含序列码入口");
+        String flg = OfflineGate.flagTable();
+        ok(flg.indexOf("\tMenuCell\t") >= 0, "旗帜族挂在 MenuCell 上");
+        ok(flg.indexOf("set_EnableFlag") >= 0 && flg.indexOf("set_ActiveFlag") >= 0,
+                "旗帜族同时改 EnableFlag 与 ActiveFlag");
+        String msk = OfflineGate.masksTable();
+        ok(msk.indexOf("\tAbstractPanel\t") >= 0, "遮罩族挂在 AbstractPanel 上");
+        ok(msk.indexOf("addMaskCollider") >= 0, "遮罩族含 addMaskCollider");
+
+        // 17. 六族之间不该有同一方法被两族同时挂（重复挂会互相覆盖 trampoline）
+        java.util.Map<String, Integer> owner = new java.util.HashMap<String, Integer>();
+        StringBuilder clash = new StringBuilder();
+        for (int t = 1; t <= 6; t++) {
+            for (String line : OfflineGate.table(t).split("\n")) {
+                if (line.isEmpty()) continue;
+                String[] f = line.split("\t");
+                if (f.length != 3) continue;
+                Integer prev = owner.put(f[1] + "." + f[2], t);
+                if (prev != null && prev.intValue() != t) {
+                    clash.append(f[1]).append('.').append(f[2]).append(' ');
+                }
+            }
+        }
+        ok(clash.length() == 0, "六族之间没有交叉的同一方法" + (clash.length() == 0 ? "" : "，冲突：" + clash));
 
         System.out.println();
         System.out.println(n + " checks, " + fail + " failed");

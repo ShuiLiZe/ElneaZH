@@ -447,8 +447,8 @@ Java_com_shuilize_elneazh_inj_OfflineGate_nativePush(JNIEnv *env, jclass cls, js
     return 1;
 }
 
-// 安装：target 1 = 面板入口族，target 2 = HttpSystem 发送函数。
-// 返回挂上的方法数；负数 = 原因码（-1 il2cpp API 还不可见 / -4 这个 ABI 没有 hook 引擎）。
+// 安装一族钩子：target 1..6（见 eg_offline.h），names 是 "命名空间\t类\t方法" 行。
+// 返回挂上的方法数；负数 = 原因码（-1 il2cpp API 还不可见 / -4 这个 ABI 没有 hook 引擎 / -5 编号非法）。
 JNIEXPORT jint JNICALL
 Java_com_shuilize_elneazh_inj_OfflineGate_nativeInstall(JNIEnv *env, jclass cls, jint target, jstring names) {
     (void) cls;
@@ -467,19 +467,29 @@ Java_com_shuilize_elneazh_inj_OfflineGate_nativeUninstall(JNIEnv *env, jclass cl
     return eg_of_uninstall();
 }
 
-// [0]=已挂数量 [1]=面板拦截次数 [2]=HTTP 拦截次数 [3]=解析失败/跳过数
+// [0]=已挂 [1]=入口不创建 [2]=请求拦截 [3]=面板/按钮置灰 [4]=遮罩挡住
+// [5]=解析失败 [6]=回调异常
 JNIEXPORT jintArray JNICALL
 Java_com_shuilize_elneazh_inj_OfflineGate_nativeStats(JNIEnv *env, jclass cls) {
     (void) cls;
-    int v[4];
+    int v[7];
     eg_of_stats(v);
-    jint jv[4] = { v[0], v[1], v[2], v[3] };
-    jintArray a = (*env)->NewIntArray(env, 4);
-    if (a) (*env)->SetIntArrayRegion(env, a, 0, 4, jv);
+    jint jv[7] = { v[0], v[1], v[2], v[3], v[4], v[5], v[6] };
+    jintArray a = (*env)->NewIntArray(env, 7);
+    if (a) (*env)->SetIntArrayRegion(env, a, 0, 7, jv);
     return a;
 }
 
-// 运行时探测：我们依赖的 il2cpp API 能 dlsym 到几个（0..8）。
+// 清空计数（切换开关时用，便于真机判断「这一轮有没有拦住」）。
+JNIEXPORT jint JNICALL
+Java_com_shuilize_elneazh_inj_OfflineGate_nativeResetStats(JNIEnv *env, jclass cls) {
+    (void) env;
+    (void) cls;
+    eg_of_reset_stats();
+    return 1;
+}
+
+// 运行时探测：我们依赖的 il2cpp API 能 dlsym 到几个（0..5）。
 JNIEXPORT jint JNICALL
 Java_com_shuilize_elneazh_inj_OfflineGate_nativeProbe(JNIEnv *env, jclass cls) {
     (void) env;
@@ -487,7 +497,7 @@ Java_com_shuilize_elneazh_inj_OfflineGate_nativeProbe(JNIEnv *env, jclass cls) {
     return eg_of_api_probe();
 }
 
-// 自检用：能不能按名字解析到某个类/方法（不调用，只解析）。
+// 自检用：能不能按名字解析到某个方法（不调用，只解析）。
 JNIEXPORT jboolean JNICALL
 Java_com_shuilize_elneazh_inj_OfflineGate_nativeResolvable(
         JNIEnv *env, jclass cls, jstring ns, jstring klass, jstring method) {
@@ -497,9 +507,21 @@ Java_com_shuilize_elneazh_inj_OfflineGate_nativeResolvable(
     const char *c_k = (*env)->GetStringUTFChars(env, klass, NULL);
     const char *c_m = (*env)->GetStringUTFChars(env, method, NULL);
     int ok = 0;
-    if (c_k && c_m) ok = eg_of_call(c_ns ? c_ns : "", c_k, c_m, -1, NULL);
+    if (c_k && c_m) ok = eg_of_resolvable(c_ns ? c_ns : "*", c_k, c_m);
     if (c_ns) (*env)->ReleaseStringUTFChars(env, ns, c_ns);
     if (c_k) (*env)->ReleaseStringUTFChars(env, klass, c_k);
     if (c_m) (*env)->ReleaseStringUTFChars(env, method, c_m);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// 自检用：这个类在不在运行时里（不区分命名空间、不调用任何方法）。
+JNIEXPORT jboolean JNICALL
+Java_com_shuilize_elneazh_inj_OfflineGate_nativeClassPresent(
+        JNIEnv *env, jclass cls, jstring klass) {
+    (void) cls;
+    if (!klass) return JNI_FALSE;
+    const char *k = (*env)->GetStringUTFChars(env, klass, NULL);
+    int ok = k ? eg_of_class_present(k) : 0;
+    if (k) (*env)->ReleaseStringUTFChars(env, klass, k);
     return ok ? JNI_TRUE : JNI_FALSE;
 }

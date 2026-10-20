@@ -2,6 +2,49 @@
 
 > 这是给"接手的人或下一次会话"的交付文件：项目现在做到哪、怎么继续。每次有进展都会更新。
 
+## 2026-10-21 06:15 单机模式改成六族 native 钩子：入口照常显示但置成不可用
+
+**为什么改**：05:55 那版把 `Add*Panel` 一律 `return NULL`。玩家的反馈口径是「提示单机模式不可用」，
+不是「入口消失」；更要紧的是调用方常写成 `var p = AddMailPanel(...); p.xxx()`，返回 NULL 就是空引用。
+05:55 版 HANDOFF 的「必须先确认」第 1 条也正是这个风险，这次直接消除它。
+
+**六族钩子（Java `OfflineGate.TARGET_*` ≡ C `EG_TARGET_*`）**
+1. `PANEL`（12 条 `Open*Panel`）：纯副作用入口，返回值没人用 → 仍返回 NULL，入口不创建。
+2. `HTTP`（`HttpSystem.httpConnect`/`connectWWW`/`AddHttpQueue`/`StartHttpQueue`/`UpdateUserInfoPair`）：
+   返回 0，一个字节都不发，交给游戏自己的通信失败/离线分支；**不伪造回包**。
+3. `GATE`（47 条 `Add*Panel`）：面板照常创建，创建后立刻 `set_PanelEnabled(false)` ——
+   对象合法存在，不会空引用，也不留半初始化实例。
+4. `BUTTON`（34 条 `*ButtonClick`）：原回调照常跑（游戏自己的显隐判断一概不动），
+   再 `set_interactable(false)`，点了没反应。
+5. `FLAG`（`MenuCell.set_EnableFlag`/`set_ActiveFlag`、`InfoMenuPanel.set_isActiveCheckBrokenPanelButton`）：
+   原逻辑跑完把 EnableFlag 置 0、ActiveFlag 清空。
+6. `MASKS`（`AbstractPanel.addMaskCollider*`/`addNowLoadingPanel`）：单机时不加遮罩，
+   避免玩家被困在「不可用」提示后面那层黑幕里。
+
+**native 侧改动**（`native/elneagate/eg_offline.c`，重写）
+- 新增 `il2cpp_object_get_class`（从实例拿类，静态类型常是 `object`）与 `il2cpp_thread_attach`
+  （非游戏线程调托管方法前必须 attach）；
+- `eg_invoke(self, method, argc, a0, a1)` 按名字调 setter 的小工具；
+  `eg_suppress_panel`/`eg_suppress_button`/`eg_suppress_menu` 三个语义化包装；
+- `eg_dispatch` 按 `target_kind` 分派六族；`EG_MAX` 64→96，`eg_hook_0..95` 用宏生成；
+- stats 扩成 7 槽 `[已挂, 入口不创建, 请求拦截, 置灰, 遮罩, 解析失败, 回调异常]`；
+- 新增导出 `eg_of_reset_stats()` / `eg_of_class_present()`；`eg_of_call` 换成只解析不调用的
+  `eg_of_resolvable()`（自检更安全）。
+
+**JNI 导出**（`elneagate.c`）：`nativeResetStats`、`nativeClassPresent` 新增；
+`nativeStats` 返回 7 个 int；`nativeResolvable` 改走 `eg_of_resolvable`（不再调托管方法）。
+
+**Java 侧**：`OfflineGate.java` 重写 —— 六族常量与六张表、`table(target)`/`groups()`/`countLines()`、
+`installAll()` 逐族独立 try/catch、`installRetry()` 只对 -1（il2cpp 还没可见）重试、`resetStats()`、
+`summary()` 一句话现状。`Support` 切开关时 `push` + `resetStats`；`SelfCheck` 报六族条目数与每族挂载结果。
+`offlineText(on)` 的措辞从「入口直接不创建」改成「照常显示但被置成不可用」。
+
+**验证**（全绿）：`verify_offline.py` 165 项；`OfflineTest` 198 项（新增六族编号/格式/去重/交叉冲突/
+覆盖面/native 未加载安静失败）；`verify_gate.py` PASS（含 7 个 JNI 导出 + 六族日志字符串）；
+`build_gate.py` 双 ABI 成功（arm64 strip 后 54,904 B / armv7 19,900 B）；
+`javac --release 8 -Xlint:all` 全绿；`d8 --min-api 21` → `classes.dex` 126,992 B；
+`manifest_zh.py` 往返 `manifest ok 32056`。
+
 ## 2026-10-21 05:55 单机模式补上 native 闸门：il2cpp 按名解析 + inline hook（另合并 fix/anti-flag）
 
 **背景**：`03:40` 那版单机模式只有 Java 侧 `NetBlocker`（`URLStreamHandlerFactory`），
