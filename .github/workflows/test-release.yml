@@ -1,0 +1,150 @@
+name: test-release
+# 测试分支完整构建（与 build.yml 同一套步骤，含补丁），只发非 latest 预发布，不碰 main/正式版。
+
+on:
+  push:
+    branches: [fix/anti-flag, feat/offline-share]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false  # translations are pushed often; let a run finish, newest push waits
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Verify base data.unity3d
+        run: |
+          echo "dc1796ffac62ea29796772f320c4218a922216aa417c4689abaeb6c0e917a155  base/data.unity3d" | sha256sum -c -
+
+      - name: Build localized data.unity3d
+        run: |
+          mkdir -p build
+          FONT=""
+          if [ -f fonts/zh.ttf ]; then FONT="--font fonts/zh.ttf --bmfont fonts/zh.ttf"; fi
+          python tools/build_patch.py base/data.unity3d build/data.unity3d --tr translations $FONT --images images_zh
+
+      - name: Verify textures and make previews
+        run: python tools/ci_verify.py base/data.unity3d build/data.unity3d images_zh build/preview
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preview
+          path: build/preview
+
+      - name: Patch IL2CPP metadata (hardcoded strings + Chinese-name whitelist)
+        run: |
+          cat base/apk/ElneaKingdom_2.10.7.apk.part* > build/base.apk
+          echo "5117bbaaa301ad2e4535280918173da9500cb2c96bab012ce6040bf1a2bcf90c  build/base.apk" | sha256sum -c -
+          unzip -p build/base.apk assets/bin/Data/Managed/Metadata/global-metadata.dat > build/meta_orig.dat
+          python tools/metadata_zh.py build/meta_orig.dat build/meta_zh.dat --tr translations/metadata_literals.json
+
+      - name: Build no-root master-table payload (tables + map + bundles + libil2cpp patch + manifest)
+        run: |
+          Z=app/src/main/assets/elneazh; mkdir -p $Z/Contents $Z/map
+          mkdir -p $Z/data && python tools/names_map.py $Z/data/names.tsv
+          cp content_zh/Contents/c_* $Z/Contents/
+          cp content_zh/map_large_en/__data content_zh/map_large_en/__info $Z/map/
+          mkdir -p $Z/bundles && cp content_zh/bundles/*~*.data content_zh/bundles/*~*.info $Z/bundles/
+          (cd content_zh/bundles && for f in *~*.data; do n=${f%.data}; printf '%s\t%s\t%s\n' "${n%%~*}" "${n#*~}" "$(stat -c %s "$f")"; done) > $Z/bundles/index.tsv
+          cat $Z/bundles/index.tsv
+          unzip -p build/base.apk lib/arm64-v8a/libil2cpp.so > build/libil2cpp.so
+          python tools/so_patch_zh.py build/libil2cpp.so $Z/so.elsp
+          unzip -p build/base.apk AndroidManifest.xml > build/manifest_orig.axml
+          sha256sum build/manifest_orig.axml | cut -d' ' -f1 > $Z/manifest_base.sha256
+          python tools/manifest_zh.py build/manifest_orig.axml $Z/AndroidManifest.xml
+
+      - name: Create patch
+        run: |
+          python tools/make_patch.py base/data.unity3d build/data.unity3d app/src/main/assets \
+            "补丁 #${{ github.run_number }} · ${GITHUB_SHA::7}"
+          python - <<'PY'
+          import bsdiff4, hashlib, json
+          d = 'app/src/main/assets'
+          bsdiff4.file_diff('build/meta_orig.dat', 'build/meta_zh.dat', d + '/elnea_meta.patch')
+          bsdiff4.file_patch('build/meta_orig.dat', 'build/meta_check.dat', d + '/elnea_meta.patch')
+          h = lambda p: hashlib.sha256(open(p, 'rb').read()).hexdigest()
+          assert h('build/meta_check.dat') == h('build/meta_zh.dat')
+          info = json.load(open(d + '/elnea_zh.json'))
+          info['meta_base_sha256'] = h('build/meta_orig.dat'); info['meta_new_sha256'] = h('build/meta_zh.dat')
+          json.dump(info, open(d + '/elnea_zh.json', 'w'), ensure_ascii=False, indent=1)
+          print('meta patch ok', info)
+          PY
+          ls -la app/src/main/assets
+
+      - name: Build native name gate (request-body CJK filter)
+        run: |
+          python tools/build_gate.py
+          python tools/verify_gate.py
+          ls -la app/src/main/assets/elneagate/*/
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Build injected ZhInit dex + check manifest
+        run: |
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          PLAT=$(ls -d $ANDROID_HOME/platforms/android-* | sort -V | tail -1)
+          echo "build-tools $BT platform $PLAT"
+          mkdir -p build/inj
+          javac --release 8 -cp $PLAT/android.jar -d build/inj $(find inj -name '*.java')
+          $BT/d8 --min-api 21 --lib $PLAT/android.jar --output build/inj $(find build/inj -name '*.class')
+          cp build/inj/classes.dex app/src/main/assets/elneazh/classes3.dex
+          mkdir -p build/mt && cp app/src/main/assets/elneazh/AndroidManifest.xml build/mt/
+          (cd build/mt && zip -q ../mt.apk AndroidManifest.xml)
+          $BT/aapt2 dump xmltree --file AndroidManifest.xml build/mt.apk | grep -B2 -A8 zhinit
+          $BT/aapt2 dump xmltree --file AndroidManifest.xml build/mt.apk | grep -A14 SupportActivity | tee build/sa.txt
+          grep -q 'elneazh' build/sa.txt
+          ls -la app/src/main/assets/elneazh
+
+      # ubuntu-latest already ships the Android SDK (ANDROID_HOME); AGP fetches missing platforms itself.
+      - uses: gradle/actions/setup-gradle@v3
+
+      - name: Build APK
+        working-directory: app
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/*.apk dist/ElneaZH.apk
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ElneaZH-apk
+          path: dist/ElneaZH.apk
+
+      - name: Publish test prerelease (never latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          case "$GITHUB_REF_NAME" in
+            fix/anti-flag) TAG=test-antiflag; NAME="测试版·防封（上传前中文名转拼音）";;
+            feat/offline-share) TAG=test-offline; NAME="测试版·防封+单机模式+分享导出";;
+            *) echo "not a test branch"; exit 0;;
+          esac
+          SHORT=${GITHUB_SHA::7}
+          cp dist/ElneaZH.apk dist/ElneaZH-$TAG.apk
+          gh release delete "$TAG" -y --cleanup-tag || true
+          gh release create "$TAG" dist/ElneaZH-$TAG.apk --prerelease --latest=false \
+            --target "$GITHUB_SHA" --title "$NAME ($SHORT)" \
+            --notes "分支 $GITHUB_REF_NAME @ $SHORT 完整构建的测试包（含汉化补丁），仅供真机测试，不是正式版。测完请装回正式版。"
