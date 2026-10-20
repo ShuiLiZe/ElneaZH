@@ -18,6 +18,10 @@ points to the game's own private dir (no root, no /sdcard):  /data/data/jp.co.al
   0x19a08d4/0x19a08d8 (VA 0x19a48d4/0x19a48d8) HumanData.get_limitFriendCount, player branch:
             Range(52, 102, 52 + FriendListSlot items) -> Range(888, 888, ...) = player friend limit 888 (local, not premium).
             NPC branch (32) untouched. Friends are a List grown by addFriend, no fixed buffer.
+  0x19c53c8 (VA 0x19c93c8) HumanData.SelectTalkFriend: `add w9,w8,#30` (player bonus) -> `bl king_visit_stub`
+            (VA 0x1c05b18, dead tail of InfoMenuPanel.ContactButtonClick after its 0x34-byte support stub, 0x3c bytes).
+            When the thinking NPC (x19) is the king and the friend is the player, the score becomes 100 (always picks
+            the player, still once a day via IsAlreadyTalk); everyone else keeps 30/60(+30).
   (AccountSettingPanel.ContactButtonClick VA 0x1b8cf88, the forgot-password help, is left original.)
 Format: b'ELSP', u32 1, u32 n, n * (u32 off, u32 len, orig, u32 len, new). Usage: so_patch_zh.py libil2cpp.so out.elsp"""
 import struct, sys
@@ -98,6 +102,33 @@ P.append((KING_STUB - 0x4000, so[KING_STUB - 0x4000: KING_STUB - 0x4000 + len(ks
 kc = so[KING_CALL - 0x4000: KING_CALL - 0x4000 + 4]
 assert struct.unpack('<I', kc)[0] == 0x94000000 | (((CREATE_ADULT - KING_CALL) >> 2) & 0x3FFFFFF), 'CreateNewKing call site moved'
 P.append((KING_CALL - 0x4000, kc, struct.pack('<I', 0x94000000 | (((KING_STUB - KING_CALL) >> 2) & 0x3FFFFFF))))
+# ---- 国王更常主动来找玩家（只对国王）----
+KV_CALL, KV_STUB, IS_KING = 0x19c93c8, 0x1c05b18, 0x199f628
+def kv_stub(va):
+    bl = lambda pc, t: 0x94000000 | (((t - pc) >> 2) & 0x3FFFFFF)
+    ins = [0xA9BE7BFD,                 # 00 stp x29,x30,[sp,#-32]!
+           0xA90123E0,                 # 04 stp x0,x8,[sp,#16]
+           0x360000A0,                 # 08 tbz w0,#0,+0x14 (-> 1c: not the player, w0 bit0 = 0)
+           0xAA1303E0,                 # 0c mov x0,x19 (the NPC that is choosing)
+           0xAA1F03E1,                 # 10 mov x1,xzr
+           bl(va + 0x14, IS_KING),     # 14 bl HumanData.get_IsKing
+           0x2A0003EA,                 # 18 mov w10,w0
+           0xA94123E0,                 # 1c ldp x0,x8,[sp,#16]
+           0xA8C27BFD,                 # 20 ldp x29,x30,[sp],#32
+           0x11007909,                 # 24 add w9,w8,#30 (original)
+           0x7200015F,                 # 28 tst w10,#1
+           0x52800C8B,                 # 2c mov w11,#100
+           0x1A891169,                 # 30 csel w9,w11,w9,ne
+           0x7200001F,                 # 34 tst w0,#1  (flags the caller's csel expects)
+           0xD65F03C0]                 # 38 ret
+    return struct.pack('<%dI' % len(ins), *ins)
+kv = kv_stub(KV_STUB)
+assert len(kv) == 0x1c05b54 - KV_STUB
+kvo = so[KV_STUB - 0x4000: KV_STUB - 0x4000 + len(kv)]
+P.append((KV_STUB - 0x4000, kvo, kv))
+kc = so[KV_CALL - 0x4000: KV_CALL - 0x4000 + 4]
+assert kc.hex() == '09790011', 'SelectTalkFriend site moved ' + kc.hex()
+P.append((KV_CALL - 0x4000, kc, struct.pack('<I', 0x94000000 | (((KV_STUB - KV_CALL) >> 2) & 0x3FFFFFF))))
 # ---- 玩家交友上限 888（HumanData.get_limitFriendCount 玩家分支，本地常量，与付费无关）----
 FRIEND_MIN, FRIEND_MAX, FRIEND_LIMIT = 0x19a48d4, 0x19a48d8, 888
 for va, orig, reg in ((FRIEND_MIN, '80068052', 0), (FRIEND_MAX, 'c10c8052', 1)):   # mov w0,#52 / mov w1,#102

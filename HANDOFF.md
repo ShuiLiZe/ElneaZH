@@ -97,3 +97,9 @@ _最后更新：2026-10-20 12:45 CST_
 - tools/so_patch_zh.py：VA 0x19a48d4 `mov w0,#52`→`#888`、0x19a48d8 `mov w1,#102`→`#888`，玩家上限恒 888；NPC 32 不动。好友表是 addFriend 动态扩容的 List，无固定缓冲。
 - 注意：DSH 报告里把 VA 当成文件偏移（应 −0x4000），且建议整函数改 ret，未采用。好友栏扩充道具此后无意义。
 - 测：装新版 → 人物「朋友」页上限显示 888，交友超过 52/102 不再挤掉旧朋友。
+
+
+## 2026-10-20 14:00 国王更常主动来找玩家（只对国王，libil2cpp 补丁，待真机验证）
+- DSH 会话 session-eb6185c8 调查（_hark\king_visit.md）：NPC 主动找人由 HumanData.SelectTalkFriend（VA 0x19c924c）在自己的好友里掷骰，玩家得分 30/60(+30)；国王没被排除，只是概率不高。送礼物品的选择函数未确认。
+- tools/so_patch_zh.py：0x19c93c8 `add w9,w8,#30` → `bl king_visit_stub`（VA 0x1c05b18，InfoMenuPanel 联系函数死代码尾部 0x3c 字节）：正在挑人的 NPC 是国王、对象是玩家时得分 100（必选玩家），其余 NPC 不变；仍受 IsAlreadyTalk 每日一次限制，不会刷屏。
+- 前提：玩家要在国王的好友表里（先去和国王搭过话）。送礼是否发生取决于原版对话分支。
