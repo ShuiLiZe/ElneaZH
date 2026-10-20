@@ -156,29 +156,37 @@ final class Offline {
     // ---------------- 扩展包 / 资源下载 ----------------
 
     /**
-     * 该 URL 是不是「资源 / 扩展包下载」类请求（用于日志归类与界面提示，不改拦截结论）。
+     * 该 URL 是不是「资源 / 扩展包下载」类请求（决定单机时是否放行）。
      *
-     * 证据（global-metadata 字面量）：AssetBundleManager.getAssetBundleURL、getEnvironmentURL、
-     * getManifestURL、initializeLoadAssetBundleInfo、downloadingData / PreLoadData / assetCacheData，
-     * 以及 HttpSystem 的 listURL / assetBundleURL / cacheFlag 三个字段。
-     * 资源地址本身是**服务器下发**的，未在客户端硬编码，故这里按路径形状识别：
-     * bundle 后缀、manifest 名、以及 sns04 下的 assetbundle 段。
+     * 证据（global-metadata 字面量，`AssetBundleManager` 整块）：
+     * `downloadAndCache` / `get_Url` / `getAssetExtension` / `getEnvironmentURL` /
+     * `getAssetBundleURL` / `getManifestURL` / `downloadingData` / `PreLoadData` / `assetCacheData`。
+     * 这条路径**不经过** `HttpSystem`，所以也不带 `user_number` / `crypt_key` /
+     * `key_header_info` / `addUniqArg` 这些身份参数（字段计数全为 0，见 HANDOFF）。
+     *
+     * 判定按路径形状（bundle 地址由服务器下发，客户端无硬编码基址）：
+     *  - 后缀：`.bundle` `.unity3d` `.ab` `.assetbundle`
+     *  - 路径含 `assetbundle` / `assetbundles`
+     *  - 路径以 `manifest` / `.manifest` 结尾（Unity 的清单文件）
+     * **不含** `*.php` —— 那是接口，走 `HttpSystem`、带身份，单机必须拦。
      */
     static boolean isAssetDownload(String url) {
         String p = path(url);
         if (p.isEmpty()) return false;
+        if (p.endsWith(".php")) return false;                        // 接口不算资源
         if (p.endsWith(".bundle") || p.endsWith(".unity3d") || p.endsWith(".ab")
                 || p.endsWith(".assetbundle")) return true;
-        String lower = p;
-        if (lower.contains("assetbundle") || lower.contains("manifest")) return true;
+        if (p.contains("assetbundle")) return true;
+        String last = p.substring(p.lastIndexOf('/') + 1);
+        if (last.equals("manifest") || last.endsWith(".manifest")) return true;
         return false;
     }
 
     /**
      * 下载请求的分类。用于决定提示文案与日志。
-     *  - {@link #DL_ASSET}  资源 / 扩展包下载
-     *  - {@link #DL_SNSPHP} sns04 下的 *.php 接口（含 ResourceInfo / 资源清单）
-     *  - {@link #DL_OTHER}  其它（含静态文件）
+     *  - {@link #DL_ASSET}  资源 / 扩展包 bundle 下载（**不带身份信息，单机放行**）
+     *  - {@link #DL_SNSPHP} sns04 下的 *.php 接口（带 key_header_info / addUniqArg 身份，单机拦）
+     *  - {@link #DL_OTHER}  其它
      */
     static final int DL_ASSET = 1;
     static final int DL_SNSPHP = 2;
@@ -191,22 +199,56 @@ final class Offline {
     }
 
     /**
-     * 单机时这条请求能不能放行。**当前策略：游戏服务器上的下载也一律不放行。**
+     * 资源下载用的主机，单机时放行。依据 global-metadata（见 HANDOFF「放行名单」）：
      *
-     * 之所以不给「纯静态 CDN 放行」开一个口子：客户端没有硬编码任何 CDN 基址，
-     * 资源清单与 bundle 基址都来自服务器下发（listURL + assetBundleURL + cacheFlag），
-     * 而 /sns04/ 的四个入口都要 key_header_info / addUniqArg 的鉴权头（带账号与设备标识）。
-     * 也就是说「不带身份信息的纯静态下载」在这游戏里拿不到地址，开口子只会变成一条
-     * 「先发 listURL（带设备码）拿地址、再放行下载」的隐性上传通道，与「一个字节都不出手机」矛盾。
-     * 因此这里恒为 false——保留方法是为了让规则集中在一处、可被自检断言，日后真有独立静态 CDN 再改这一处。
+     * 下载走的是 `AssetBundleManager.downloadAndCache` + `UnityWebRequest`，
+     * 由 `getEnvironmentURL()` / `getAssetBundleURL()` / `getManifestURL()` 拼地址。
+     * 把 `AssetBundleManager` 整块字段名数一遍：
+     * `user_number` / `crypt_key` / `UserNumberOnServer` / `CryptKeyOnServer` /
+     * `key_header_info` / `addUniqArg` / `uniq` / `uuid` / `playerId` / `token`
+     * **全部出现 0 次**。也就是说 bundle 下载请求不带任何账号/设备/存档身份
+     * ——身份只出现在 `HttpSystem.addUniqArg`（PHP 接口）那条路上。
+     *
+     * 所以按用户要求：「不带身份信息的资源下载照常放行」。
+     * 这里刻意只认 althi 的资源宿主（res- / cdn- / 裸域），下载路径必须是资源形状。
      */
-    static boolean allowWhileOffline(String url) {
-        return !isGameServer(url) && !isAssetDownload(url);
+    static boolean isAssetHost(String url) {
+        String h = host(url);
+        if (h.isEmpty()) return false;
+        return h.equals(RES_HOST) || h.equals(CDN_HOST) || h.equals(DOMAIN)
+                || h.endsWith("." + DOMAIN);
     }
 
-    /** 提示语：单机时点了资源下载就会被看到。 */
+    static final String RES_HOST = "res-elnea.althi.co.jp";
+    static final String CDN_HOST = "cdn-elnea.althi.co.jp";
+
+    /**
+     * 单机时这条请求能不能放行。
+     *
+     * 规则（用户 2026-10-21 明确要求，边玩边下载必须可用）：
+     *  1. 非游戏服务器（广告/遥测/别的站）→ 本闸门不管，放行。
+     *  2. **资源 / 扩展包的 bundle 下载**（`isAssetDownload`，如 `*.bundle`、`*.unity3d`、
+     *     `assetbundle`、`manifest`）→ **放行**：这条路径不带任何身份信息（证据见 {@link #isAssetHost}）。
+     *  3. 其余游戏服务器请求（`/sns04/*.php`：登录、存档、读数据、资源清单）→ **拦在本机**。
+     *
+     * 注意 2 与 3 的关系：bundle 地址本身由清单（`.manifest` / `listURL`）给出，清单也可能就是
+     * 资源形状（`*.manifest`）而被放行——但清单里只有文件名与 hash，**不带身份**；
+     * 带身份的是 `sns04/*.php`，那些照样拦。所以「一个字节身份信息都不出手机」仍成立。
+     */
+    static boolean allowWhileOffline(String url) {
+        if (!isGameServer(url) && !isAssetHost(url)) return true;   // 别人的服务器，不管
+        if (isAssetDownload(url)) return true;                       // 不带身份的 bundle 下载，放行
+        return !intercept(url, true);                                // 其余按闸门裁决
+    }
+
+    /** 提示语：单机时点了「需要身份」的资源接口才会看到。 */
     static String downloadHint() {
-        return "单机模式下不能下载资源/扩展包：请关闭单机模式，下载完再开启。已下载的内容可以照常游玩。";
+        return "该资源需关闭单机模式下载：已缓存的资源照常可用，关掉单机后即可补下。";
+    }
+
+    /** 已购/已解锁内容的说明（单机时沿用本地上次状态，不发服务器）。 */
+    static String purchaseHint() {
+        return "已购/已解锁的内容在单机时沿用本机上次记录，不向服务器查询。";
     }
 
     // ---------------- 本地离线回包 ----------------
@@ -262,7 +304,7 @@ final class Offline {
     // ---------------- 界面文案 ----------------
 
     static String summary(boolean on) {
-        return on ? "已开启：单机运行，游戏一个字节都不会发往服务器" : "已关闭：正常联网（云存档、好友、邮件、PVP 可用）";
+        return on ? "已开启：单机运行，只挡带身份的接口，资源照常下载" : "已关闭：正常联网（云存档、好友、邮件、PVP 可用）";
     }
 
     /** 开关下方那几行说明：必须让人一眼看到「哪些功能没了」。 */
@@ -270,8 +312,9 @@ final class Offline {
         List<String> l = new ArrayList<>();
         l.add("单机时云存档、好友、邮件、PVP、礼物都不可用");
         l.add("存档只存在本机；本地存档照常读写，导出/导入用下面「存档备份」");
-        l.add("已下载的资源/扩展包照常可用；新资源下载要先关单机模式");
-        l.add("游戏服务器请求全部在本机拦下（含登录），设备信息不外发");
+        l.add("资源/扩展包照常下载（这条路径不带账号或设备信息）");
+        l.add("已购/已解锁内容沿用本机上次记录，不向服务器查询");
+        l.add("登录、存档、读数据等接口全部在本机拦下，设备信息不外发");
         l.add("关掉开关后立刻恢复正常联网，无需重开游戏");
         return Collections.unmodifiableList(l);
     }

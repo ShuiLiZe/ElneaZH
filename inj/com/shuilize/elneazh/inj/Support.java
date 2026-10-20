@@ -202,16 +202,26 @@ final class Support {
         stp.topMargin = (int) (6 * d);
         card.addView(state, stp);
 
-        // 单机开着时再挂一行「资源下载要先关单机」，红棕色，点了不做事，纯粹提醒。
+        // 单机开着时挂一行「资源照常下载」；若真有需要身份的接口被拦，再换成红灯提示。
         final TextView dl = new TextView(a);
-        dl.setTextColor(Color.rgb(0x8B, 0x2E, 0x1A));
+        dl.setTextColor(Color.rgb(0x2E, 0x6B, 0x2E));
         dl.setTextSize(12);
         dl.setLineSpacing(0, 1.25f);
-        dl.setText("资源/扩展包：已下载的照常可用；要下载新的，请先关闭单机模式。");
+        final String okTip = "资源/扩展包：单机时照常下载（这条路径不带账号或设备信息）。"
+                + Offline.purchaseHint();
+        dl.setText(okTip);
         dl.setVisibility(on[0] ? View.VISIBLE : View.GONE);
         LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, -2);
         dlp.topMargin = (int) (4 * d);
         card.addView(dl, dlp);
+
+        if (on[0]) {
+            String blocked = NetBlocker.downloadTip();
+            if (!blocked.isEmpty()) {
+                dl.setTextColor(Color.rgb(0x8B, 0x2E, 0x1A));
+                dl.setText(blocked);
+            }
+        }
 
         toggle.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
@@ -227,7 +237,16 @@ final class Support {
                     toggle.setBackground(round(next ? ORANGE : CREAM_DARK, next ? ORANGE_DARK : BROWN, 2.5f * d, 10 * d));
                     state.setText(offlineText(next));
                     dl.setVisibility(next ? View.VISIBLE : View.GONE);
-                    Toast.makeText(a, next ? "单机模式已开启：游戏完全离线，数据不外发（要下载资源请先关闭）"
+                    if (next) {
+                        String blocked = NetBlocker.downloadTip();
+                        dl.setTextColor(Color.rgb(0x2E, 0x6B, 0x2E));
+                        dl.setText(okTip);
+                        if (!blocked.isEmpty()) {
+                            dl.setTextColor(Color.rgb(0x8B, 0x2E, 0x1A));
+                            dl.setText(blocked);
+                        }
+                    }
+                    Toast.makeText(a, next ? "单机模式已开启：只挡带身份的接口，资源照常下载"
                                     : "单机模式已关闭：恢复正常联网",
                             Toast.LENGTH_SHORT).show();
                 } catch (Throwable t) {
@@ -249,12 +268,12 @@ final class Support {
         b.append(Offline.summary(on)).append('\n');
         for (String s : Offline.limits()) b.append("· ").append(s).append('\n');
         if (on) {
-            b.append("登录/上传等请求都在本机被接住，手机不发任何数据给游戏服务器。");
+            b.append("带账号/设备信息的接口（登录、存档、排行、邮件等）全部在本机被接住，不发出去。");
+            b.append('\n').append("资源与扩展包边走边下不受影响：这条下载路径不带任何身份信息。");
             String tip = NetBlocker.downloadTip();
             if (!tip.isEmpty()) b.append('\n').append(tip);
-            b.append('\n').append("资源地址本来要连服务器才拿得到，所以下载要先关单机。");
         } else {
-            b.append("开启后游戏完全离线运行：连登录请求都不发，设备信息不外泄。\n导出/导入存档请用下面「存档备份」里的功能。");
+            b.append("开启后只挡带身份的接口，资源照常下载，设备信息不外泄。\n导出/导入存档请用下面「存档备份」里的功能。");
         }
         return b.toString();
     }

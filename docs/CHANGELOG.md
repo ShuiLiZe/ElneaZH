@@ -2,6 +2,44 @@
 
 > 这是给"接手的人或下一次会话"的交付文件：项目现在做到哪、怎么继续。每次有进展都会更新。
 
+## 2026-10-21 05:20 单机模式：资源下载改为放行（用户纠正上一版）
+
+上一版（`baebd16`）把所有资源下载也拦掉了，理由是「拿不到不带身份的地址」。用户指出实际是
+**边玩边下载**，必须照常可用。回头重查 global-metadata，上一版的判断是错的：
+
+- 下载走 `AssetBundleManager.downloadAndCache` → `get_Url` → `UnityWebRequest`，
+  由 `getEnvironmentURL()` / `getAssetBundleURL()` / `getManifestURL()` 拼地址，**不经过 `HttpSystem`**。
+- 把 `AssetBundleManager` 整块字段名数一遍，`user_number` / `crypt_key` / `UserNumberOnServer` /
+  `CryptKeyOnServer` / `key_header_info` / `addUniqArg` / `uniq` / `uuid` / `playerId` / `token`
+  **全部 0 次**。身份参数只存在于 `HttpSystem`（即 `/sns04/*.php`）那条路。
+
+**改动**：
+- `Offline.allowWhileOffline()`：新增 `if (isAssetDownload(url)) return true;`，
+  资源下载在单机时**放行**；其余（`/sns04/*.php` 带身份的接口）照旧拦。
+- `Offline.isAssetDownload()`：显式排除 `.php`（`ReadResourceInfo.php` 这类资源清单接口带身份，必须拦），
+  `manifest` 只认末段（避免误判路径里含 manifest 的接口）。
+- `Offline.isAssetHost()` 新增：限定 althi 宿主（`res-` / `cdn-` / 裸域 / 任意子域）。
+- `Offline.downloadHint()` 改为「该资源需关闭单机模式下载：已缓存的资源照常可用，关掉单机后即可补下。」
+- `Offline.purchaseHint()` 新增：已购/已解锁内容单机时沿用本机上次记录，不向服务器查询。
+- `Offline.limits()` / `summary()` 文案改为「只挡带身份的接口，资源照常下载」。
+- `NetBlocker`：新增 `ASSET_OK` / `assetAllowed()`；`allow()` 改走 `Offline.allowWhileOffline`；
+  放行的下载记 `offline: pass through ASSET download ... (no identity info, allowed)`；
+  `assetHits()` 只剩「带身份的资源接口被拦」时才加一。
+- `Support.java`：单机时那行提示改成绿色「资源/扩展包：单机时照常下载…」，
+  只有真拦到带身份的资源接口才变红棕显示 `NetBlocker.downloadTip()`。
+- `SelfCheck.java`：probe 换成真实资源 URL（`res-elnea` / `cdn-elnea`），
+  新增 `offline asset downloads allowed:`。
+
+**测试**：`OfflineTest` 99 → **132 项**（资源放行 6 例、带身份接口仍拦 8 例×3 断言、提示语、已购说明）；
+`verify_offline.py` 75 → **88 项**（断言 `isAssetDownload(...)→return true`、`.php` 被排除、
+放行/拦截统计与日志接线）。
+写测试时自己踩了一个坑：断言写成 `ok(!NetBlocker.allow(u, true), "闸门放行")`，
+把「放行」写成了「不放行」——测试红出来才发现是断言错，不是代码错，已改成 `ok(NetBlocker.allow(...))`。
+
+本地验证：`verify_offline.py` 88/88、`OfflineTest` 132/132、
+`javac --release 8 -Xlint:all` 全绿（66 classes，仅已知 deprecation 警告）、
+`d8 --min-api 21` → `classes.dex` 101,844 字节、`manifest_zh.py` 往返 `manifest ok 32056`。
+
 ## 2026-10-21 04:10 单机模式：扩展包 / 资源下载的放行规则（feat/offline-share）
 
 用户补充需求：已下载的扩展包单机必须照常可用；纯静态 CDN 下载可放行，带身份信息的一律拦并提示。

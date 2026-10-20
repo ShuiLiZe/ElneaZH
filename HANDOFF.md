@@ -40,48 +40,59 @@ _最后更新：2026-10-21 03:40 CST_
 
 - 游戏**没有独立的扩展包下载通道**。`Assets/Script` 全表 782 个 `.cs`，网络相关的只有
   `GameSystem/HttpSystem.cs`、`HttpRequest.cs`、`AssetBundleManager.cs`、`Unity5Purchase.cs`、
-  `UnityIAPManager.cs`，全部走同一个 `HttpSystem`。
+  `UnityIAPManager.cs`。其中 **`AssetBundleManager` 是独立的下载路径**，不经过 `HttpSystem`。
 - 资源清单与 bundle 基址**是服务器下发的，客户端没有硬编码 CDN**：
   global-metadata 里 `HttpSystem` 的 `listURL` / `assetBundleURL` / `cacheFlag` 三个字段，
   以及 `AssetBundleManager.getAssetBundleURL()` / `getEnvironmentURL()` / `getManifestURL()` /
-  `initializeLoadAssetBundleInfo()` / `downloadingData` / `PreLoadData` / `assetCacheData`。
+  `initializeLoadAssetBundleInfo()` / `downloadAndCache` / `get_Url` / `downloadingData` /
+  `PreLoadData` / `assetCacheData`。
   新增的 bundle（教程图、扭蛋横幅等）落在 `files/UnityCache/Shared/`（见本文件 153~154 行）。
-- `/sns04/` 的四个入口（`app-` / `cdn-` / `res-` / 裸域）都要 `key_header_info` + `addUniqArg`
-  的鉴权头（**带账号与设备标识**）。所以「不带身份信息的纯静态下载」在这游戏里根本拿不到地址。
+- **只有 `/sns04/*.php` 这条路上带身份**：`HttpSystem.addUniqArg` + `key_header_info` +
+  `user_number` / `crypt_key`（账号与设备标识）。**bundle 下载那条路一次都不出现这些字段**——
+  这是「资源照常下载」能成立的依据，明细见下方「证据」。
 - 游戏自己有一套「离线领取」流程（`OfflineData` / `IsOfflineActive` /
   `successOfflineHttp` / `successOfflineCheckHttp` / `errorOfflineCheckHttp`），
   这也是判断「离线时哪些读取可以沿用上次结果」的依据。
 
-**据此的放行规则（当前实现）**：
+**据此的放行规则（2026-10-21 按用户要求改定：边玩边下载必须可用）**：
 
 | 类别 | 例子 | 单机时 | 说明 |
 |---|---|---|---|
 | 已下载的 bundle / 存档 | `files/UnityCache/Shared/*`、本地存档 | **照常可用** | 纯本地读，不碰网络，本闸门也不拦 file:// |
-| 游戏服务器上的资源/扩展包下载 | `https://*althi.co.jp/sns04/**/*.bundle`、`*.unity3d`、`assetbundle`、`manifest` | **拦**（本机回 200 `{}`） | 地址要靠服务器下发，而下发请求带设备码 |
-| 游戏服务器上的 PHP 接口（读/写/登录） | `read.php` / `load.php` / `save2.php` / `login.php` … | **拦** | 真单机：一个字节都不出 |
-| 非游戏服务器的地址 | 广告、Unity 遥测、别人的 CDN | **不拦** | 与游戏存档/身份无关（Unity 遥测也发设备信息，但不在本闸门范围，见下） |
+| **资源 / 扩展包 bundle 下载** | `res-elnea.althi.co.jp/**/x.bundle`、`cdn-elnea/**/AssetBundle`、`*.unity3d`、`*.ab`、`*.assetbundle`、`*/manifest` | **放行**（真的发出去） | 该路径**不带任何身份信息**（证据见下） |
+| 游戏服务器上的 PHP 接口（读/写/登录/资源清单） | `read.php` `load.php` `save2.php` `login.php` `ReadResourceInfo.php` … | **拦**（本机回 200 `{}`） | 这些走 `HttpSystem.addUniqArg`，带 `user_number` / `crypt_key` |
+| 非游戏服务器的地址 | 广告、他人的 CDN | **不拦** | 与游戏存档/身份无关 |
 
-- 规则集中在 `Offline.allowWhileOffline(String)` 一处，`Offline.isAssetDownload()` 做资源下载识别，
-  `Offline.downloadClass()` 分 `DL_ASSET` / `DL_SNSPHP` / `DL_OTHER`（只用于日志与提示）。
-- 单机时真拦到下载，`NetBlocker.assetHits()` 会加一，Support 弹窗里那行红字提示随之出现：
-  **「资源/扩展包：已下载的照常可用；要下载新的，请先关闭单机模式。」**
-  以及完整提示语 `Offline.downloadHint()`：*「单机模式下不能下载资源/扩展包：请关闭单机模式，
-  下载完再开启。已下载的内容可以照常游玩。」*
-- **为什么没给「纯静态 CDN 放行」开口子**：因为客户端拿不到「不带身份信息」的地址——
-  清单和基址都在服务器上，先要发 `listURL`（带设备码）才拿到 bundle URL。开口子就变成
-  「先上传身份换地址、再放行下载」的隐性通道，与「一个字节都不出手机」自相矛盾。
-  日后若真出现独立静态 CDN，只改 `Offline.allowWhileOffline` 这一处即可（有单测盯着它）。
+**「下载不带身份」的证据**（这是这次改动的核心依据，别拍脑袋推翻）：
+把 global-metadata 里 `AssetBundleManager` 整块字段名数一遍，下列**全部出现 0 次**：
+`user_number`、`crypt_key`、`UserNumberOnServer`、`CryptKeyOnServer`、
+`key_header_info`、`addUniqArg`、`uniq`、`uuid`、`playerId`、`token`。
+下载实际走 `AssetBundleManager.downloadAndCache` → `get_Url` → `UnityWebRequest`，
+由 `getEnvironmentURL()` / `getAssetBundleURL()` / `getManifestURL()` 拼地址，
+**不经过** `HttpSystem`，所以也不带任何身份参数。
+身份参数只出现在 `HttpSystem`（`addUniqArg` / `key_header_info` / `user_number` / `crypt_key`）那条路上，
+即所有 `/sns04/*.php` —— 这些照旧全拦。
 
-**放行的域名/路径清单**（写死在这里，改代码必须同步改这段）：
-- 放行：**非** `*.althi.co.jp` 且**非**资源下载形状的地址。即 host 不是 `althi.co.jp` / `.althi.co.jp`
-  后缀，且路径不以 `.bundle` `.unity3d` `.ab` `.assetbundle` 结尾、不含 `assetbundle` / `manifest`。
-- 拦截：host ∈ {`althi.co.jp`, `app-elnea.althi.co.jp`, `cdn-elnea.althi.co.jp`, `res-elnea.althi.co.jp`,
-  以及任何 `.althi.co.jp` 子域} **且** 路径含 `/sns04/` —— 覆盖 100% 的接口与资源下载入口。
+- 规则集中在 `Offline.allowWhileOffline(String)` 一处：
+  `if (isAssetDownload(url)) return true;` 之后才 `return !intercept(url, true);`
+  `Offline.isAssetHost()` 限定只有 althi 那批宿主；`Offline.isAssetDownload()` 做资源形状识别，
+  **显式排除 `.php`**（接口不算资源）；`downloadClass()` 分 `DL_ASSET` / `DL_SNSPHP` / `DL_OTHER`（日志用）。
+- 放行的下载会在 logcat 记一条 `offline: pass through ASSET download <name> (no identity info, allowed)`，
+  `NetBlocker.assetAllowed()` 计数；真的拦到「需要身份的资源接口」时 `NetBlocker.assetHits()` 加一。
+- 已购 / 已解锁内容：单机时沿用本机上次记录，不向服务器查询（`Offline.purchaseHint()`）。
 
-**已知限制（真机要验）**：已下载 bundle 能否在单机下直接用，取决于游戏是否每次启动都向服务器
-校验 bundle 版本/购买解锁状态。静态看 `AssetBundleManager` 会走 `manifest` 拉版本，一旦被拦，
-游戏可能报「需要下载」或退化成使用缓存。真机验证项见下方清单第 3 条；如果确认它每次都要校验，
-而拦掉后又不能进游戏，应退回「只拦写请求（save2/save/kpi 等）+ 放行读请求」，而不是伪造回包。
+**放行名单（改代码必须同步改这段）**
+- **放行（不带身份）**：
+  - host ∈ `res-elnea.althi.co.jp`、`cdn-elnea.althi.co.jp`、`althi.co.jp`、任意 `*.althi.co.jp`
+    **且** 路径是资源形状：以 `.bundle` / `.unity3d` / `.ab` / `.assetbundle` 结尾，
+    或路径含 `assetbundle`，或末段是 `manifest` / `*.manifest`。
+  - 任何非 `althi.co.jp` 域的地址（别人的 CDN / 广告）。
+- **拦截（带身份）**：host ∈ 上面同一批 althi 宿主 **且** 路径含 `/sns04/` 且末段是 `*.php`
+  （登录、存档、排行、邮件、PVP、资源清单接口……），以及所有其它 `/sns04/` 非资源路径。
+
+**已知限制（真机要验）**：若游戏某次版本把 bundle 地址改成「先请求一个带身份的 php 拿临时 URL」，
+那一步会被拦，表现为资源下载失败但已缓存内容照常能玩；这时应把该 php 加入
+`Offline` 的放行例外并在此处登记（前提是它只回 URL、不含写操作）。**不伪造回包**。
 
 ### 分享 / 导出（第三批）
 入口都在同一个 Support 弹窗的「分享 / 导出」区，三个按钮各自独立 try/catch，出错只 Toast：
@@ -101,9 +112,10 @@ _最后更新：2026-10-21 03:40 CST_
   （备份目录 `/sdcard/艾尔尼亚存档备份` 在 Android 10 上要能读）。
 
 ### 离线验证（CI 里跑，不需要手机）
-- `python tools/verify_offline.py`：75 项源码级护栏（判定范围/端点表/回包/文案/入口/try-catch/下载放行规则）。
-- `java com.shuilize.elneazh.inj.OfflineTest`：99 项**真跑 Java**（`tools/offline_test/`，
-  android 类用极小 stub），含扩展包下载的单机拦截与放行边界。这两条已接进 `.github/workflows/build-check.yml`。
+- `python tools/verify_offline.py`：**88 项**源码级护栏（判定范围/端点表/回包/文案/入口/try-catch/下载放行规则）。
+- `java com.shuilize.elneazh.inj.OfflineTest`：**132 项**真跑 Java（`tools/offline_test/`，
+  android 类用极小 stub），含：资源 bundle 在单机时**放行**、`*.php` 接口在单机时**照拦**、
+  已购内容沿用本机记录、提示语措辞。这两条已接进 `.github/workflows/build-check.yml`。
 
 ## 现在能用的版本
 - Release `latest` 的 ElneaZH.apk（每次推送自动构建）。装前先在游戏「Support → 存档数据」备份，卸载原版后安装汉化版（签名不同）。

@@ -153,20 +153,40 @@ if m_nt:
 off_src = read("Offline.java")
 check("allowWhileOffline" in off_src, "Offline 有 allowWhileOffline（下载放行规则集中一处）")
 check("isAssetDownload" in off_src, "Offline 能识别资源/扩展包下载")
-check("downloadHint" in off_src, "Offline 提供「请关闭单机模式下载」提示语")
+check("isAssetHost" in off_src, "Offline 有资源宿主判定 isAssetHost")
+check("downloadHint" in off_src, "Offline 提供「该资源需关闭单机模式」提示语")
 check("关闭单机模式" in off_src, "提示语里写了要关闭单机模式")
+check("purchaseHint" in off_src, "已购/已解锁内容有「沿用本机记录」说明")
+
 m_aw = re.search(r"static\s+boolean\s+allowWhileOffline\s*\(.*?\)\s*\{(.*?)\n    \}", off_src, re.S)
 check(m_aw is not None, "allowWhileOffline 有实现体")
 if m_aw:
     body = m_aw.group(1)
-    check("isGameServer" in body, "放行规则里排除游戏服务器（不开口子）")
-    check("isAssetDownload" in body, "放行规则里排除资源下载")
-    check("return true" not in body.replace("return !", ""),
-          "没有「无条件放行」的分支（除!isGameServer&&!isAssetDownload 外）")
+    check("isAssetHost" in body, "规则里用到资源宿主判定")
+    check("isAssetDownload" in body, "规则里用到资源下载判定")
+    # 资源下载必须被放行（用户要求：边玩边下载照常可用）
+    check(re.search(r"isAssetDownload\(url\)\)\s*return\s+true", body) is not None,
+          "资源下载在单机时返回 true（放行）")
+    check("intercept" in body, "其余走闸门裁决（带身份的接口仍拦）")
+
+# 识别函数：.php 绝不能算资源下载（接口带身份，必须拦）
+m_ad = re.search(r"static\s+boolean\s+isAssetDownload\s*\(.*?\)\s*\{(.*?)\n    \}", off_src, re.S)
+check(m_ad is not None, "isAssetDownload 有实现体")
+if m_ad:
+    ad = m_ad.group(1)
+    check('endsWith(".php")' in ad, "isAssetDownload 显式排除 .php 接口")
+    for ext in (".bundle", ".unity3d", ".ab", ".assetbundle"):
+        check('"%s"' % ext in ad, "isAssetDownload 认 %s 后缀" % ext)
 
 nb = read("NetBlocker.java")
 check("assetHits" in nb, "闸门统计被拦下载（界面提示用）")
+check("assetAllowed" in nb, "闸门统计被放行的下载（证明边玩边下载没被误伤）")
 check("downloadTip" in nb, "闸门能给界面一句下载提示")
+check("pass through ASSET download" in nb, "放行的下载有 logcat 记录")
+
+sup2 = read("Support.java")
+check("Offline.purchaseHint" in sup2, "Support 界面展示已购内容说明")
+check("照常下载" in sup2, "Support 界面写明资源照常下载")
 
 # ---------------------------------------------------------------- manifest
 

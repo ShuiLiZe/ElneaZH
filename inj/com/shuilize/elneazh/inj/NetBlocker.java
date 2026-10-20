@@ -49,6 +49,7 @@ final class NetBlocker {
     private static ProxySelector prevProxy;
     private static final AtomicInteger INTERCEPTED = new AtomicInteger();
     private static final AtomicInteger ASSET_HITS = new AtomicInteger();
+    private static final AtomicInteger ASSET_OK = new AtomicInteger();
     private static final Set<String> SEEN = Collections.synchronizedSet(new java.util.HashSet<String>());
     private static final ConcurrentHashMap<String, Integer> HITS = new ConcurrentHashMap<>();
 
@@ -92,9 +93,13 @@ final class NetBlocker {
         return b.toString();
     }
 
-    /** 裁决：单机开着 + 游戏服务器 → 不发出（本地回）。纯函数，离线可测。 */
+    /**
+     * 裁决：单机开着 + 带身份的接口 → 不发出（本地回）。
+     * 资源/扩展包下载不带身份，{@link Offline#allowWhileOffline} 会放行。纯函数，离线可测。
+     */
     static boolean allow(String url, boolean offlineOn) {
-        return !Offline.intercept(url, offlineOn);
+        if (!offlineOn) return true;
+        return Offline.allowWhileOffline(url);
     }
 
     static boolean allow(Context ctx, String url) {
@@ -102,9 +107,20 @@ final class NetBlocker {
             if (!Offline.isOn(ctx)) return true;
             boolean ok = allow(url, true);
             if (!ok) note(url);
+            else if (Offline.isAssetDownload(url)) noteAllowed(url);
             return ok;
         } catch (Throwable t) {
             return true;   // 判断出任何问题都放行：宁可漏拦，不能把游戏弄坏
+        }
+    }
+
+    /** 单机期间放行的资源下载（正常行为，只记一次日志，方便真机核对）。 */
+    private static void noteAllowed(String url) {
+        ASSET_OK.incrementAndGet();
+        String key = Offline.describe(url);
+        if (SEEN.add("ok:" + key)) {
+            Log.i(TAG, "offline: pass through ASSET download " + key
+                    + " (no identity info, allowed)");
         }
     }
 
@@ -115,7 +131,7 @@ final class NetBlocker {
             ASSET_HITS.incrementAndGet();
             if (SEEN.add("asset:" + php)) {
                 Log.i(TAG, "offline: intercepted ASSET download " + php
-                        + " -> local reply, nothing sent (先关单机模式再下载)");
+                        + " -> local reply, nothing sent");
             }
         }
         HITS.merge(php, 1, Integer::sum);
@@ -127,11 +143,13 @@ final class NetBlocker {
     }
 
     /**
-     * 单机期间被拦下的「资源/扩展包下载」次数。
-     * 界面拿它在单机开着时提示「已下载的照常可用，新下载要先关单机」——
-     * 只有真发生了下载拦截才提示，避免每局都弹。
+     * 单机期间被拦下的「需要身份的资源接口」次数（正常路径的 bundle 下载是放行的，不计在这里）。
+     * 界面拿它在单机开着时提示「该资源需关闭单机模式下载」——只有真被拦过才提示，避免每局都弹。
      */
     static int assetHits() { return ASSET_HITS.get(); }
+
+    /** 单机期间**放行**的资源下载次数（用来在自检里证明「边玩边下载」没被误伤）。 */
+    static int assetAllowed() { return ASSET_OK.get(); }
 
     // ---------------- handler 工厂 ----------------
 
@@ -284,10 +302,11 @@ final class NetBlocker {
     /** 供 SelfCheck 打印。 */
     static String describe() {
         return "factory=" + factoryInstalled + " proxy=" + proxyInstalled
-                + " intercepted=" + INTERCEPTED.get() + " assetBlocked=" + ASSET_HITS.get();
+                + " intercepted=" + INTERCEPTED.get()
+                + " assetBlocked=" + ASSET_HITS.get() + " assetAllowed=" + ASSET_OK.get();
     }
 
-    /** 单机开着时，界面要给的那句下载提示（没线索时返回空串）。 */
+    /** 单机开着且真有资源下载被拦过时，界面要给的那句提示（否则返回空串）。 */
     static String downloadTip() {
         if (ASSET_HITS.get() <= 0) return "";
         return Offline.downloadHint();

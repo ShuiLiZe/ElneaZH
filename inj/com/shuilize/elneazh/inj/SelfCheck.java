@@ -55,7 +55,8 @@ final class SelfCheck {
                     "https://app-elnea.althi.co.jp/sns04/login.php",
                     "https://app-elnea.althi.co.jp/sns04/version.php",
                     "https://app-elnea.althi.co.jp/sns04/some_new_api.php",
-                    "https://app-elnea.althi.co.jp/pack/asset.bundle",
+                    "https://res-elnea.althi.co.jp/sns04/pack/asset.bundle",
+                    "https://cdn-elnea.althi.co.jp/sns04/bundle/AssetBundle",
                     "https://cdn.example.com/x.zip",
             };
             for (String u : probes) {
@@ -69,6 +70,7 @@ final class SelfCheck {
             r.append("offline gate installed: ").append(NetBlocker.installed()).append('\n');
             r.append("offline blocked so far: ").append(NetBlocker.hits()).append('\n');
             r.append("offline asset downloads blocked: ").append(NetBlocker.assetHits()).append('\n');
+            r.append("offline asset downloads allowed: ").append(NetBlocker.assetAllowed()).append('\n');
             r.append("offline download hint: ").append(Offline.downloadHint()).append('\n');
             r.append("share: ").append(Share.describe()).append('\n');
             r.append("name table lines: ").append(Share.nameTableText(NameFix.aliasSnapshot()).split("\n").length).append('\n');

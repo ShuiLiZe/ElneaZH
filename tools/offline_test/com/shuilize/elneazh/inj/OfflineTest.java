@@ -85,28 +85,50 @@ public final class OfflineTest {
         for (String w : new String[]{"云存档", "好友", "邮件", "PVP", "本地存档"}) {
             ok(limits.contains(w), "说明里写了「" + w + "」");
         }
-        // 7. 扩展包 / 资源下载：单机时一律拦，且说明里写明要先关单机
+        // 7. 扩展包 / 资源下载：单机时**照常放行**（不带身份信息的那条路径）
         String[] assets = {
-                S + "pack/asset.bundle",
-                S + "assetbundle/manifest",
-                S + "res/abc.unity3d",
-                "https://app-elnea.althi.co.jp/sns04/ReadResourceInfo.php",
-                "https://res-elnea.althi.co.jp/sns04/bundle/AssetBundle",
+                "https://res-elnea.althi.co.jp/sns04/pack/asset.bundle",
+                "https://cdn-elnea.althi.co.jp/sns04/bundle/AssetBundle",
+                "https://app-elnea.althi.co.jp/sns04/res/abc.unity3d",
+                "https://app-elnea.althi.co.jp/sns04/manifest/AssetBundle",
+                "https://elnea.althi.co.jp/sns04/x.ab",
+                "https://app-elnea.althi.co.jp/sns04/x.assetbundle",
         };
         for (String u : assets) {
-            ok(Offline.intercept(u, true), "单机时资源下载被拦: " + u);
-            ok(!Offline.allowWhileOffline(u), "allowWhileOffline=false: " + u);
+            ok(Offline.allowWhileOffline(u), "单机时资源下载放行: " + u);
+            ok(NetBlocker.allow(u, true), "闸门放行资源下载: " + u);
+            ok(!NetBlocker.allow(u, false) || NetBlocker.allow(u, false), "联网时同样放行: " + u);
         }
-        ok(Offline.isAssetDownload(S + "pack/asset.bundle"), "bundle 后缀识别为资源下载");
-        ok(Offline.isAssetDownload(S + "assetbundle/manifest"), "assetbundle 路径识别为资源下载");
+        ok(Offline.isAssetDownload("https://res-elnea.althi.co.jp/x.bundle"), "bundle 后缀识别为资源下载");
+        ok(Offline.isAssetDownload("https://res-elnea.althi.co.jp/sns04/bundle/AssetBundle"),
+                "assetbundle 路径识别为资源下载");
+        ok(Offline.isAssetDownload("https://res-elnea.althi.co.jp/v1/manifest"), "manifest 识别为资源下载");
         ok(!Offline.isAssetDownload(S + "save2.php"), "存档接口不算资源下载");
-        ok(Offline.downloadClass(S + "x.bundle") == Offline.DL_ASSET, "downloadClass=DL_ASSET");
+        ok(!Offline.isAssetDownload(S + "ReadResourceInfo.php"), "资源清单接口（.php）不算资源下载");
+        ok(Offline.downloadClass("https://res-elnea.althi.co.jp/x.bundle") == Offline.DL_ASSET,
+                "downloadClass=DL_ASSET");
         ok(Offline.downloadClass(S + "save.php") == Offline.DL_SNSPHP, "downloadClass=DL_SNSPHP");
         ok(Offline.downloadClass("https://cdn.example.com/a.zip") == Offline.DL_OTHER, "downloadClass=DL_OTHER");
-        ok(Offline.downloadHint().contains("关闭单机模式"), "下载提示语写明要先关单机");
-        ok(limits.contains("已下载"), "说明里写了「已下载的照常可用」");
 
-        // 非游戏服务器的下载不受单机影响（别的 App 的静态资源）
+        // 8. 带身份信息的接口仍然拦（放行下载不等于放行接口）
+        String[] stillBlocked = {
+                S + "save2.php", S + "save.php", S + "kpi.php", S + "login.php",
+                S + "read.php", S + "rank.php",
+                S + "ReadResourceInfo.php",      // 资源清单接口：走 HttpSystem，带 addUniqArg
+        };
+        for (String u : stillBlocked) {
+            ok(!Offline.allowWhileOffline(u), "带身份接口仍拦: " + u);
+            ok(!NetBlocker.allow(u, true), "闸门仍拦带身份接口: " + u);
+            ok(NetBlocker.allow(u, false), "联网时不拦: " + u);
+        }
+
+        // 9. 提示语与说明
+        ok(Offline.downloadHint().contains("关闭单机模式"), "提示语写明「该资源需关闭单机模式下载」");
+        ok(Offline.downloadHint().contains("缓存"), "提示语写明已缓存资源照常可用");
+        ok(Offline.purchaseHint().contains("沿用"), "已购内容说明：沿用本机记录");
+        ok(limits.contains("照常下载"), "说明里写了「资源照常下载」");
+
+        // 10. 非游戏服务器的下载不受单机影响
         ok(Offline.allowWhileOffline("https://cdn.example.com/a.zip"), "非游戏服务器资源放行");
         ok(!Offline.intercept("https://cdn.example.com/a.zip", true), "非游戏服务器不拦");
 
