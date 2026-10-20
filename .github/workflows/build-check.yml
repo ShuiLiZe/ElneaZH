@@ -86,19 +86,3 @@ jobs:
         with:
           name: ElneaZH-branch-apk
           path: dist/ElneaZH-branch.apk
-      # 测试分支自动出预发布（非 latest，不碰 main / 正式 Release）：固定 tag 每次覆盖。
-      - name: Publish test prerelease (fix/anti-flag, feat/offline-share only)
-        if: github.ref == 'refs/heads/fix/anti-flag' || github.ref == 'refs/heads/feat/offline-share'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          case "$GITHUB_REF_NAME" in
-            fix/anti-flag) TAG=test-antiflag; NAME="测试版·防封（上传前中文名转拼音）";;
-            feat/offline-share) TAG=test-offline; NAME="测试版·防封+单机模式+分享导出";;
-          esac
-          SHORT=${GITHUB_SHA::7}
-          cp dist/ElneaZH-branch.apk dist/ElneaZH-$TAG.apk
-          gh release delete "$TAG" -y --cleanup-tag || true
-          gh release create "$TAG" dist/ElneaZH-$TAG.apk --prerelease --latest=false \
-            --target "$GITHUB_SHA" --title "$NAME ($SHORT)" \
-            --notes "分支 $GITHUB_REF_NAME @ $SHORT 自动构建的测试包，仅供真机测试。不是正式版，测完请装回 latest 正式版。"
