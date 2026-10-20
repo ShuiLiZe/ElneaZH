@@ -72,14 +72,35 @@ def main():
     ap.add_argument('--tr', default='translations')
     ap.add_argument('--font'); ap.add_argument('--images', default='images_zh')
     ap.add_argument('--bmfont', help='TTF used to render Chinese glyphs into the NGUI bitmap font')
+    ap.add_argument('--names', default='tools/name_assets.txt',
+                    help='TextAssets that must stay stock English (one name per line)')
     a = ap.parse_args()
+
+    # 名字表（NameMale_en / NameFemale_en / NameFamily_en）必须是英文原文：这些名字会写进存档、
+    # 再随 read.php / pvp.php / 好友列表上传，服务器侧看到中文名是封号判据。
+    # 汉化只做「显示时映射」，所以这里主动把原版英文写回去，不参与任何翻译。
+    want = set()
+    if os.path.exists(a.names):
+        for line in open(a.names, encoding='utf-8'):
+            line = line.strip()
+            if line and not line.startswith('#'):
+                want.add(line)
+    assert len(want) == 3, f'{a.names}: expected 3 name tables, got {want}'
 
     env = UnityPy.load(a.orig)
     used = set()
-    nt = ni = 0
+    nt = ni = nn = 0
     for o in env.objects:
         if o.type.name == 'TextAsset':
             d = o.read()
+            if d.m_Name in want:
+                # 原文写回（UnityPy 读出来是 str，按 utf-8 编码回字节）
+                s = d.m_Script
+                raw = s.encode('utf-8', 'surrogateescape') if isinstance(s, str) else bytes(s)
+                d.m_Script = raw.decode('utf-8', 'surrogateescape') if isinstance(s, str) else raw
+                d.save(); nn += 1
+                print(f'name table kept ascii: {d.m_Name}')
+                continue
             p = os.path.join(a.tr, d.m_Name + '.json')
             if not d.m_Name.endswith('_en') or not os.path.exists(p):
                 continue
@@ -123,7 +144,7 @@ def main():
         bmfont_zh.apply(env.file.files['resources.assets'], a.bmfont, used)
     with open(a.out, 'wb') as f:
         f.write(env.file.save(packer='lz4'))  # keep LZ4 blocks like the original
-    print(f'texts {nt}, images {ni} -> {a.out}')
+    print(f'texts {nt}, images {ni}, ascii name tables {nn} -> {a.out}')
 
 
 if __name__ == '__main__':

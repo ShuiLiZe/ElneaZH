@@ -45,7 +45,18 @@ def support_stub(va):
     code = struct.pack('<8I', *ins) + b'elneazh://support\0'
     return code + bytes(0x34 - len(code))
 
-# file offset = VA - 0x4000 in the code segment
+# ---- 上传前名字闸门的挂点（实现在 tools/net_gate_so.py）----
+# 真机确认：Assembly-CSharp Cipher::EncryptRJ256(string) 在 VA 0x18ad7e4（file 0x18a97e4），7 条指令的序幕后
+# 就是「静态初始化」分支（0x18ad804 tbnz -> 0x18ad840）：那段代码只在第一次调用时执行、
+# 只碰 x8/x21 与标志位，而入口已经把 x19/x20/x21 保存到栈上，所以在这里插一枪不会干扰任何活值；
+# 三个分支目标全部落在原地。详见那个脚本的注释与自检。
+GATE_ENTRY = 0x18ad7e4        # EncryptRJ256 入口
+GATE_STUB = 0x18ad834         # 入口后的初始化块（8 条指令 = 32 字节）
+GATE_BACK = 0x18ad854         # 跳板执行完回到原流程（bl 0x18ad6e0 之后）
+GATE_BL = 0x1725788           # il2cpp_codegen_initialize_runtime_metadata
+GATE_FLAG = 0x3aa9000 + 0xef9 # EncryptRJ256 的「已初始化」标志位（勾子用它做也只读一次，不会改写）
+
+
 STUBS = [(0x1c43d74, 'fe57bea9f44f01a954f30090f5df0090f30300aa88067e39b5ae44f928010037e0df009000ac44f9e885eb97e0df00b000d040f9'),  # TitlePanel
          (0x1c05ae4, None)]  # InfoMenuPanel (in-game Support menu); AccountSettingPanel's contact (password help) stays original
 # ---- 初始国王「杨广」 ----

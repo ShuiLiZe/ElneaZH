@@ -6,6 +6,7 @@ import java.util.Map;
 /** 只为本地跑规则测试而写的极小 stub：够 Offline / NameFix 存取开关。 */
 public class Context {
     public static final int MODE_PRIVATE = 0;
+    private static final java.io.File TMP = new java.io.File(System.getProperty("java.io.tmpdir"), "elneazh_test");
     private static final Map<String, SharedPreferences> PRES = new HashMap<String, SharedPreferences>();
     private final java.util.Map<String, Object> extra = new HashMap<String, Object>();
     public SharedPreferences getSharedPreferences(String name, int mode) {
@@ -14,5 +15,6 @@ public class Context {
         return p;
     }
     public Context getApplicationContext() { return this; }
+    public java.io.File getFilesDir() { return new java.io.File(TMP, "files"); }
     public android.content.res.AssetManager getAssets() { return new android.content.res.AssetManager(); }
 }

@@ -39,8 +39,14 @@ public final class ZhInit extends ContentProvider {
         try {
             if (!NetGuard.install(getContext())) Log.w(TAG, "NET gate: no Java-visible hook (see NetGuard)");
         } catch (Throwable t) { Log.w(TAG, "NET gate failed", t); }
+        // 上传前名字闸门（native）：hook Cipher::EncryptRJ256，把明文里的中文名换成拼音。
+        // 最早期开始装（后台线程反复重试到 libil2cpp 加载完），失败只写日志，游戏照常跑。
+        try { NameGate.install(getContext(), 1); } catch (Throwable t) { Log.w(TAG, "gate install failed", t); }
         // 单机模式的闸门：常驻安装（是否真拦由 Offline.isOn() 现读决定，切开关不用重进游戏）
         try { NetBlocker.install(getContext()); } catch (Throwable t) { Log.w(TAG, "offline gate failed", t); }
+        // 单机模式的 native 闸门（离线入口 + HTTP）：与名字闸门同一个 .so，靠 il2cpp 运行时 API 按名字
+        // 解析方法后 hook，解析不到就跳过，绝不崩。是否真拦同样是现读 Offline.isOn()。
+        try { OfflineGate.install(getContext(), 1); } catch (Throwable t) { Log.w(TAG, "offline native gate failed", t); }
         try { SelfCheck.run(getContext()); } catch (Throwable t) { Log.w(TAG, "selfcheck failed", t); }
         return true;
     }

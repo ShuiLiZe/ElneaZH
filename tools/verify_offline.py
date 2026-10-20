@@ -212,6 +212,79 @@ check("NetBlocker.install" in zh, "ZhInit 启动时装网络闸门")
 for name, src in (("ZhInit", zh), ("Support", sup)):
     check(src.count("try") >= 3, "%s 的关键步骤都有 try/catch（%d 处）" % (name, src.count("try")))
 
+
+# ---------------------------------------------------------------- 原生单机闸门（il2cpp 按名解析 + inline hook）
+#
+# 这一段的护栏意义：native 侧一旦崩了，游戏直接起不来。所以这里逐条钉住
+# 「解析不到就跳过」「不伪造回包」「只在开关开着时动手」三件事。
+
+og = read("OfflineGate.java")
+check("nativeInstall" in og, "OfflineGate 把 hook 安装交给 native")
+check("nativePush" in og, "OfflineGate 把开关状态推给 native（切开关立刻生效，不用重进游戏）")
+check("TARGET_PANEL" in og and "TARGET_HTTP" in og, "两族 hook 分开装：面板入口 + 请求发送")
+check("AddShopPanel" in og, "面板名单含商店入口")
+check("AddMailPanel" in og, "面板名单含邮箱入口")
+check("AddFriendListPanel" in og, "面板名单含好友入口")
+check("AddPvpPreparePanel" in og, "面板名单含 PVP 入口")
+check("AddKingdomRankingPanel" in og, "面板名单含排行入口")
+check("AddNoticeInfoPanel" in og, "面板名单含公告入口")
+check("AddEventPanel" in og, "面板名单含活动入口")
+check("AddAdPanel" in og, "面板名单含广告入口")
+check("httpConnect" in og, "请求族含 HttpSystem.httpConnect")
+check("AddHttpQueue" in og, "请求族含 HttpSystem.AddHttpQueue")
+check(og.count("try") >= 6, "OfflineGate 处处 try/catch（%d 处）" % og.count("try"))
+check("done.await(waitMs" in og, "安装不等太久（最多等 waitMs，绝不拖住启动）")
+
+zh2 = read("ZhInit.java")
+check("OfflineGate.install" in zh2, "ZhInit 启动时装原生闸门")
+if "OfflineGate.install" in zh2:
+    i = zh2.index("OfflineGate.install")
+    seg = zh2[max(0, i - 200): i + 220]
+    check("try" in seg and "catch" in seg, "OfflineGate.install 包在自己的 try/catch 里")
+
+sup3 = read("Support.java")
+check("OfflineGate.push" in sup3, "Support 切开关时推状态给原生闸门")
+check("OfflineGate.summary" in sup3, "Support 显示原生闸门现状")
+
+sc = read("SelfCheck.java")
+check("offline native" in sc, "SelfCheck 报了原生闸门状态")
+
+# native 侧：源码级护栏
+eg = ""
+for cand in ("native/elneagate/eg_offline.c",):
+    fp = os.path.join(ROOT, cand)
+    if os.path.isfile(fp):
+        eg = io.open(fp, encoding="utf-8").read()
+check(eg != "", "native/elneagate/eg_offline.c 存在")
+if eg:
+    for api in ("il2cpp_domain_get", "il2cpp_domain_get_assemblies", "il2cpp_assembly_get_image",
+                "il2cpp_class_from_name", "il2cpp_class_get_method_from_name"):
+        check(api in eg, "native 用到 %s（按名字解析，不写死偏移）" % api)
+    check("dlsym" in eg, "il2cpp API 用 dlsym 取（版本变了只是解析不到，不会崩）")
+    check("ElneaOffline" in eg, "native 日志 TAG 是 ElneaOffline")
+    check("!e->orig" in eg, "没挂上就原样返回（绝不拿空指针去调）")
+    check("g_offline_flag" in eg, "开关值缓存在 native，hook 现读")
+    check("MethodInfo" in eg, "注释里写清「地址 = MethodInfo 首个字段」（不依赖头文件布局）")
+    # 不伪造回包：native 侧不许出现任何组包/造响应对象的逻辑
+    for bad in ("il2cpp_object_new", "il2cpp_string_new(\"{"):
+        check(bad not in eg, "native 不伪造服务器回包（无 %s）" % bad)
+
+egc = ""
+fp = os.path.join(ROOT, "native/elneagate/elneagate.c")
+if os.path.isfile(fp):
+    egc = io.open(fp, encoding="utf-8").read()
+check("eg_offline.h" in egc, "elneagate.c 引了 eg_offline.h")
+for jni in ("OfflineGate_nativeInstall", "OfflineGate_nativePush", "OfflineGate_nativeStats",
+            "OfflineGate_nativeProbe", "OfflineGate_nativeResolvable"):
+    check(jni in egc, "JNI 导出 %s" % jni)
+
+bg = io.open(os.path.join(ROOT, "tools", "build_gate.py"), encoding="utf-8").read()
+check("eg_offline.c" in bg, "build_gate.py 把 eg_offline.c 编进 libelneagate.so")
+
+bn = io.open(os.path.join(ROOT, ".github", "workflows", "build-check.yml"), encoding="utf-8").read()
+check("build_gate.py" in bn, "CI 编译原生闸门")
+check("verify_gate.py" in bn, "CI 验证原生闸门产物")
+
 print()
 if FAILS:
     print("FAILED: %d 项未通过 / 共 %d 项检查" % (len(FAILS), CHECKS[0]))

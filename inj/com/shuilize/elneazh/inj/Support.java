@@ -202,6 +202,22 @@ final class Support {
         stp.topMargin = (int) (6 * d);
         card.addView(state, stp);
 
+        // 原生闸门现状（单机开着时才显示）：挂钩了多少个入口、已经挡了几次。
+        // 拿不到就整行不显示 —— 这里出错绝不影响弹窗其它部分。
+        final TextView native_ = new TextView(a);
+        native_.setTextColor(Color.rgb(0x5A, 0x4A, 0x3A));
+        native_.setTextSize(11);
+        native_.setLineSpacing(0, 1.2f);
+        try {
+            native_.setText(OfflineGate.summary());
+        } catch (Throwable t) {
+            native_.setText("");
+        }
+        native_.setVisibility(on[0] && native_.getText().length() > 0 ? View.VISIBLE : View.GONE);
+        LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(-1, -2);
+        nlp.topMargin = (int) (4 * d);
+        card.addView(native_, nlp);
+
         // 单机开着时挂一行「资源照常下载」；若真有需要身份的接口被拦，再换成红灯提示。
         final TextView dl = new TextView(a);
         dl.setTextColor(Color.rgb(0x2E, 0x6B, 0x2E));
@@ -232,11 +248,24 @@ final class Support {
                         return;
                     }
                     on[0] = next;
+                    // 先把新状态推给原生闸门再改界面：hook 那边是现读的，推完立刻生效。
+                    try {
+                        OfflineGate.push(next);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "offline gate push", t);
+                    }
                     toggle.setText(toggleLabel(next));
                     toggle.setTextColor(next ? Color.WHITE : BROWN);
                     toggle.setBackground(round(next ? ORANGE : CREAM_DARK, next ? ORANGE_DARK : BROWN, 2.5f * d, 10 * d));
                     state.setText(offlineText(next));
                     dl.setVisibility(next ? View.VISIBLE : View.GONE);
+                    try {
+                        native_.setText(OfflineGate.summary());
+                        native_.setVisibility(next && native_.getText().length() > 0
+                                ? View.VISIBLE : View.GONE);
+                    } catch (Throwable t) {
+                        native_.setVisibility(View.GONE);
+                    }
                     if (next) {
                         String blocked = NetBlocker.downloadTip();
                         dl.setTextColor(Color.rgb(0x2E, 0x6B, 0x2E));
@@ -246,7 +275,7 @@ final class Support {
                             dl.setText(blocked);
                         }
                     }
-                    Toast.makeText(a, next ? "单机模式已开启：只挡带身份的接口，资源照常下载"
+                    Toast.makeText(a, next ? "单机模式已开启：面板入口已挡，请求不发出去"
                                     : "单机模式已关闭：恢复正常联网",
                             Toast.LENGTH_SHORT).show();
                 } catch (Throwable t) {
@@ -270,6 +299,14 @@ final class Support {
         if (on) {
             b.append("带账号/设备信息的接口（登录、存档、排行、邮件等）全部在本机被接住，不发出去。");
             b.append('\n').append("资源与扩展包边走边下不受影响：这条下载路径不带任何身份信息。");
+            b.append('\n').append("游戏内商店、邮箱、好友、PVP、排行、公告、活动、广告的入口"
+                    + "会在原生层直接不创建（打不开），不走服务器。");
+            try {
+                String gate = OfflineGate.summary();
+                if (gate.length() > 0) b.append('\n').append(gate).append('。');
+            } catch (Throwable t) {
+                Log.w(TAG, "offline gate summary", t);
+            }
             String tip = NetBlocker.downloadTip();
             if (!tip.isEmpty()) b.append('\n').append(tip);
         } else {

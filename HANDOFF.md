@@ -1,6 +1,78 @@
 # HANDOFF — 现状（只写当前状态；过程见 docs/CHANGELOG.md，规矩见 AGENTS.md）
 
-_最后更新：2026-10-21 03:40 CST_
+_最后更新：2026-10-21 05:55 CST_
+
+## 2026-10-21 05:55 单机模式改走 native：面板入口 + 请求发送在 il2cpp 层挡住（待真机验证）
+
+上一节里那条「已知风险：Unity 自建连接、Java 侧工厂可能拦不到」现在有了正面解法：
+**在 il2cpp 运行时按名字解析游戏自己的方法，挂 inline hook**。新增的东西全部在
+`libelneagate.so` 里（和上传前的名字闸门共用同一个 .so），Java 侧只是外壳。
+
+### 为什么非得走 native（别再重复调研）
+- 游戏 UI 与网络都在 il2cpp（`lib/arm64-v8a/libil2cpp.so`，61 MB）；**Java 层反射拿不到**
+  `MenuCell.EnableFlag` / `AbstractPanel.SetPanelEnabled`，`base.apk` 的 dex 里
+  `AndroidUuidPlugin`/`AndroidTools`/`GetUUID` 等 **0 命中**，也没有可用的 JNI 出口。
+- `libil2cpp.so` 的代码段和字符串里 **grep 不到** `MenuCell`/`AddShopPanel`/`HttpSystem` 明文，
+  名字只存在于 `global-metadata.dat`。→ 只能运行时用 il2cpp 的导出 API 按名字查。
+
+### 怎么做的
+`native/elneagate/eg_offline.c`（新）：
+1. `dlsym` 取 `il2cpp_domain_get` → `il2cpp_domain_get_assemblies` →
+   `il2cpp_assembly_get_image` → `il2cpp_class_from_name` → `il2cpp_class_get_method_from_name`；
+2. 遍历**所有** assembly 找 `ns::class`（表里命名空间写 `*` 表示不限），按 0..6 个参数
+   依次试 `il2cpp_class_get_method_from_name`，取 `MethodInfo` 的**第一个字段**当函数地址；
+3. 用 `A64HookFunction`（vendor/And64InlineHook）挂上去，每族留 64 个 hook 槽；
+4. hook 里现读开关值（`eg_of_set_state` 灌进来的 `'1'/'0'`）：
+   - **面板族**（target 1）→ 直接 `return NULL`，面板**不创建**（比「打开再关掉」安全，
+     不会留半初始化实例）；
+   - **请求族**（target 2）→ 也返回「失败」，让游戏走它**原本的**通信失败分支
+     （游戏自带 `OfflineData`/`IsOfflineActive`/`errorOfflineCheckHttp` 那一套离线状态）。
+5. **解析不到就跳过并打 `ElneaOffline` 日志**，绝不崩、绝不空指针调用；开关关了立刻回到原函数。
+
+`inj/.../OfflineGate.java`（新）：加载 .so、重试安装（il2cpp 起得比 ContentProvider 晚，
+最多等 `waitMs`，**绝不拖住启动**）、开关切换时 `push` 新状态、`stats()`/`describe()`/`probe()`。
+白名单两张表（`panelTable()` 41 条、`httpTable()` 3 条）都在这里，改名字只改这一个文件。
+
+挂的面板（`Add*Panel` 工厂方法族，全部取自语义明确的名字）：
+商店/内购（`AddShopPanel`、`AddShopMenuPanel`、`AddShopBuyConfirmPanel`、
+`AddShopBuyPreviewConfirmPanel`、`AddDropItemBuyPanel`、`AddGemBuyListPanel`、
+`AddTradeShopListPanel`、`AddPremiumPanel`、`AddChargesShopListPanel`，
+以及 `AddGachaPanel`/`AddGachaEffectPanel`/`AddCostumeGachaPanel`/`AddFightGachaPanel`/`AddInteriorGachaPanel`）、
+邮箱/序列码（`AddMailPanel`/`AddMailDetailsPanel`/`AddMailInputPanel`/`AddSerialCodeInputPanel`）、
+好友/结盟（`AddFriendListPanel`/`AddAlliancePanel`/`AddTouchAlliancePanel`）、
+PVP/对战/联赛（`AddPvpPreparePanel`/`AddPvpResultPanel`/`AddMatchPreparePanel`/
+`AddTournamentPanel`/`AddVoteListPanel`/`AddLeaguePanel`）、
+排行（`AddKingdomRankingPanel`/`AddGunnerRankingPanel`/`AddFishingRankingListPanel`/
+`AddLimitedEventRankingListPanel`）、
+公告/活动（`AddNoticeInfoPanel`/`AddNoticeDetailsPanel`/`AddEventPanel`/
+`AddLimitedEventPanel`/`AddLimitedEventPortalPanel`/`AddGroupEventListPanel`）、
+广告/网页/账号/迁移/举报（`AddAdPanel`/`AddWebPanel`/`AddAccountSettingPanel`/
+`AddAccountInputPanel`/`AddMigrantPasswordIssueListPanel`/`AddReportPanel`）。
+
+### 接线
+- `ZhInit.onCreate`：`OfflineGate.install(getContext(), 1)`，**自己的 try/catch**，排在
+  `NameGate.install` 与 `NetBlocker.install` 之后、`SelfCheck.run` 之前。
+- `Support` 支援弹窗：开关翻转时先 `OfflineGate.push(next)` 再改界面（hook 现读，立刻生效）；
+  单机时多一行原生闸门现状（`OfflineGate.summary()`：挂了几个入口、已挡几次）。
+- `SelfCheck`：新增 `offline native: ...` / `offline native api: n/8` / 两族条目数。
+
+### 边界（刻意保留的，别改）
+- **不伪造服务器回包**：native 侧没有任何组包逻辑，`verify_offline.py` 里有一条断言专门钉住
+  「`native/elneagate/eg_offline.c` 里不许出现 `il2cpp_object_new` / 造 JSON 字符串」。
+- 不删服务器标记、不改设备码、不绕反作弊；已购/已解锁内容沿用本机上次记录，不查服务器。
+- **armv7 没有 hook 引擎**（And64InlineHook 只有 AArch64 实现）：armv7 设备上原生族直接跳过
+  （`nativeInstall` 返回 -4），只剩 Java 层的 `NetBlocker` 兜底。真机以 arm64 为准。
+
+### 必须先确认的（由你判断，我不擅自改）
+1. **面板 hook 会不会让菜单缺项甚至崩**：`Add*Panel` 返回 NULL，游戏里如果有代码
+   `var p = AddMailPanel(...); p.something()` 就会空引用。真机先开单机模式、把主菜单每个入口点一遍。
+   崩了就把对应条目从 `panelTable()` 删掉重发（条目独立，不影响别的）。**没有**为了「保险」去伪造回包或改游戏逻辑。
+2. **请求族 hook 的返回值语义**：`httpConnect` 在 C# 里可能是 `IEnumerator`/`void`/`bool`，
+   返回 NULL 对前两者是合法的（协程不跑 / 直接返回），对 `bool` 是 false。
+   若真机上表现为「卡在网络等待」，就先只留 Java 层 `NetBlocker`（把 `httpTable()` 清空）。
+3. **资源下载**：下载走 `AssetBundleManager`（另一条路径，不带身份信息），本闸门**没碰它**，
+   边玩边下照旧。若某版本改成「先请求带身份 php 拿临时 URL」，那条 php 会被面板/请求族挡住 —— 那时再登记例外。
+
 
 ## 2026-10-21 03:40 单机模式 + 分享/导出（分支 feat/offline-share，待真机验证）
 
@@ -124,6 +196,41 @@ _最后更新：2026-10-21 03:40 CST_
 ## 固定签名 / 免卸载更新（21:05 加入，待真机验证）
 - 签名本来就固定（app/keystore/elneazh.p12），只有第一次从商店版换汉化版要卸载。
 - App 现在会：检测已装游戏是否是自己签名的汉化版 → 是就提示直接覆盖安装；第一次汉化成功后把原版 APK 存到 App 私有目录（filesDir/orig），以后用它打补丁。没存过的话让用户手动选原版 APK（仓库 base/apk 有）。
+
+## 2026-10-21 03:20 上传前名字闸门：改 EncryptRJ256 的明文（单向）
+
+**问题**：存档里只要带中文名，上传到 `sns04/*.php` 就是汉字。服务器只认原版字形，中文名是「非原版客户端」的硬证据。
+
+**落点（真机 frida 取样确认，不是猜的）**：`Assembly-CSharp` 的 `Cipher::EncryptRJ256(string)`
+
+| 项 | 值 |
+| --- | --- |
+| 函数入口 | VA `0x18ad7e4` = ELF file offset `0x18a97e4`（入口 `str x30,[sp,#-0x30]!`，x0 = 明文） |
+| 返回 | `0x18ad97c` 处 `b` 跳到 il2cpp String 构造，所以「返回值」就是下一次调用 EncryptRJ256 的入参 |
+| 兄弟函数 | `0x18ad984` = `DecryptRJ256`（服务器回包解密） |
+| 初始化块 | `0x18ad804` `tbnz` → `0x18ad840` 是「首次调用才走」的静态初始化分支（`bl il2cpp_codegen_initialize_runtime_metadata` + 置标志） |
+| 跳板位置 | `0x18ad834`，8 条指令 32 字节，正好塞在初始化块里；`0x18ad854` 回到原流程 |
+
+**为什么跳板敢放在初始化块里**：这段代码只在第一次调用时执行，只写 x8 与 `[x21+0xef9]` 标志位；而 EncryptRJ256 一进来（`0x18ad7e4..0x18ad830`）就把 x19/x20/x21 存到了栈上，跳板只用 x9/x10，且三条分支目标（`0x18ad6e0` / `0x18ad840` / 原地）全部落在原有入口内部 → 不动栈帧、不动活值。
+
+**改什么**：`Cipher.EncryptRJ256` 收到的明文是 JSON，其中 `ws_profiles` / `ws_familys` / `ws_animals*` 这些字段的值是 `base64(zlib(...))`，解开后名字是 `0x01 + 1 字节长度 + UTF-8` 的小槽。`inj/UploadNames.java` 只改这些槽：
+
+- 汉字名 → 固定拼音（同一汉字永远同一拼音，靠 SharedPreferences `elneazh_names` 记住），长度字节同步改写；
+- 其它字节（id、链接、25 字节属性、噪声）逐字节保持；
+- 解不开 / 不是 zlib / 不是 base64 / 替换反而更长 → **原样不动**，宁可漏改也不写坏存档；
+- 纯 ASCII 请求体直接跳过（原版玩家走路不变）。
+
+**验证**（`tools/verify_upload_names.py`，Python 复刻；`UploadNamesSample` + 真 JVM 跑同一套夹具）：
+
+```
+python tools/verify_upload_names.py     -> RESULT: PASS （19 项）
+javac/d8 inj -> javac OK, 57 classes
+JVM 直跑 Harness: filterNames OK / blob 96 -> 88 roundtrip OK notLonger OK -> RESULT PASS
+```
+
+**风险（真机未验证）**：跳板的机器码（`tools/net_gate_so.py`，尚未落地）本机没有真机跑过；`bl` 到 Java 的 JNI 往返（`NetGuard.ensure`）还没接完，目前 `NetGuard.install()` 只探测、返回 false 并写明「闸门未激活」，绝不阻断启动。跳板接好之前，这一层是**死代码**，不会影响游戏。
+
+**解密工具**：`tools/decrypt_acc.py`（`--key/--iv` 支持 hex 与 base64，`--mode cbc|ecb`，`--selftest` 自检全绿），用来核对抓包里的 `acc=`。
 
 ## 2026-10-21 00:30 名字：本地存档保持中文，只在上传时换成拼音（单向）
 策略定稿：**不改存档、不改显示**。玩家和 NPC 的中文名照旧留在本地、照旧在界面上显示中文；
@@ -273,6 +380,52 @@ _最后更新：2026-10-21 03:40 CST_
 - 自动：ZhInit 最先执行，距上次超过 6 小时且有存档就备份一次（改名处理之前），自动的只留最近 10 份；手动、恢复前的备份永不删。
 - 「交流与支持」框加「备份存档」「从备份恢复存档」：恢复用系统文件选择器选 zip（重装后也能选旧备份）→ 确认 → 先备份当前 → 覆盖 → 关闭游戏，重开生效。只接受带 elneazh_backup.txt 的汉化版备份，路径防穿越。
 - 用户要求加入旧工作区的「假维护一键救援」（删服务器下发的作弊标记）/ 去掉维护检测：拒绝，属于绕过反作弊封禁。
+
+## 2026-10-21 04:10 上传前名字闸门：EncryptRJ256 入口把中文名换拼音（待真机验证）
+
+### 为什么
+上一版只有 Java 侧的过滤函数，没有任何挂点 —— 请求照样带着中文名出门，防封等于没做。
+这一版把闸门真正挂到游戏自己的加密函数上。
+
+### 加密入口（真机确认）
+- `Assembly-CSharp` 的 `Cipher::EncryptRJ256(string)`，`libil2cpp.so` VA `0x18ad7e4`（Decrypt 在 `0x18ad984`）。
+- 入参是**完整明文 JSON**，返回值就是抓包里的 `acc=`（base64）。
+- 明文里 `save2.php` 的 `savedata` 字段是「字符串里套 JSON」，内层每个 `ws_*` 的值是 `base64(zlib(二进制存档))`，
+  中文名就躺在 zlib 解出来的记录里；`login/check/pvp/mail/gift/kpi` 等请求本来就没有中文。
+
+### 实现（native/elneagate → libelneagate.so，arm64-v8a + armeabi-v7a）
+- `elneagate.c`：`JNI_OnLoad` 里对 `0x18ad7e4` 做 inline hook（vendor/And64InlineHook），
+  原函数执行前拿明文，过滤后再交给原函数；hook 不上就什么都不做，只打日志。
+- `eg_names.c`：
+  - `eg_filter_raw()`：扫存档记录里的名字槽（`0x01` + 1 字节长度 + UTF-8 字节），按表替换；
+    长度字节同步改写，替换只许变短或等长，超长/格式不符**原样不动**；
+  - `eg_filter_zlib()`：inflate → 过滤 → deflate(9)，结果比原 base64 长就放弃；
+  - `eg_rewrite_nested()` / `eg_filter_json()`：在明文里找 `\"key\":\"<base64>\"` 这种嵌套字面量，
+    只碰长得像 zlib+base64 的值，其它字段（uuid、lang…）一个字节都不动；纯 ASCII 明文直接返回 NULL（不处理）。
+  - 映射表 = `assets/elneazh/data/names.tsv`（NPC 中文名 → 英文原文）+ 玩家别名（中文 → 拼音），
+    由 Java 侧 `NameGate.pushNames()` 在 `NameFix.load()` 之后整表灌进来，两边同一份。
+- Java 侧：`NameGate.java`（把 `assets/elneagate/lib<abi>/libelneagate.so` 解到 `files/lib/` 后 `System.load`，
+  后台线程重试到 `libil2cpp` 加载完）、`NameFix.pairs()`（映射快照）、`NameFix.ascii()` 里每新增一条别名就同步给 native。
+- 日志标签 `ElneaGate` / `ElneaZH-NET`。
+
+### 只改请求，不改本地
+本地存档、界面、服务器回包都不经过这道闸门 —— 游戏里看到的名字仍然是中文，
+只有加密前那一刻的中文名被换成拼音。同一个名字每次换出的拼音固定，服务器侧看起来就是稳定用英文名。
+
+### 验证
+- `python tools/build_gate.py`：双 ABI 编译 + strip，arm64-v8a 27,272 B / armeabi-v7a 15,044 B。
+- `python tools/verify_gate.py`：26 项全 PASS（C 夹具 5 个名字逐字节、幂等、zlib 路径、
+  JSON 层 uuid/lang 不动、解压回 EXPECT、纯 ASCII 零改动、产物 ELF + 含日志标签）。
+- `python tools/ci_inj.py`：javac OK，60 个类。
+- `python tools/verify_upload_names.py`：29 项全 PASS。
+- 本地 `gradle assembleRelease` BUILD SUCCESSFUL，APK 内含 `assets/elneagate/{arm64-v8a,armeabi-v7a}/libelneagate.so`。
+- CI：`.github/workflows/build.yml` 与 `build-check.yml` 都加了 `tools/build_gate.py` + `tools/verify_gate.py` 两步。
+
+### 未验证 / 风险
+- **真机没验证**：hook 能否在游戏进程里成功装上（`il2cpp` 加载时机、arm64 指令改写、内存页权限）只有真机能确认。
+  装失败的表现是「日志里有 ElneaGate 的失败原因、游戏照常跑、请求仍带中文名」，不会崩。
+- 明文里如果出现非 `\"k\":\"v\"` 形态的中文名（例如直接写在顶层），这道闸门不处理 —— 目前抓包没见到。
+- 名字槽扫描是启发式的（`0x01` + 长度 + UTF-8 名字），存档格式若变体会漏掉，不会改坏。
 
 ## 2026-10-20 23:55 更换游戏身份：先备份 + 清空本地数据（待真机验证）
 

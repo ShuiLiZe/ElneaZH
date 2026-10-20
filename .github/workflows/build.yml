@@ -86,6 +86,11 @@ jobs:
           PY
           ls -la app/src/main/assets
 
+      - name: Build native name gate (request-body CJK filter)
+        run: |
+          python tools/build_gate.py
+          python tools/verify_gate.py
+          ls -la app/src/main/assets/elneagate/*/
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -136,9 +141,6 @@ jobs:
             echo "## ${V}（${GITHUB_SHA::7}）"
             echo
             echo "**本次更新：** $(git log -1 --pretty=%s)"
-            echo
-            # 最新一段更新说明（docs/CHANGELOG.md 最后一个 "## " 小节）
-            awk '/^## /{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' docs/CHANGELOG.md
             echo
             echo "---"
             echo "下载 ElneaZH.apk 装到手机，打开后按步骤一键汉化。完全免费，禁止倒卖；汉化交流 QQ 群 790184852。"

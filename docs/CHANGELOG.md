@@ -2,6 +2,58 @@
 
 > 这是给"接手的人或下一次会话"的交付文件：项目现在做到哪、怎么继续。每次有进展都会更新。
 
+## 2026-10-21 05:55 单机模式补上 native 闸门：il2cpp 按名解析 + inline hook（另合并 fix/anti-flag）
+
+**背景**：`03:40` 那版单机模式只有 Java 侧 `NetBlocker`（`URLStreamHandlerFactory`），
+而游戏的 HTTP 走 `UnityWebRequest` + native curl，静态看不经过 `java.net`；UI 更是全在 il2cpp 里，
+Java 反射够不到 `MenuCell.EnableFlag` / `AbstractPanel.SetPanelEnabled`，dex 里也没有可用的 JNI 出口
+（`AndroidUuidPlugin`/`AndroidTools`/`GetUUID` 全 0 命中）。
+
+**合并**：把 `fix/anti-flag`（上传前中文名转拼音的名字闸门 `native/elneagate` + `NameGate.java` +
+`UploadNames.java` + `tools/{build,verify}_gate.py` + `tools/verify_upload_names.py` 等）并进
+`feat/offline-share`，9 个冲突文件全部两边保留：`ZhInit`（两个 install 都在）、`SelfCheck`
+（2b/2c 名字槽自检 + 3/4 单机段都在）、`Backup`（保留 `uriOf`）、`NameFix`（保留
+`NameGate.remember` 与 `pairs()`）、`NetGuard`（取 anti-flag 的新版）、`tools/pinyin_tables.py`
+（取 anti-flag 的回退版）、`HANDOFF.md`、`.github/workflows/build-check.yml`（两边步骤都留）。
+
+**新增 native 侧** `native/elneagate/eg_offline.c` + `eg_offline.h`：
+- `dlsym` 取 `il2cpp_domain_get` / `il2cpp_domain_get_assemblies` / `il2cpp_assembly_get_image` /
+  `il2cpp_class_from_name` / `il2cpp_class_get_method_from_name` / `il2cpp_image_get_name`；
+- 遍历所有 assembly 找 `ns::class`（命名空间 `*` = 不限），按 0..6 个参数试解析，
+  取 `MethodInfo` 首字段当函数地址；
+- `A64HookFunction` 挂 hook，`EG_MAX_HOOKS=64`，`EG_DECL_HOOK(N)` 宏生成 64 个转发函数；
+- 回调现读开关（`eg_of_set_state` 灌 `'1'/'0'`）：面板族 `return NULL`（入口不创建）、
+  请求族 `return NULL`（不发，走游戏自己的通信失败/离线分支）；关掉立刻回原函数；
+- **解析不到就跳过并打 `ElneaOffline` 日志**，绝不崩、绝不空指针调用；
+- 没挂上时 `eg_dispatch` 原样转 `orig`，行为与未安装一致。
+
+**新增 Java 侧** `inj/.../OfflineGate.java`：加载/解包 `.so`（自带一份，测试环境不依赖 `NameGate`）、
+重试安装（最多等 `waitMs`，不拖住启动）、`push(boolean)` 推开关、`stats()`/`describe()`/`probe()`/
+`resolvable()`、两张白名单表（面板 41 条 `Add*Panel`、请求 3 条 `HttpSystem.{httpConnect,connectWWW,AddHttpQueue}`）。
+
+**接线**：`ZhInit` 加 `OfflineGate.install(getContext(), 1)`（独立 try/catch）；
+`Support` 开关翻转先 `push` 再改界面、单机时多一行原生闸门现状；
+`SelfCheck` 加 `offline native: ...` / `offline native api: n/8` / 两族条目数。
+
+**测试**：
+- `tools/verify_offline.py` 88 → **130** 项：新增 E 段（`OfflineGate` 两族表、`ZhInit` 接线带 try/catch、
+  native 源码用 dlsym 不用硬编码偏移、日志 TAG `ElneaOffline`、**「不许伪造回包」断言**：
+  `eg_offline.c` 里不得出现 `il2cpp_object_new` / 造 JSON、`build_gate.py` 编进了 `eg_offline.c`、
+  CI 有 build/verify_gate 步骤）。
+- `tools/offline_test/.../OfflineTest.java` 132 → **149** 项：native 未加载时 `push`/`stats`/`probe`/
+  `resolvable`/`uninstall`/`install(null,..)` 全部「安静失败不抛异常」，以及两张白名单表的格式/去重/
+  覆盖面（23 个必须挡的面板名逐个点名）。为此补了 `android/os/Build`、`android/content/res/AssetFileDescriptor`
+  两个 stub，`AssetManager.openFd` 改成抛异常（正好验证「解包失败也不崩」），并加了 `NameGate` stub。
+- `tools/verify_gate.py`：新增 `.so` 里必须有 `ElneaOffline` 标签与 `OfflineGate_nativeInstall`/
+  `OfflineGate_nativePush` 符号（被 strip 掉就等于没装）。
+
+**本地验证**：`verify_offline` 130/130、`OfflineTest` 149/149、`verify_gate` PASS、
+`build_gate.py` 成功（arm64-v8a strip 后 52,000 B / armeabi-v7a 21,432 B）、
+CI 同款 `javac -Xlint:all --release 8` + `d8 --min-api 21` → **classes.dex 120,956 B**。
+
+**边界**：不伪造服务器回包、不改设备码、不删服务器标记、不绕反作弊；armv7 无 hook 引擎
+（`nativeInstall` 返回 -4，只剩 Java 层兜底）。
+
 ## 2026-10-21 05:20 单机模式：资源下载改为放行（用户纠正上一版）
 
 上一版（`baebd16`）把所有资源下载也拦掉了，理由是「拿不到不带身份的地址」。用户指出实际是

@@ -72,8 +72,52 @@ final class SelfCheck {
             r.append("offline asset downloads blocked: ").append(NetBlocker.assetHits()).append('\n');
             r.append("offline asset downloads allowed: ").append(NetBlocker.assetAllowed()).append('\n');
             r.append("offline download hint: ").append(Offline.downloadHint()).append('\n');
+            // 5) 原生单机闸门：il2cpp API 能拿到几个、面板/请求两族 hook 挂了几个。
+            //    本机若拿不到 il2cpp（示例进程里就是这样），probe 会是 0，属正常 —— 只有真机跑游戏时才有值。
+            r.append("offline native: ").append(OfflineGate.describe()).append('\n');
+            r.append("offline native api: ").append(OfflineGate.probe()).append("/8\n");
+            r.append("offline native panel entries: ")
+                    .append(OfflineGate.panelTable().split("\n").length).append('\n');
+            r.append("offline native http entries: ")
+                    .append(OfflineGate.httpTable().split("\n").length).append('\n');
             r.append("share: ").append(Share.describe()).append('\n');
             r.append("name table lines: ").append(Share.nameTableText(NameFix.aliasSnapshot()).split("\n").length).append('\n');
+            // 2b) 存档区块名字槽：0x01 + 长度 + UTF-8 —— 中文名换拼音，其它字节必须不动
+            byte[] raw = UploadNamesSample.hex(UploadNamesSample.RAW_HEX);
+            byte[] want = UploadNamesSample.hex(UploadNamesSample.EXPECT_HEX);
+            byte[] got = UploadNames.filterNames(raw, new UploadNames.Mapper() {
+                @Override public String ascii(String zh) {
+                    for (int i = 0; i < UploadNamesSample.ZH.length; i++) {
+                        if (UploadNamesSample.ZH[i].equals(zh)) return UploadNamesSample.ASCII[i];
+                    }
+                    return null;
+                }
+            });
+            r.append("names slots: ").append(UploadNames.countNames(raw))
+                    .append(" -> filtered crc ").append(UploadNamesSample.crc(got))
+                    .append(want.length == got.length && java.util.Arrays.equals(want, got) ? " OK" : " MISMATCH")
+                    .append('\n');
+            // 2c) 整段 ws_* 区块：base64(zlib) 往返 + 长度只许变短
+            byte[] packed = UploadNames.deflate(raw);
+            String b64 = UploadNames.Base64.encode(packed);
+            String b64b = UploadNames.filterOne(b64, new UploadNames.Mapper() {
+                @Override public String ascii(String zh) {
+                    for (int i = 0; i < UploadNamesSample.ZH.length; i++) {
+                        if (UploadNamesSample.ZH[i].equals(zh)) return UploadNamesSample.ASCII[i];
+                    }
+                    return null;
+                }
+            });
+            boolean round = false;
+            if (!b64b.equals(b64)) {
+                byte[] back = UploadNames.inflate(UploadNames.Base64.decode(b64b));
+                round = back != null && java.util.Arrays.equals(back, want) && b64b.length() <= b64.length();
+            }
+            r.append("blob round trip: ").append(b64.length()).append(" -> ").append(b64b.length())
+                    .append(round ? " OK" : " NOT-CHANGED-OR-BAD").append('\n');
+            // 3) 别名表规模（应随玩家取名增长，并随备份一起走）
+            r.append("aliases: ").append(NameFix.aliasSnapshot().size()).append('\n');
+            r.append("gate installed: ").append(NetGuard.installed()).append('\n');
         } catch (Throwable t) {
             StringWriter sw = new StringWriter();
             t.printStackTrace(new PrintWriter(sw));

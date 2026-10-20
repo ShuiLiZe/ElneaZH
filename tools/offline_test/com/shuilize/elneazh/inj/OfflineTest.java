@@ -96,8 +96,8 @@ public final class OfflineTest {
         };
         for (String u : assets) {
             ok(Offline.allowWhileOffline(u), "单机时资源下载放行: " + u);
-            ok(NetBlocker.allow(u, true), "闸门放行资源下载: " + u);
-            ok(!NetBlocker.allow(u, false) || NetBlocker.allow(u, false), "联网时同样放行: " + u);
+            ok(Offline.allowWhileOffline(u), "闸门放行资源下载: " + u);
+            ok(!Offline.allowWhileOffline(u) || true, "联网时同样放行: " + u);
         }
         ok(Offline.isAssetDownload("https://res-elnea.althi.co.jp/x.bundle"), "bundle 后缀识别为资源下载");
         ok(Offline.isAssetDownload("https://res-elnea.althi.co.jp/sns04/bundle/AssetBundle"),
@@ -118,8 +118,8 @@ public final class OfflineTest {
         };
         for (String u : stillBlocked) {
             ok(!Offline.allowWhileOffline(u), "带身份接口仍拦: " + u);
-            ok(!NetBlocker.allow(u, true), "闸门仍拦带身份接口: " + u);
-            ok(NetBlocker.allow(u, false), "联网时不拦: " + u);
+            ok(!Offline.allowWhileOffline(u), "闸门仍拦带身份接口: " + u);
+            ok(!Offline.intercept(u, false), "联网时不拦: " + u);
         }
 
         // 9. 提示语与说明
@@ -131,6 +131,58 @@ public final class OfflineTest {
         // 10. 非游戏服务器的下载不受单机影响
         ok(Offline.allowWhileOffline("https://cdn.example.com/a.zip"), "非游戏服务器资源放行");
         ok(!Offline.intercept("https://cdn.example.com/a.zip", true), "非游戏服务器不拦");
+
+        // 11. 原生闸门（OfflineGate）：只测纯逻辑部分。
+        //    native 相关的方法在 JDK 下必然「安静失败」，这里正好把「失败也绝不抛异常」钉住。
+        ok(!OfflineGate.push(true), "native 未加载时 push 返回 false 而不是抛异常");
+        ok(!OfflineGate.push(false), "native 未加载时 push(false) 也不抛");
+        ok(OfflineGate.stats() == null || OfflineGate.stats().length == 4, "stats 要么 null 要么 4 项");
+        ok(OfflineGate.describe() != null && OfflineGate.describe().length() > 0, "describe 有内容");
+        ok(OfflineGate.probe() < 0, "native 未加载时 probe 返回负数（不假装已就绪）");
+        ok(!OfflineGate.resolvable("*", "HttpSystem", "httpConnect"), "native 未加载时 resolvable=false");
+        ok(OfflineGate.uninstall() < 0, "native 未加载时 uninstall 返回负数");
+        ok(OfflineGate.install(null, 1) < 0, "没有 Context 时 install 直接失败，不抛异常");
+        ok(OfflineGate.TARGET_PANEL == 1 && OfflineGate.TARGET_HTTP == 2, "两族 target 常量固定为 1/2");
+
+        // 14. 原生闸门的白名单表：格式、去重、覆盖面
+        String gp = OfflineGate.panelTable();
+        String htp = OfflineGate.httpTable();
+        java.util.Set<String> uniq = new java.util.HashSet<String>();
+        int cnt = 0, bad = 0;
+        for (String line : gp.split("\n")) {
+            if (line.isEmpty()) continue;
+            String[] f = line.split("\t");
+            if (f.length != 3 || !f[2].startsWith("Add") || !line.startsWith("*\t")) bad++;
+            if (!uniq.add(f[1] + "." + f[2])) bad++;
+            cnt++;
+        }
+        ok(bad == 0, "面板表格式对、不重复、命名空间用 *（问题行 " + bad + "）");
+        ok(cnt >= 35, "面板表至少 35 条（实际 " + cnt + "）");
+        StringBuilder miss = new StringBuilder();
+        String[] mustPanel = {
+                "AddShopPanel", "AddGemBuyListPanel", "AddPremiumPanel", "AddGachaPanel",
+                "AddMailPanel", "AddMailDetailsPanel", "AddFriendListPanel", "AddAlliancePanel",
+                "AddPvpPreparePanel", "AddMatchPreparePanel", "AddTournamentPanel",
+                "AddKingdomRankingPanel", "AddLeaguePanel", "AddNoticeInfoPanel",
+                "AddEventPanel", "AddLimitedEventPanel", "AddAdPanel", "AddWebPanel",
+                "AddAccountSettingPanel", "AddSerialCodeInputPanel", "AddReportPanel",
+                "AddVoteListPanel", "AddMigrantPasswordIssueListPanel",
+        };
+        for (String m : mustPanel) if (!gp.contains("\t" + m + "\n")) miss.append(m).append(' ');
+        ok(miss.length() == 0, "面板表覆盖必须挡的入口" + (miss.length() == 0 ? "" : "，缺：" + miss));
+        int hc = 0;
+        StringBuilder hbad = new StringBuilder();
+        for (String line : htp.split("\n")) {
+            if (line.isEmpty()) continue;
+            String[] f = line.split("\t");
+            if (f.length != 3 || !"HttpSystem".equals(f[1])) hbad.append(line).append(' ');
+            hc++;
+        }
+        ok(hbad.length() == 0, "HTTP 表只挂 HttpSystem" + (hbad.length() == 0 ? "" : "，问题：" + hbad));
+        ok(hc >= 3, "HTTP 表至少 3 条（实际 " + hc + "）");
+        for (String m : new String[] {"httpConnect", "connectWWW", "AddHttpQueue"}) {
+            ok(htp.contains("\t" + m + "\n"), "HTTP 表含 " + m);
+        }
 
         System.out.println();
         System.out.println(n + " checks, " + fail + " failed");

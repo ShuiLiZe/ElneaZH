@@ -49,6 +49,18 @@ def write(path, rows):
     return len(rows)
 
 
+def read_rows(path):
+    rows = []
+    with open(path, encoding='utf-8') as f:
+        for line in f:
+            if line.startswith('#') or not line.strip():
+                continue
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) >= 2 and parts[1]:
+                rows.append((parts[0], parts[1]))
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', default=None, help='只写这个路径（不写默认两处）')
@@ -56,8 +68,15 @@ def main():
     try:
         rows = build()
     except ImportError:
-        print('need pypinyin: python -m pip install pypinyin', file=sys.stderr)
-        return 1
+        # CI/离线环境没有 pypinyin：直接用已提交的 translations/pinyin.tsv，
+        # 保证构建可复现、不依赖网络装包。
+        if os.path.isfile(REPO_TSV):
+            rows = read_rows(REPO_TSV)
+            print('pypinyin 不可用，改用已提交的 %s（%d 字）' % (REPO_TSV, len(rows)),
+                  file=sys.stderr)
+        else:
+            print('need pypinyin: python -m pip install pypinyin', file=sys.stderr)
+            return 1
     if a.out:
         print(write(a.out, rows), '->', a.out)
         return 0

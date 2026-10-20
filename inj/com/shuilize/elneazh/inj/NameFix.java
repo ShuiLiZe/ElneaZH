@@ -123,7 +123,23 @@ final class NameFix {
         if (py == null || py.isEmpty()) return null;
         if (Pinyin.hasNonAscii(py)) return null;
         remember(ctx, py, zh);
+        if (ctx != null) NameGate.remember(ctx, zh, py);   // 同步给 native 闸门，保持两边同一份表
         return py;
+    }
+
+    /**
+     * 整张「中文 -> ASCII」映射快照（给 native 闸门用）：玩家别名优先，其次是 names.tsv 的英文原文。
+     * 返回的是「中文名 -> 上传时使用的 ASCII」，不含任何未映射的项。
+     */
+    static synchronized java.util.List<java.util.Map.Entry<String, String>> pairs() {
+        java.util.Map<String, String> all = new java.util.LinkedHashMap<>();
+        for (java.util.Map.Entry<String, String> e : ZH2EN.entrySet()) {
+            if (e.getKey() != null && e.getValue() != null) all.put(e.getKey(), e.getValue());
+        }
+        for (java.util.Map.Entry<String, String> e : ALIAS_ZH2ASCII.entrySet()) {
+            if (e.getKey() != null && e.getValue() != null) all.put(e.getKey(), e.getValue());
+        }
+        return new java.util.ArrayList<>(all.entrySet());
     }
 
     // ---------------- 上传前的清洗 ----------------

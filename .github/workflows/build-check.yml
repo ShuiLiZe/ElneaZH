@@ -30,7 +30,8 @@ jobs:
             $(find tools/offline_test -name '*.java') \
             inj/com/shuilize/elneazh/inj/Offline.java \
             inj/com/shuilize/elneazh/inj/Pinyin.java \
-            inj/com/shuilize/elneazh/inj/NameFix.java
+            inj/com/shuilize/elneazh/inj/NameFix.java \
+            inj/com/shuilize/elneazh/inj/OfflineGate.java
           java -cp build/offtest com.shuilize.elneazh.inj.OfflineTest
       - name: Verify base data.unity3d
         run: |
@@ -44,6 +45,7 @@ jobs:
       - name: Verify textures, name tables stay ASCII, previews
         run: |
           python tools/ci_verify.py base/data.unity3d build/data.unity3d images_zh build/preview
+          python tools/ci_names.py build/data.unity3d --orig base/data.unity3d
       - name: Patch IL2CPP metadata (hardcoded strings; name whitelist stays as shipped)
         run: |
           cat base/apk/ElneaKingdom_2.10.7.apk.part* > build/base.apk
@@ -54,6 +56,8 @@ jobs:
         run: |
           Z=app/src/main/assets/elneazh; mkdir -p $Z/Contents $Z/map
           mkdir -p $Z/data && python tools/names_map.py $Z/data/names.tsv
+          python tools/pinyin_tables.py
+          python tools/verify_names.py
           cp content_zh/Contents/c_* $Z/Contents/
           cp content_zh/map_large_en/__data content_zh/map_large_en/__info $Z/map/
           mkdir -p $Z/bundles && cp content_zh/bundles/*~*.data content_zh/bundles/*~*.info $Z/bundles/
@@ -63,6 +67,11 @@ jobs:
           unzip -p build/base.apk AndroidManifest.xml > build/manifest_orig.axml
           sha256sum build/manifest_orig.axml | cut -d' ' -f1 > $Z/manifest_base.sha256
           python tools/manifest_zh.py build/manifest_orig.axml $Z/AndroidManifest.xml
+      - name: Build native name gate (libelneagate.so, arm64-v8a + armeabi-v7a)
+        run: |
+          python tools/build_gate.py
+          python tools/verify_gate.py
+          ls -la app/src/main/assets/elneagate/*/
       - name: Compile injected Java (classes3.dex sources)
         run: |
           BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
@@ -72,6 +81,10 @@ jobs:
           javac -Xlint:all --release 8 -cp $PLAT/android.jar -d build/inj $(find inj -name '*.java')
           $BT/d8 --min-api 21 --lib $PLAT/android.jar --output build/inj $(find build/inj -name '*.class')
           ls -la build/inj/classes.dex
+      - name: Verify injected logic offline (wipe rules + upload name filter)
+        run: |
+          python tools/verify_identity.py
+          python tools/verify_upload_names.py
       - name: Build APK (no release)
         working-directory: app
         run: |
