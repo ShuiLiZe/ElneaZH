@@ -78,10 +78,14 @@ final class Backup {
             Set<String> tables = tableNames(ctx);
             File data = ctx.getFilesDir().getParentFile();
             try (ZipOutputStream z = new ZipOutputStream(out)) {
-                int n = add(z, new File(data, "files"), "files/", tables, 0);
-                n += add(z, new File(data, "shared_prefs"), "shared_prefs/", tables, 0);
+                StringBuilder lst = new StringBuilder();
+                int n = add(z, new File(data, "files"), "files/", tables, 0, lst);
+                n += add(z, new File(data, "shared_prefs"), "shared_prefs/", tables, 0, lst);
+                File ext = ctx.getExternalFilesDir(null);
+                if (ext != null) n += add(z, ext, "ext/", tables, 0, lst);
                 z.putNextEntry(new ZipEntry("elneazh_backup.txt"));
-                z.write(("ElneaZH save backup\nfiles=" + n + "\ntime=" + new Date() + "\n").getBytes("UTF-8"));
+                z.write(("ElneaZH save backup\nfiles=" + n + "\ntime=" + new Date() + "\ndata=" + data + "\next=" + ext
+                        + "\n\n" + lst).getBytes("UTF-8"));
                 z.closeEntry();
             }
             out = null;
@@ -95,20 +99,21 @@ final class Backup {
         }
     }
 
-    private static int add(ZipOutputStream z, File f, String path, Set<String> tables, int depth) throws Exception {
+    private static int add(ZipOutputStream z, File f, String path, Set<String> tables, int depth, StringBuilder lst) throws Exception {
         if (!f.exists() || depth > 8) return 0;
         if (f.isDirectory()) {
             if (depth == 1 && SKIP_DIRS.contains(f.getName())) return 0;
             File[] ls = f.listFiles();
             if (ls == null) return 0;
             int n = 0;
-            for (File c : ls) n += add(z, c, path + (c.isDirectory() ? c.getName() + "/" : c.getName()), tables, depth + 1);
+            for (File c : ls) n += add(z, c, path + (c.isDirectory() ? c.getName() + "/" : c.getName()), tables, depth + 1, lst);
             return n;
         }
         String nm = f.getName();
         if (nm.endsWith(".tmp") || f.length() > MAX_FILE) return 0;
-        if (tables.contains(nm) && (path.startsWith("files/zh/") || path.startsWith("files/Contents/"))) return 0;
+        if (tables.contains(nm) && (path.endsWith("/zh/" + nm) || path.endsWith("/Contents/" + nm))) return 0;
         if (path.startsWith("shared_prefs/elneazh_backup")) return 0;
+        lst.append(path).append('\t').append(f.length()).append('\n');
         z.putNextEntry(new ZipEntry(path));
         try (InputStream in = new FileInputStream(f)) { pipe(in, z); }
         z.closeEntry();
@@ -125,9 +130,12 @@ final class Backup {
     }
 
     private static boolean hasSave(Context ctx) {
-        for (String d : new String[]{"zh", "Contents"}) {
-            File[] ls = new File(ctx.getFilesDir(), d).listFiles();
-            if (ls != null) for (File f : ls) if (f.getName().startsWith("sv1_")) return true;
+        for (File root : new File[]{ctx.getFilesDir(), ctx.getExternalFilesDir(null)}) {
+            if (root == null) continue;
+            for (String d : new String[]{"zh", "Contents"}) {
+                File[] ls = new File(root, d).listFiles();
+                if (ls != null) for (File f : ls) if (f.getName().startsWith("sv1_")) return true;
+            }
         }
         return false;
     }
@@ -315,16 +323,35 @@ final class Backup {
         try {
             new AlertDialog.Builder(a)
                     .setTitle(label(it))
-                    .setItems(new String[]{"恢复这个备份", "删除这个备份"}, new DialogInterface.OnClickListener() {
+                    .setItems(new String[]{"恢复这个备份", "删除这个备份", "查看备份了哪些文件"}, new DialogInterface.OnClickListener() {
                         @Override public void onClick(DialogInterface d, int w) {
                             if (w == 0) confirmRestore(a, it.uri);
-                            else confirmDelete(a, it);
+                            else if (w == 1) confirmDelete(a, it);
+                            else showInfo(a, it);
                         }
                     })
                     .setNegativeButton("返回", new DialogInterface.OnClickListener() {
                         @Override public void onClick(DialogInterface d, int w) { manage(a); }
                     }).show();
         } catch (Throwable t) { Log.w(TAG, "itemMenu", t); }
+    }
+
+    private static void showInfo(final Activity a, final Item it) {
+        String txt;
+        try (ZipInputStream z = new ZipInputStream(a.getContentResolver().openInputStream(it.uri))) {
+            StringBuilder sb = new StringBuilder(); ZipEntry e; int n = 0;
+            while ((e = z.getNextEntry()) != null) {
+                if (e.getName().equals("elneazh_backup.txt")) continue;
+                n++; sb.append(e.getName()).append('\n');
+            }
+            txt = "共 " + n + " 个文件：\n" + sb;
+        } catch (Throwable t) { txt = "读不了：" + t; }
+        try {
+            new AlertDialog.Builder(a).setTitle(label(it)).setMessage(txt)
+                    .setPositiveButton("返回", new DialogInterface.OnClickListener() {
+                        @Override public void onClick(DialogInterface d, int w) { manage(a); }
+                    }).show();
+        } catch (Throwable t) { Log.w(TAG, "info", t); }
     }
 
     private static void confirmDelete(final Activity a, final Item it) {
@@ -408,9 +435,16 @@ final class Backup {
                     ZipEntry e;
                     while ((e = z.getNextEntry()) != null) {
                         String p = e.getName();
-                        if (e.isDirectory() || !(p.startsWith("files/") || p.startsWith("shared_prefs/"))) continue;
-                        File t = new File(data, p);
-                        if (!t.getCanonicalPath().startsWith(base)) continue;
+                        if (e.isDirectory()) continue;
+                        File t;
+                        if (p.startsWith("files/") || p.startsWith("shared_prefs/")) {
+                            t = new File(data, p);
+                            if (!t.getCanonicalPath().startsWith(base)) continue;
+                        } else if (p.startsWith("ext/") && a.getExternalFilesDir(null) != null) {
+                            File ex = a.getExternalFilesDir(null);
+                            t = new File(ex, p.substring(4));
+                            if (!t.getCanonicalPath().startsWith(ex.getCanonicalPath() + File.separator)) continue;
+                        } else continue;
                         File dir = t.getParentFile();
                         if (dir != null && !dir.isDirectory()) dir.mkdirs();
                         File tmp = new File(t.getPath() + ".rtmp");
