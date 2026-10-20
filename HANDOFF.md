@@ -12,7 +12,9 @@ _最后更新：2026-10-20 12:45 CST_
 
 ## 2026-10-20 19:30 真机卡维护 / 强制输入账号（OurPlay 正常）
 - 根因：UuidPlugin.GetUUID 在 PlayerPrefs 没缓存时采用 AndroidUuidPlugin 按设备算出的 ID（清数据、卸载重装都不变），服务器对该身份下发了维护锁（规则模式→维护页；全局模式→登录失败 10 次弹账号框）。OurPlay 沙盒设备 ID 不同所以正常。
-- 修复：tools/so_patch_zh.py 新增 VA 0x1c8f490 `tbz` → nop，不再采用设备 ID，首次随机 makeUUID 后缓存。装新版后需清一次游戏数据（或全新安装）才会换身份。待真机验证。
+- 修复：tools/so_patch_zh.py 新增 VA 0x1c8f490 `tbz` → nop，不再采用设备 ID，首次随机 makeUUID 后缓存。装新版后需清一次游戏数据（或全新安装）才会换身份。v1.0.81 仍卡维护：新身份 = String.Format(设备串 VA 0x18a2db4, 随机串).Substring(0,41)，设备串在前，截断后仍绑设备。
+- v1.0.82（1ba8d74）再加 VA 0x1c8f4a8 `bl 0x18a2db4` → `mov x0,xzr`，只用随机串。2026-10-20 20:00 用户真机确认可进游戏（重新汉化 + 清一次数据）。
+- 不做"免清数据"：改 PlayerPrefs 键会让没被锁的人丢档；收到维护自动换身份则官方真维护时会误伤。卡维护的人清一次即可。
 
 ## 已知问题（详情和截图在 Issues）
 - **大块英文（物品/料理/服装名、教程、地图图片）来自服务器下发的主数据和运行时下载的 bundle，不在 APK 里**。分析与方案见 docs/CHANGELOG.md 2026-10-18 21:10（推荐：Cloudflare Worker 中转代理替换译文）。**更新：用户旧方法可本地完成（改 files/Contents/c_* 表 + map bundle + libil2cpp.so 两处补丁），见 CHANGELOG 2026-10-18 21:20，优先走这条。** 用户 v6 数据已入库（content_zh/，解密工具 tools/contents_codec.py），但文本用了借字码位，需旧 APK 还原映射，见 CHANGELOG 2026-10-18 21:40。
