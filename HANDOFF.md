@@ -158,3 +158,20 @@ _最后更新：2026-10-20 12:45 CST_
 - 自动：ZhInit 最先执行，距上次超过 6 小时且有存档就备份一次（改名处理之前），自动的只留最近 10 份；手动、恢复前的备份永不删。
 - 「交流与支持」框加「备份存档」「从备份恢复存档」：恢复用系统文件选择器选 zip（重装后也能选旧备份）→ 确认 → 先备份当前 → 覆盖 → 关闭游戏，重开生效。只接受带 elneazh_backup.txt 的汉化版备份，路径防穿越。
 - 用户要求加入旧工作区的「假维护一键救援」（删服务器下发的作弊标记）/ 去掉维护检测：拒绝，属于绕过反作弊封禁。
+
+## 2026-10-20 23:55 更换游戏身份：先备份 + 清空本地数据（待真机验证）
+
+- 抓包结论：旧存档 + 新 uuid → login.php 回 `already login!` → 弹账号框。**只抹 uuid 没用**，服务器是拿存档里的账号信息认人的，必须整套本地数据重来。
+- inj/Identity.java（重写 `reset`）：
+  1. 后台线程跑 `Backup.backupForIdentity(a)`：`make(a,"换身份前")` 返回非 null，且再校验这份 zip 里真有 `name="uuid"` 或 `name="login_key"`，两者都成立才返回 uri；否则**中止，一个字节都不动**，只弹「备份失败，未更换」。
+  2. `Backup.wipeForIdentity(a, uri)`：按备份里 `elneazh_backup.txt` 的文件清单删 —— `files/`、`shared_prefs/`、`ext/` 下登记过的文件，外加 `shared_prefs/<pkg>.v2.playerprefs.xml`（uuid/login_key）、`databases/` 里的 login/token/user 类文件、`sv1_*` 与 `*.ntmp/*.rtmp`。**保留**：汉化主表 22 张（`zh/Contents` 里我们投放的 c_* 表）、我们自己的 `shared_prefs/elneazh_*`（含 `elneazh_names`）、`UnityCache`/`il2cpp` 缓存。
+  3. 2 秒后 `finishAffinity` + `killProcess`，重开即新人物新身份。
+- 备份侧（inj/Backup.java）：
+  - 新增 `prefsName(ctx)` = `<pkg>.v2.playerprefs`（文件名依据：`libunity.so` 字面量 `.v2.playerprefs`，Unity 的 SharedPreferences 名就是 `<pkg>.v2.playerprefs`，落盘为 `shared_prefs/<pkg>.v2.playerprefs.xml`）。
+  - `addPrefsFile()`：即使真实 prefs 文件不在 `/data/data/<pkg>/shared_prefs`（可能在 `/data/user_de/<n>/` 或 `/data/user/<n>/`），也用 `findPrefsFile()` 找到原文件整份写进 zip；再找不到就按 SharedPreferences 的 xml 结构从 `getAll()` 手写一份。zip 里重复条目合法，读取方按后者为准。
+  - `addIdentFiles()`：`databases/`、`no_backup/`、`files/` 根下名含 login/token/user/account/uuid/session 的文件一并备份。
+  - `elneazh_backup.txt` 增加 `identity=uuid=xxxx…xxxx login_key=true keys=N`（uuid 打码），列表里显示在大小后面，方便一眼分清哪份是哪个身份。
+  - `restore()` 结束后调用 `restoreIdentityFile()` 把备份里的 `uuid`/`login_key` 等键 `commit()` 回 SharedPreferences（**旧身份解封后恢复即回去**）；同时把「当前存在、但备份没登记」的 `sv1_*` 清掉，避免新旧两份存档混在一起。
+- `tools/verify_identity.py`：复刻 wipe 的保留/删除判定，实测 22 张汉化表 keep、`sv1_*`/playerprefs/login 库 delete、`elneazh_*` keep → `wipe rules OK`。
+- 编译：`python tools/ci_inj.py`（等价 CI 的 `javac --release 8 -cp android.jar`）→ `javac OK, 58 classes`。
+- 未验证：真机。风险点：某些机型 `shared_prefs` 目录被 SELinux 保护读不到时只能走「从内存手写 xml」分支（格式与 SharedPreferences 一致，恢复时由 `restoreIdentityFile` 重新 commit，理论可行）；`databases/` 里的登录库若被游戏打开着，删除后需重开进程生效（本流程本来就会 kill）。

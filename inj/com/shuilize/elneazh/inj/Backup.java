@@ -40,8 +40,10 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -64,8 +66,19 @@ final class Backup {
     private static final long MAX_FILE = 40L * 1024 * 1024;
     private static final Set<String> SKIP_DIRS = new HashSet<>();
     static {
-        for (String s : new String[]{"UnityCache", "il2cpp", "zh_backup", "elneazh"}) SKIP_DIRS.add(s);
+        for (String s : new String[]{"UnityCache", "il2cpp", "zh_backup", "elneazh", "code_cache", "cache", "no_backup"}) SKIP_DIRS.add(s);
     }
+    /**
+     * 除 files/ shared_prefs/ ext/ 之外，实际存在身份文件的那几处也补进来（换身份靠这份备份回旧号）：
+     * shared_prefs 在各版本上位置不同（/data/data/&lt;pkg&gt;/shared_prefs、/data/user_de/&lt;n&gt;/&lt;pkg&gt;/shared_prefs、
+     * /data/user/&lt;n&gt;/&lt;pkg&gt;/shared_prefs），getSharedPreferences 返回的就是运行时真正那份，
+     * 所以按 SharedPreferences 实例把它的 xml 原样再登记一次；"databases" 里若有 login 相关文件也一并带上。
+     * zip 里重复条目是合法的（后读的覆盖先读的），读取方按同名后者为准。
+     */
+    private static final String PREF_NAME = ".v2.playerprefs";
+
+    /** uuid / login_key 实际存放（以及备份里恢复）的 prefs 文件名。 */
+    static String prefsName(Context ctx) { return ctx.getPackageName() + PREF_NAME; }
 
     /** Called from ZhInit before anything touches the save. */
     static void auto(Context ctx) {
@@ -98,9 +111,12 @@ final class Backup {
                 n += add(z, new File(data, "shared_prefs"), "shared_prefs/", tables, 0, lst);
                 File ext = ctx.getExternalFilesDir(null);
                 if (ext != null) n += add(z, ext, "ext/", tables, 0, lst);
+                // 身份文件兜底：真实 prefs 文件不在上面几个目录里时也要进备份
+                n += addPrefsFile(ctx, z, lst);
+                n += addIdentFiles(ctx, z, lst);
                 z.putNextEntry(new ZipEntry("elneazh_backup.txt"));
                 z.write(("ElneaZH save backup\nfiles=" + n + "\ntime=" + new Date() + "\ndata=" + data + "\next=" + ext
-                        + "\n\n" + lst).getBytes("UTF-8"));
+                        + "\nidentity=" + identSummary(ctx) + "\n\n" + lst).getBytes("UTF-8"));
                 z.closeEntry();
                 z.finish();
             }
@@ -141,8 +157,120 @@ final class Backup {
         return 1;
     }
 
-    private static Set<String> tableNames(Context ctx) {
-        Set<String> s = new HashSet<>();
+    /**
+     * 把 SharedPreferences 实例对应的 xml 文件原样写进 zip（shared_prefs/&lt;pkg&gt;.v2.playerprefs.xml）。
+     * 用 getSharedPreferences().getAll() 确认文件里真的有 uuid/login_key；文件路径从
+     * ContextImpl 之外的两条已知路径找：files/../shared_prefs 与 /data/user_de/&lt;n&gt;/&lt;pkg&gt;/shared_prefs。
+     * 找不到文件时退回手工写一个和 SharedPreferences 同格式的 xml（同样能被 restore 恢复）。
+     */
+    private static int addPrefsFile(Context ctx, ZipOutputStream z, StringBuilder lst) {
+        try {
+            String pn = prefsName(ctx);
+            SharedPreferences sp = ctx.getSharedPreferences(pn, Context.MODE_PRIVATE);
+            Map<String, ?> all = sp.getAll();
+            String entry = "shared_prefs/" + pn + ".xml";
+            File f = findPrefsFile(ctx, pn + ".xml");
+            if (f != null && f.isFile()) {
+                // 已在 add(shared_prefs/) 里就跳过（避免重复）；否则补一份
+                if (lst.indexOf(entry + "\t") >= 0) { Log.i(TAG, "prefs already in backup: " + entry); return 0; }
+                z.putNextEntry(new ZipEntry(entry));
+                try (InputStream in = new FileInputStream(f)) { pipe(in, z); }
+                z.closeEntry();
+                lst.append(entry).append('\t').append(f.length()).append('\n');
+                Log.i(TAG, "prefs added from " + f + " keys=" + all.keySet());
+                return 1;
+            }
+            // 文件不在常规位置：按 SharedPreferences 的 xml 结构手写一份
+            StringBuilder x = new StringBuilder("<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n");
+            for (Map.Entry<String, ?> e : all.entrySet()) {
+                Object v = e.getValue();
+                if (v == null) continue;
+                String t = v instanceof Boolean ? "boolean" : v instanceof Integer ? "int"
+                        : v instanceof Long ? "long" : v instanceof Float ? "float" : "string";
+                x.append("    <").append(t).append(" name=\"").append(esc(e.getKey())).append("\">")
+                        .append(esc(String.valueOf(v))).append("</").append(t).append(">\n");
+            }
+            x.append("</map>\n");
+            byte[] b = x.toString().getBytes("UTF-8");
+            z.putNextEntry(new ZipEntry(entry));
+            z.write(b);
+            z.closeEntry();
+            lst.append(entry).append('\t').append(b.length).append('\n');
+            Log.i(TAG, "prefs written from memory: " + entry + " keys=" + all.keySet());
+            return 1;
+        } catch (Throwable t) {
+            Log.w(TAG, "prefs backup", t);
+            return 0;
+        }
+    }
+
+    /** <pkg>.v2.playerprefs.xml 的实际文件（找不到返回 null）。 */
+    static File findPrefsFile(Context ctx, String xmlName) {
+        File data = ctx.getFilesDir().getParentFile();       // /data/data/<pkg>
+        List<File> cand = new ArrayList<>();
+        if (data != null) cand.add(new File(new File(data, "shared_prefs"), xmlName));
+        try {
+            int uid = ctx.getApplicationInfo().uid;
+            String u = "user" + (uid / 100000);
+            cand.add(new File("/data/" + u + "/" + ctx.getPackageName() + "/shared_prefs/" + xmlName));
+            cand.add(new File("/data/user_de/" + (uid % 100000) + "/" + ctx.getPackageName() + "/shared_prefs/" + xmlName));
+        } catch (Throwable ignored) {}
+        for (File f : cand) { try { if (f.isFile() && f.canRead()) return f; } catch (Throwable ignored) {} }
+        return null;
+    }
+
+    /** 除 prefs 外的登录相关文件（某些版本把 token 放 databases/ 或 files/ 根下）。 */
+    private static int addIdentFiles(Context ctx, ZipOutputStream z, StringBuilder lst) {
+        int n = 0;
+        try {
+            File data = ctx.getFilesDir().getParentFile();
+            if (data == null) return 0;
+            String[] names = {"login", "login_key", "token", "user", "account", "uuid", "session"};
+            for (String dir : new String[]{"databases", "no_backup", "files"}) {
+                File d = new File(data, dir);
+                File[] ls = d.listFiles();
+                if (ls == null) continue;
+                for (File f : ls) {
+                    if (!f.isFile() || f.length() > MAX_FILE) continue;
+                    String ln = f.getName().toLowerCase(Locale.US);
+                    boolean hit = false;
+                    for (String k : names) if (ln.contains(k)) { hit = true; break; }
+                    if (!hit) continue;
+                    String entry = dir + "/" + f.getName();
+                    if (lst.indexOf(entry + "\t") >= 0) continue;
+                    z.putNextEntry(new ZipEntry(entry));
+                    try (InputStream in = new FileInputStream(f)) { pipe(in, z); }
+                    z.closeEntry();
+                    lst.append(entry).append('\t').append(f.length()).append('\n');
+                    n++;
+                }
+            }
+        } catch (Throwable t) { Log.w(TAG, "ident files", t); }
+        return n;
+    }
+
+    /** 这个备份 / 当前安装用的身份（写进 zip 说明与日志，恢复时对得上）。 */
+    static String identSummary(Context ctx) {
+        try {
+            SharedPreferences sp = ctx.getSharedPreferences(prefsName(ctx), Context.MODE_PRIVATE);
+            Map<String, ?> all = sp.getAll();
+            Object id = all.get("uuid");
+            boolean lk = all.containsKey("login_key");
+            if (id == null) return "uuid=- login_key=" + lk + " keys=" + all.size();
+            return "uuid=" + mask(String.valueOf(id)) + " login_key=" + lk + " keys=" + all.size();
+        } catch (Throwable t) { return "unknown"; }
+    }
+
+    private static String mask(String s) {
+        if (s == null) return "-";
+        return s.length() <= 8 ? s : s.substring(0, 4) + "…" + s.substring(s.length() - 4);
+    }
+
+    private static String esc(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
+    }
+
+    private static Set<String> tableNames(Context ctx) {        Set<String> s = new HashSet<>();
         try {
             String[] t = ctx.getAssets().list("elneazh/Contents");
             if (t != null) for (String n : t) if (!n.startsWith("sv1_")) s.add(n);
@@ -282,9 +410,164 @@ final class Backup {
         } catch (Throwable t) { Log.w(TAG, "prune", t); }
     }
 
+    // ---------------- 换身份用：按备份登记的文件清单清空本地数据 ----------------
+
+    /** 这个 zip 里登记过的所有条目（elneazh_backup.txt 的清单行）。读不到返回空表。 */
+    private static Set<String> indexOf(Context ctx, Uri u) {
+        Set<String> s = new LinkedHashSet<>();
+        try (ZipInputStream z = new ZipInputStream(ctx.getContentResolver().openInputStream(u))) {
+            ZipEntry e;
+            while ((e = z.getNextEntry()) != null) {
+                if (!"elneazh_backup.txt".equals(e.getName())) continue;
+                java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                byte[] b = new byte[8192]; int n;
+                while ((n = z.read(b)) > 0) bo.write(b, 0, n);
+                for (String line : bo.toString("UTF-8").split("\n")) {
+                    int t = line.indexOf('\t');
+                    if (t > 0) s.add(line.substring(0, t));
+                }
+                break;
+            }
+        } catch (Throwable t) { Log.w(TAG, "index", t); }
+        return s;
+    }
+
+    /** 备份登记过、但现在不在了的文件（换身份前自检用）。 */
+    static int missingFrom(Context ctx, Uri u) {
+        int miss = 0;
+        File data = ctx.getFilesDir().getParentFile();
+        File ext = ctx.getExternalFilesDir(null);
+        for (String p : indexOf(ctx, u)) {
+            File f = null;
+            if (p.startsWith("files/")) f = new File(data, p);
+            else if (p.startsWith("shared_prefs/")) f = new File(data, p);
+            else if (p.startsWith("ext/") && ext != null) f = new File(ext, p.substring(4));
+            else if (p.startsWith("databases/") || p.startsWith("no_backup/")) f = new File(data, p);
+            if (f != null && !f.isFile()) miss++;
+        }
+        return miss;
+    }
+
+    /** 备份里是否带着 uuid 或 login_key（换身份前必须为真，否则恢复不回来）。 */
+    static boolean hasIdentity(Context ctx, Uri u) {
+        try (ZipInputStream z = new ZipInputStream(ctx.getContentResolver().openInputStream(u))) {
+            ZipEntry e;
+            while ((e = z.getNextEntry()) != null) {
+                String p = e.getName();
+                if (!p.startsWith("shared_prefs/") || !p.endsWith(".xml")) continue;
+                java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                byte[] b = new byte[8192]; int n;
+                while ((n = z.read(b)) > 0) bo.write(b, 0, n);
+                String x = bo.toString("UTF-8");
+                if (x.contains("name=\"uuid\"") || x.contains("name=\"login_key\"")) return true;
+            }
+        } catch (Throwable t) { Log.w(TAG, "hasIdentity", t); }
+        return false;
+    }
+
+    /**
+     * 换身份的第一步：备份当前存档（{@code make} 成功返回非 null），并校验这份 zip 里确实有身份文件。
+     * 返回 zip 的 uri；失败（或没有身份文件）返回 null —— 调用方据此中止，不动任何数据。
+     */
+    static Uri backupForIdentity(Context ctx) {
+        String name = make(ctx, "换身份前");
+        if (name == null) { Log.e(TAG, "identity: backup failed, abort"); return null; }
+        Uri u = findByName(ctx, name);
+        if (u == null) { Log.e(TAG, "identity: backup not found after write, abort"); return null; }
+        boolean id = hasIdentity(ctx, u);
+        Log.i(TAG, "identity: backup ok " + name + " identity=" + id + " ident=" + identSummary(ctx));
+        return id ? u : null;
+    }
+
+    /** 按名字找到刚写的那个备份。 */
+    static Uri findByName(Context ctx, String name) {
+        for (Item it : list(ctx)) if (name.equals(it.name)) return it.uri;
+        return null;
+    }
+
+    /**
+     * 清空游戏本地数据：只删「这份备份登记过、但不在保留白名单里」的文件，所以
+     * 汉化表（zh/Contents 里的主表）、我们自己的 elneazh_* 设置、prefs 备份索引、UnityCache/il2cpp 缓存都留下。
+     * uuid / login_key 所在的那个 prefs xml 会删掉（新身份要重新要一个 id）。
+     */
+    static void wipeForIdentity(Context ctx, Uri backup) {
+        Set<String> keep = tableNames(ctx), idx = indexOf(ctx, backup);
+        File data = ctx.getFilesDir().getParentFile();
+        File ext = ctx.getExternalFilesDir(null);
+        int del = 0, kept = 0;
+        for (String p : idx) {
+            String base = p.substring(p.lastIndexOf('/') + 1);
+            if (p.startsWith("shared_prefs/")) {
+                if (base.startsWith("elneazh_")) { kept++; continue; }   // 我们的设置（含 elneazh_names）
+            } else {
+                if (p.startsWith("ext/") && (p.startsWith("ext/zh/") || p.startsWith("ext/Contents/"))) {
+                    if (keep.contains(base)) { kept++; continue; }        // 汉化主表
+                }
+                if (p.startsWith("files/") && (p.startsWith("files/zh/") || p.startsWith("files/Contents/"))) {
+                    if (keep.contains(base)) { kept++; continue; }
+                }
+            }
+            File f = null;
+            if (p.startsWith("ext/") && ext != null) f = new File(ext, p.substring(4));
+            else if (p.startsWith("files/") || p.startsWith("shared_prefs/")
+                    || p.startsWith("databases/") || p.startsWith("no_backup/")) f = new File(data, p);
+            if (f == null) continue;
+            try { if (f.isFile() && f.delete()) del++; } catch (Throwable t) { Log.w(TAG, "wipe " + p, t); }
+        }
+        // 没登记但明显是存档的东西也清掉（sv1_*、存档临时文件）
+        for (File root : new File[]{ctx.getFilesDir(), ext}) {
+            if (root == null) continue;
+            for (String d : new String[]{"zh", "Contents"}) {
+                File[] ls = new File(root, d).listFiles();
+                if (ls == null) continue;
+                for (File f : ls) {
+                    String nm = f.getName();
+                    if (!nm.startsWith("sv1_") && !nm.endsWith(".ntmp") && !nm.endsWith(".rtmp")) continue;
+                    try { if (f.isFile() && f.delete()) del++; } catch (Throwable ignored) {}
+                }
+            }
+        }
+        Log.i(TAG, "identity wipe: deleted " + del + ", kept " + kept);
+    }
+
+    /** 恢复备份时把里面带的 uuid / login_key 一起写回（旧身份能直接回去）。 */
+    private static void restoreIdentityFile(Context ctx, File prefsXml) {
+        try {
+            String xml = readText(prefsXml);
+            if (xml == null || (!xml.contains("name=\"uuid\"") && !xml.contains("name=\"login_key\""))) return;
+            SharedPreferences sp = ctx.getSharedPreferences(prefsName(ctx), Context.MODE_PRIVATE);
+            SharedPreferences.Editor e = sp.edit();
+            int n = 0;
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("<(string|int|long|boolean|float)\\s+name=\"([^\"]+)\"\\s*>([^<]*)</\\1>").matcher(xml);
+            while (m.find()) {
+                String t = m.group(1), k = m.group(2), v = m.group(3);
+                try {
+                    if ("string".equals(t)) e.putString(k, v);
+                    else if ("int".equals(t)) e.putInt(k, Integer.parseInt(v.trim()));
+                    else if ("long".equals(t)) e.putLong(k, Long.parseLong(v.trim()));
+                    else if ("boolean".equals(t)) e.putBoolean(k, "true".equalsIgnoreCase(v.trim()));
+                    else if ("float".equals(t)) e.putFloat(k, Float.parseFloat(v.trim()));
+                    n++;
+                } catch (Throwable ignored) {}
+            }
+            boolean ok = e.commit();
+            Log.i(TAG, "restore identity: " + n + " keys from " + prefsXml.getName() + " ok=" + ok);
+        } catch (Throwable t) { Log.w(TAG, "restore identity", t); }
+    }
+
+    private static String readText(File f) {
+        try (InputStream in = new FileInputStream(f)) {
+            java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+            byte[] b = new byte[8192]; int n;
+            while ((n = in.read(b)) > 0) bo.write(b, 0, n);
+            return bo.toString("UTF-8");
+        } catch (Throwable t) { return null; }
+    }
+
     // ---------------- 存档管理 ----------------
 
-    static final class Item { String name; Uri uri; long size; }
+    static final class Item { String name; Uri uri; long size; String ident; }
 
     /** Lists backups this install can see (newest first). */
     static List<Item> list(Context ctx) {
@@ -323,7 +606,26 @@ final class Backup {
         java.util.Collections.sort(r, new java.util.Comparator<Item>() {
             @Override public int compare(Item x, Item y) { return y.name.compareTo(x.name); }
         });
+        for (Item it : r) it.ident = ident(ctx, it.uri);
         return r;
+    }
+
+    /** 从备份 zip 的说明条目里读出身份摘要（uuid 打码 / login_key 有无），读不到给 null。 */
+    private static String ident(Context ctx, Uri u) {
+        try (ZipInputStream z = new ZipInputStream(ctx.getContentResolver().openInputStream(u))) {
+            ZipEntry e;
+            while ((e = z.getNextEntry()) != null) {
+                if (!"elneazh_backup.txt".equals(e.getName())) continue;
+                java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                byte[] b = new byte[4096]; int n;
+                while ((n = z.read(b)) > 0 && bo.size() < 65536) bo.write(b, 0, n);
+                for (String line : bo.toString("UTF-8").split("\n")) {
+                    if (line.startsWith("identity=")) return line.substring(9).trim();
+                }
+                return null;
+            }
+        } catch (Throwable ignored) {}
+        return null;
     }
 
     /** In-game backup manager: list, back up now, restore, delete. */
@@ -525,7 +827,9 @@ final class Backup {
     }
 
     private static String size(Item it) {
-        return it.size >= 1024 * 1024 ? String.format(Locale.US, "%.1f MB", it.size / 1048576.0) : Math.max(1, it.size / 1024) + " KB";
+        String sz = it.size >= 1024 * 1024 ? String.format(Locale.US, "%.1f MB", it.size / 1048576.0)
+                : it.size > 0 ? Math.max(1, it.size / 1024) + " KB" : "…";
+        return sz + (it.ident != null && it.ident.length() > 0 ? "  ·  " + it.ident : "");
     }
 
     // ---------------- UI ----------------
@@ -603,6 +907,30 @@ final class Backup {
                     }
                 }
                 Log.i(TAG, "restored " + n + " files");
+                // 身份（uuid / login_key）一起写回：旧身份解封后恢复即回去
+                File prefsXml = new File(data, "shared_prefs/" + prefsName(a) + ".xml");
+                if (prefsXml.isFile()) restoreIdentityFile(a, prefsXml);
+                // 换成新身份后本机可能已经跑出了新号的文件；恢复旧备份时要先把这些新号的存档清掉，
+                // 否则新旧两份存档混在一起。只删「当前存在、但两份备份都没登记」的存档类文件。
+                try {
+                    Set<String> keep = indexOf(a, u);
+                    Set<String> after = tableNames(a);
+                    for (File root : new File[]{a.getFilesDir(), a.getExternalFilesDir(null)}) {
+                        if (root == null) continue;
+                        for (String d : new String[]{"zh", "Contents"}) {
+                            File[] ls = new File(root, d).listFiles();
+                            if (ls == null) continue;
+                            for (File f : ls) {
+                                String nm = f.getName();
+                                if (!nm.startsWith("sv1_")) continue;
+                                if (after.contains(nm)) continue;   // 汉化主表，留着
+                                String rel = (root == a.getFilesDir() ? "files/" : "ext/") + d + "/" + nm;
+                                if (keep.contains(rel) || !f.isFile()) continue;
+                                if (f.delete()) Log.i(TAG, "restore: removed newer save " + rel);
+                            }
+                        }
+                    }
+                } catch (Throwable t) { Log.w(TAG, "restore cleanup", t); }
                 toast(a, "已恢复 " + n + " 个文件，游戏即将关闭，请重新打开");
                 new Handler(Looper.getMainLooper()).postDelayed(new Runnable() { @Override public void run() {
                     try { a.finishAffinity(); } catch (Throwable ignored) {}
