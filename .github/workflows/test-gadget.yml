@@ -1,14 +1,12 @@
-#!/usr/bin/env python3
-"""Test-only build of the localized game with frida-gadget inside (no root, no PC needed).
-
-Triggered by hand (workflow_dispatch) or by pushing a tag named `test-gadget-*`.
-It runs the same payload steps as build.yml (but WITHOUT the translation build, so it is
-fast and small: default game resource download stays in place), then repacks the base APK
-with the ELSP il2cpp patch, the patched manifest, classes3.dex from inj/, and
-libfrida-gadget.so + libgadget.config.so + assets/elneazh/libhook.js.
-
-It ONLY uploads an artifact. It never creates a Release and never touches main.
-"""
+# Test-only build of the localized game with frida-gadget inside (no root, no PC needed).
+#
+# Triggered by hand (workflow_dispatch) or by pushing a tag named `test-gadget-*`.
+# It runs the same payload steps as build.yml but WITHOUT the translation build (so it is fast
+# and small: the game keeps downloading its resources), then repacks the base APK with the
+# ELSP il2cpp patch, the patched manifest, classes3.dex from inj/, and
+# libfrida-gadget.so + libgadget.config.so + assets/elneazh/libhook.js.
+#
+# Output: an artifact plus a PRE-release on the pushed tag (never --latest). Never touches main.
 name: test-gadget build
 
 on:
@@ -18,7 +16,7 @@ on:
       - 'test-gadget-*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   gadget:
@@ -36,7 +34,8 @@ jobs:
       - name: Install Python deps
         run: pip install -r requirements.txt
 
-      - name: Assemble base APK
+      # base/apk is read-only input: the four part files are the stored base APK, checksum-gated.
+      - name: Assemble base APK from base/apk (read-only)
         run: |
           mkdir -p build
           cat base/apk/ElneaKingdom_2.10.7.apk.part* > build/base.apk
@@ -60,14 +59,14 @@ jobs:
         run: |
           PLAT=$ANDROID_HOME/platforms/$(ls $ANDROID_HOME/platforms | tail -1)
           BT=$ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)
-          mkdir -p build/inj
+          mkdir -p build/inj build/dex
           javac --release 8 -cp $PLAT/android.jar -d build/inj $(find inj -name '*.java')
-          mkdir -p build/dex
           $BT/d8 --min-api 21 --output build/dex $(find build/inj -name '*.class')
           cp build/dex/classes.dex build/classes3.dex
           ls -l build/classes3.dex
 
-      - name: Fetch frida-gadget 16.7.19 (last build still supporting libffi trampolines on ART)
+      # frida 16.7.19 is the last line whose gadget still starts on the ART versions this game targets.
+      - name: Fetch frida-gadget 16.7.19
         run: |
           V=16.7.19
           mkdir -p build/gadget
@@ -88,9 +87,27 @@ jobs:
             --gadget-arm build/gadget/libfrida-gadget-arm.so \
             --hook tools/gadget_hook.js
           ls -l build/app-elneazh-test-gadget.apk
+          sha256sum build/app-elneazh-test-gadget.apk | tee build/apk.sha256
 
       - uses: actions/upload-artifact@v4
         with:
           name: app-elneazh-test-gadget
-          path: build/app-elneazh-test-gadget.apk
+          path: |
+            build/app-elneazh-test-gadget.apk
+            build/apk.sha256
           compression-level: 0
+
+      # Phone-friendly: a pre-release on the test tag. Deliberately NOT --latest, so it can never
+      # become the "latest" download for normal users.
+      - name: Publish pre-release (test tag only)
+        if: startsWith(github.ref, 'refs/tags/test-gadget-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "$GITHUB_REF_NAME" --yes --cleanup-tag=false || true
+          gh release create "$GITHUB_REF_NAME" \
+            --title "测试版（仅排查用）" \
+            --notes "排查加密用，采样完装回正式版。" \
+            --prerelease \
+            build/app-elneazh-test-gadget.apk build/apk.sha256
+          gh release view "$GITHUB_REF_NAME" --json assets,url --jq '{url: .url, assets: [.assets[] | {name: .name, size: .size}]}'
