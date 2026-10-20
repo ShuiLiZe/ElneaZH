@@ -43,6 +43,32 @@ final class SelfCheck {
             // 3) 别名表规模（应随玩家取名增长，并随备份一起走）
             r.append("aliases: ").append(NameFix.aliasSnapshot().size()).append('\n');
             r.append("gate installed: ").append(NetGuard.installed()).append('\n');
+
+            // 4) 单机模式：开关状态 + 分类器对几个真实接口的判断 + 闸门计数 + 分享链路
+            r.append("offline: on=").append(Offline.isOn(ctx))
+                    .append(" pref=").append(Offline.PREF).append('/').append(Offline.KEY).append('\n');
+            String[] probes = {
+                    "https://app-elnea.althi.co.jp/sns04/save2.php",
+                    "https://app-elnea.althi.co.jp/sns04/savekpi.php",
+                    "https://app-elnea.althi.co.jp/sns04/kpi.php",
+                    "https://app-elnea.althi.co.jp/sns04/read.php",
+                    "https://app-elnea.althi.co.jp/sns04/login.php",
+                    "https://app-elnea.althi.co.jp/sns04/version.php",
+                    "https://app-elnea.althi.co.jp/sns04/some_new_api.php",
+                    "https://app-elnea.althi.co.jp/pack/asset.bundle",
+                    "https://cdn.example.com/x.zip",
+            };
+            for (String u : probes) {
+                r.append("  classify ").append(Offline.describe(u))
+                        .append(" write=").append(Offline.isWriteRequest(u))
+                        .append(" blockedWhenOffline=").append(!NetBlocker.allow(u, true))
+                        .append(" allowedWhenOnline=").append(NetBlocker.allow(u, false))
+                        .append('\n');
+            }
+            r.append("offline gate installed: ").append(NetBlocker.installed()).append('\n');
+            r.append("offline blocked so far: ").append(NetBlocker.hits()).append('\n');
+            r.append("share: ").append(Share.describe()).append('\n');
+            r.append("name table lines: ").append(Share.nameTableText(NameFix.aliasSnapshot()).split("\n").length).append('\n');
         } catch (Throwable t) {
             StringWriter sw = new StringWriter();
             t.printStackTrace(new PrintWriter(sw));

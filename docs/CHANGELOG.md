@@ -2,6 +2,45 @@
 
 > 这是给"接手的人或下一次会话"的交付文件：项目现在做到哪、怎么继续。每次有进展都会更新。
 
+## 2026-10-21 03:40 第二批「单机模式」+ 第三批「分享 / 导出」（feat/offline-share）
+
+分支 `feat/offline-share`，从 `fix/anti-flag`（25d3f3e）切出，**不合并 main、不发 Release**。
+
+### 单机模式（开关，默认关）
+- 需求中途变过一次：起初是「只拦上传」，后改为**真单机**——开启后游戏完全不连服务器，登录也不发，
+  设备码一个字节都不出手机。按后者实现。
+- 新增 `inj/.../Offline.java`：开关（`shared_prefs/elneazh_settings.xml` 键 `offline`，随备份走）、
+  `isGameServer()`、`intercept()`、`isWriteRequest()/isReadRequest()`（只用于日志归类）、
+  `offlineReply()`（本机回包）。
+  - `isGameServer` 第一版写成 `url.contains("althi.co.jp") && contains("/sns04/")`，
+    离线测试当场打出一个**真实缺陷**：`https://althi.co.jp.evil.com/sns04/save2.php` 会被当成游戏服务器。
+    改为解析 host、按 `.althi.co.jp` 后缀判定（`host == althi.co.jp || host.endsWith(".althi.co.jp")`），
+    顺带处理 port / userinfo / 尾点。
+  - 同一轮测试还打出 `isReadRequest()` 循环里 `return false` 写错（应 `true`），一起修了。
+- 新增 `inj/.../NetBlocker.java`：`URL.setURLStreamHandlerFactory` 接管 http/https + `ProxySelector` 兜底。
+  命中时不建 socket，`LocalConnection` 就地回本机生成的字节；上传方向 `getOutputStream` 吞掉。
+  放行用 ThreadLocal 保镖 + `new URL(proto,host,port,file)` 回默认 handler（否则 https 自递归）。
+  编译时踩到 `URLConnection` 没有 `getResponseCode/getResponseMessage`（那是 `HttpURLConnection`），已删。
+- `Support.java` 加开关 UI（原版米黄/棕/橙风格，复用 `button()`/`round()`），文案用 `Offline.limits()`。
+- **结论性限制（写进 HANDOFF）**：Unity 用 `UnityWebRequest` + native curl，静态看不经 java.net；
+  若真机 logcat 没有 `offline: intercepted`，说明 Java 闸门拦不到，单机开关只是界面声明。
+  不做伪造业务回包、不改设备码、不删服务器标记、不绕反作弊。
+
+### 分享 / 导出
+- 新增 `inj/.../Share.java`：`ACTION_SEND` + FileProvider（authority `jp.co.althi.elnea.en.zhfiles`）；
+  暂存目录最初写成 `cacheDir/out` + 新建 `file_paths.xml`，核对原包资源后发现 **`xml` 只有三个 id**，
+  且 7f100002 就是 `image_share_filepaths`（`files-path path="image_provider/"`），
+  于是改成共用它、暂存到 `filesDir/image_provider/` —— 不新增资源、也不怕被清缓存。
+- `Backup.uriOf()` 新增；`Support.java` 加三个入口按钮；导入沿用 `Backup.pick`/`confirmRestore`（先自动备份）。
+- `tools/manifest_zh.py`：加 FileProvider provider + meta-data、`SupportActivity` 的 `noHistory`、
+  Application 的 `requestLegacyExternalStorage`，并在末尾 assert。
+
+### 离线验证（接进 build-check）
+- `tools/verify_offline.py`（65 项，源码级护栏）+ `tools/offline_test/`（JDK 直跑的 79 项 Java 测试，
+  android 类用极小 stub）。两条都进 `.github/workflows/build-check.yml`，push 就拦。
+- 本地实测：`javac --release 8 -cp android.jar` 全绿（14 源文件 / 67 classes）；`tools/ci_inj.py` OK；
+  `manifest_zh.py` 对原版 axml 往返通过。
+
 ## 目标
 艾尔尼亚汉化器（ElneaZH）：一个安卓 App，一键把手机上已安装的 **Elnea Kingdom 2.10.7** 打成中文版并重新安装。
 自用，不分发游戏本体。

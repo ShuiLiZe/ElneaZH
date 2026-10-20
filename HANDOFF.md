@@ -1,6 +1,60 @@
 # HANDOFF — 现状（只写当前状态；过程见 docs/CHANGELOG.md，规矩见 AGENTS.md）
 
-_最后更新：2026-10-20 12:45 CST_
+_最后更新：2026-10-21 03:40 CST_
+
+## 2026-10-21 03:40 单机模式 + 分享/导出（分支 feat/offline-share，待真机验证）
+
+### 单机模式：开关，默认关，开了就真的一个字节都不出手机
+入口：游戏内 `Support`（汉化设置/支援弹窗）→「单机模式」开关。状态存
+`shared_prefs/elneazh_settings.xml`（键 `offline`），**随存档备份/恢复一起走**（Backup 已覆盖 shared_prefs）。
+
+- `inj/.../Offline.java`：状态 + 服务器判定 + 本机回包（全纯函数，可离线测）。
+  `isGameServer()` 按 **host 后缀**（`althi.co.jp` 或 `.althi.co.jp`）**且** 路径含 `/sns04/` 判定，
+  覆盖 metadata 里的四个入口（app- / cdn- / res- / 裸域）；**不用 contains**，`althi.co.jp.evil.com` 不算。
+- `inj/.../NetBlocker.java`：进程内网络闸门。
+  1. `URL.setURLStreamHandlerFactory` 接管 http/https：命中游戏服务器 → **不建立任何 socket**，
+     由 `LocalConnection` 就地给出本机生成的离线回包；上传方向的 `getOutputStream` 直接吞掉。
+  2. 兜底 `ProxySelector.setDefault`：漏网的请求代理指向 `127.0.0.1:1`（连不上=不发出去）。
+  3. 放行分支用 ThreadLocal 保镖 + 重新 `new URL(...)` 回默认 handler，避免 https 自递归。
+  `ZhInit.onCreate` 里 `NetBlocker.install` 单独 try/catch，装不上只打日志。
+- 界面文案（`Offline.limits()`）明确写出：单机时**云存档、好友、邮件、PVP、礼物不可用**；
+  存档只在本机、本地存档照常读写；服务器请求全部在本机拦下（含登录）、设备信息不外发；
+  关掉开关立刻恢复联网、无需重开游戏。
+
+### 不做 / 边界（刻意保留的）
+- **不伪造服务器业务数据**：离线回包一律 `HTTP 200` + `{}`（kpi/cheater_flag 类给 `ok`），
+  不含存档、角色、物品，也不含设备/账号信息；它只是「服务器答了，但什么都没有」，让 C# 层走
+  「没有字段 → 默认值」分支而不是网络错误分支。
+- 不删服务器标记、不改设备码、不绕反作弊。
+- **已知风险（真机必须先验这条）**：游戏 HTTP 走 `UnityWebRequest`，传输层是 native curl，
+  静态看**不经过 java.net**。如果真机上 `adb logcat -s ElneaZH-NET` 一直不出现
+  `offline: intercepted ...`，说明 Unity 自建了连接、Java 侧工厂拦不到，
+  那么单机模式下仍可能有请求发出（此时开关只是一个「界面声明」，不能当保证）。
+  SelfCheck 会写 `offline blocked so far: ...`，`none` 就是没拦到。
+- 若 Unity 确实绕过，下一步只能真机动态 hook（Frida/LSPatch）或在 native 层拦，
+  那时才谈得上「彻底」。**没有**为了「看起来能拦」去伪造登录回包或改服务器侧状态。
+
+### 分享 / 导出（第三批）
+入口都在同一个 Support 弹窗的「分享 / 导出」区，三个按钮各自独立 try/catch，出错只 Toast：
+
+| 功能 | 入口 | 实现 |
+|---|---|---|
+| 导出存档 | Support →「导出存档」 | 先 `Backup.make(a,"导出")` 打一份新备份（后台线程），拷到 `files/image_provider/`，再用 `ACTION_SEND`（`application/zip`）走系统分享面板 → 微信/QQ/文件 |
+| 导入存档 | Support →「导入存档」 | `ACTION_OPEN_DOCUMENT` 选 zip → 已有的 `Backup.confirmRestore` → 先自动备份当前存档（`Backup.make(a,"恢复前")`）再恢复 |
+| 导出名字对照表 | Support →「导出名字对照表」 | `elneazh_names` 别名表 → `中文<TAB>拼音` 的 txt（UTF-8，带表头和条数）→ 同一套分享面板（`text/plain`） |
+
+- `inj/.../Share.java`：分享实现。uri 走 FileProvider；
+  authority = `jp.co.althi.elnea.en.zhfiles`，由 `tools/manifest_zh.py` 写进游戏 manifest
+  （`grantUriPermissions="true"`，paths 指向原包已有的 `@xml/image_share_filepaths` =
+  `files-path path="image_provider/"`）。
+- `Backup.uriOf(ctx,name)` 新增：把备份文件名换成 uri（找不到返回 null，不抛）。
+- `manifest_zh.py` 另加：`SupportActivity` 加 `noHistory`；Application 加 `requestLegacyExternalStorage`
+  （备份目录 `/sdcard/艾尔尼亚存档备份` 在 Android 10 上要能读）。
+
+### 离线验证（CI 里跑，不需要手机）
+- `python tools/verify_offline.py`：65 项源码级护栏（判定范围/端点表/回包/文案/入口/try-catch）。
+- `java com.shuilize.elneazh.inj.OfflineTest`：79 项**真跑 Java**（`tools/offline_test/`，
+  android 类用极小 stub）。这两条已接进 `.github/workflows/build-check.yml`。
 
 ## 现在能用的版本
 - Release `latest` 的 ElneaZH.apk（每次推送自动构建）。装前先在游戏「Support → 存档数据」备份，卸载原版后安装汉化版（签名不同）。

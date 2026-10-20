@@ -1,4 +1,4 @@
-﻿name: build-check
+name: build-check
 
 # 分支验证用：只编译，不打 release、不碰 app/keystore 之外的东西。
 on:
@@ -19,6 +19,19 @@ jobs:
         run: pip install -r requirements.txt
       - name: Python syntax
         run: python -m py_compile tools/*.py && echo "python ok"
+      - name: Offline rules (single-player gate + share/export)
+        run: python tools/verify_offline.py
+      - name: Offline unit test (real Java on plain JDK)
+        run: |
+          # 不需要手机的纯逻辑，直接拿 JDK 跑：单机判定 / 本机回包 / 开关 / 说明文案。
+          # android.* 由 tools/offline_test/stub 里的极小 stub 顶替。
+          mkdir -p build/offtest
+          javac -encoding UTF-8 -nowarn -d build/offtest \
+            $(find tools/offline_test -name '*.java') \
+            inj/com/shuilize/elneazh/inj/Offline.java \
+            inj/com/shuilize/elneazh/inj/Pinyin.java \
+            inj/com/shuilize/elneazh/inj/NameFix.java
+          java -cp build/offtest com.shuilize.elneazh.inj.OfflineTest
       - name: Verify base data.unity3d
         run: |
           echo "dc1796ffac62ea29796772f320c4218a922216aa417c4689abaeb6c0e917a155  base/data.unity3d" | sha256sum -c -

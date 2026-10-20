@@ -39,6 +39,8 @@ public final class ZhInit extends ContentProvider {
         try {
             if (!NetGuard.install(getContext())) Log.w(TAG, "NET gate: no Java-visible hook (see NetGuard)");
         } catch (Throwable t) { Log.w(TAG, "NET gate failed", t); }
+        // 单机模式的闸门：常驻安装（是否真拦由 Offline.isOn() 现读决定，切开关不用重进游戏）
+        try { NetBlocker.install(getContext()); } catch (Throwable t) { Log.w(TAG, "offline gate failed", t); }
         try { SelfCheck.run(getContext()); } catch (Throwable t) { Log.w(TAG, "selfcheck failed", t); }
         return true;
     }

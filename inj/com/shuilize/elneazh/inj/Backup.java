@@ -488,6 +488,25 @@ final class Backup {
         return null;
     }
 
+    /**
+     * 刚 make() 出来的那份备份的 uri：先按名字查列表，查不到再直接拼「根目录/文件名」。
+     * 导出/分享用，绝不抛异常。
+     */
+    static Uri uriOf(Context ctx, String name) {
+        if (ctx == null || name == null) return null;
+        try {
+            Uri u = findByName(ctx, name);
+            if (u != null) return u;
+        } catch (Throwable ignored) {
+        }
+        try {
+            File f = new File(rootDir(), name);
+            if (f.isFile()) return Uri.fromFile(f);
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
     // ---------------- 换身份：最小删除集合 ----------------
     //
     // 依据（全部来自 base.apk 静态取证，见 .work/p_keys2.txt / p_cache.txt）：
