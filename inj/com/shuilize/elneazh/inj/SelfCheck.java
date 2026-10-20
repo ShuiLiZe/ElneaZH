@@ -40,6 +40,41 @@ final class SelfCheck {
             String plain = "acc=abcd&lang=en";
             r.append("gate passthrough: ").append(NetGuard.body(plain).equals(plain)).append('\n');
 
+            // 2b) 存档区块名字槽：0x01 + 长度 + UTF-8 —— 中文名换拼音，其它字节必须不动
+            byte[] raw = UploadNamesSample.hex(UploadNamesSample.RAW_HEX);
+            byte[] want = UploadNamesSample.hex(UploadNamesSample.EXPECT_HEX);
+            byte[] got = UploadNames.filterNames(raw, new UploadNames.Mapper() {
+                @Override public String ascii(String zh) {
+                    for (int i = 0; i < UploadNamesSample.ZH.length; i++) {
+                        if (UploadNamesSample.ZH[i].equals(zh)) return UploadNamesSample.ASCII[i];
+                    }
+                    return null;
+                }
+            });
+            r.append("names slots: ").append(UploadNames.countNames(raw))
+                    .append(" -> filtered crc ").append(UploadNamesSample.crc(got))
+                    .append(want.length == got.length && java.util.Arrays.equals(want, got) ? " OK" : " MISMATCH")
+                    .append('\n');
+
+            // 2c) 整段 ws_* 区块：base64(zlib) 往返 + 长度只许变短
+            byte[] packed = UploadNames.deflate(raw);
+            String b64 = UploadNames.Base64.encode(packed);
+            String b64b = UploadNames.filterOne(b64, new UploadNames.Mapper() {
+                @Override public String ascii(String zh) {
+                    for (int i = 0; i < UploadNamesSample.ZH.length; i++) {
+                        if (UploadNamesSample.ZH[i].equals(zh)) return UploadNamesSample.ASCII[i];
+                    }
+                    return null;
+                }
+            });
+            boolean round = false;
+            if (!b64b.equals(b64)) {
+                byte[] back = UploadNames.inflate(UploadNames.Base64.decode(b64b));
+                round = back != null && java.util.Arrays.equals(back, want) && b64b.length() <= b64.length();
+            }
+            r.append("blob round trip: ").append(b64.length()).append(" -> ").append(b64b.length())
+                    .append(round ? " OK" : " NOT-CHANGED-OR-BAD").append('\n');
+
             // 3) 别名表规模（应随玩家取名增长，并随备份一起走）
             r.append("aliases: ").append(NameFix.aliasSnapshot().size()).append('\n');
             r.append("gate installed: ").append(NetGuard.installed()).append('\n');

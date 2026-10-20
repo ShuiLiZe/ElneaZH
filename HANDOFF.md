@@ -10,6 +10,41 @@ _最后更新：2026-10-20 12:45 CST_
 - 签名本来就固定（app/keystore/elneazh.p12），只有第一次从商店版换汉化版要卸载。
 - App 现在会：检测已装游戏是否是自己签名的汉化版 → 是就提示直接覆盖安装；第一次汉化成功后把原版 APK 存到 App 私有目录（filesDir/orig），以后用它打补丁。没存过的话让用户手动选原版 APK（仓库 base/apk 有）。
 
+## 2026-10-21 03:20 上传前名字闸门：改 EncryptRJ256 的明文（单向）
+
+**问题**：存档里只要带中文名，上传到 `sns04/*.php` 就是汉字。服务器只认原版字形，中文名是「非原版客户端」的硬证据。
+
+**落点（真机 frida 取样确认，不是猜的）**：`Assembly-CSharp` 的 `Cipher::EncryptRJ256(string)`
+
+| 项 | 值 |
+| --- | --- |
+| 函数入口 | VA `0x18ad7e4` = ELF file offset `0x18a97e4`（入口 `str x30,[sp,#-0x30]!`，x0 = 明文） |
+| 返回 | `0x18ad97c` 处 `b` 跳到 il2cpp String 构造，所以「返回值」就是下一次调用 EncryptRJ256 的入参 |
+| 兄弟函数 | `0x18ad984` = `DecryptRJ256`（服务器回包解密） |
+| 初始化块 | `0x18ad804` `tbnz` → `0x18ad840` 是「首次调用才走」的静态初始化分支（`bl il2cpp_codegen_initialize_runtime_metadata` + 置标志） |
+| 跳板位置 | `0x18ad834`，8 条指令 32 字节，正好塞在初始化块里；`0x18ad854` 回到原流程 |
+
+**为什么跳板敢放在初始化块里**：这段代码只在第一次调用时执行，只写 x8 与 `[x21+0xef9]` 标志位；而 EncryptRJ256 一进来（`0x18ad7e4..0x18ad830`）就把 x19/x20/x21 存到了栈上，跳板只用 x9/x10，且三条分支目标（`0x18ad6e0` / `0x18ad840` / 原地）全部落在原有入口内部 → 不动栈帧、不动活值。
+
+**改什么**：`Cipher.EncryptRJ256` 收到的明文是 JSON，其中 `ws_profiles` / `ws_familys` / `ws_animals*` 这些字段的值是 `base64(zlib(...))`，解开后名字是 `0x01 + 1 字节长度 + UTF-8` 的小槽。`inj/UploadNames.java` 只改这些槽：
+
+- 汉字名 → 固定拼音（同一汉字永远同一拼音，靠 SharedPreferences `elneazh_names` 记住），长度字节同步改写；
+- 其它字节（id、链接、25 字节属性、噪声）逐字节保持；
+- 解不开 / 不是 zlib / 不是 base64 / 替换反而更长 → **原样不动**，宁可漏改也不写坏存档；
+- 纯 ASCII 请求体直接跳过（原版玩家走路不变）。
+
+**验证**（`tools/verify_upload_names.py`，Python 复刻；`UploadNamesSample` + 真 JVM 跑同一套夹具）：
+
+```
+python tools/verify_upload_names.py     -> RESULT: PASS （19 项）
+javac/d8 inj -> javac OK, 57 classes
+JVM 直跑 Harness: filterNames OK / blob 96 -> 88 roundtrip OK notLonger OK -> RESULT PASS
+```
+
+**风险（真机未验证）**：跳板的机器码（`tools/net_gate_so.py`，待接）本机没有真机跑过；`bl` 到 Java 的 JNI 往返（`NetGuard.ensure`）还没接完，目前 `NetGuard.install()` 只探测、返回 false 并写明「闸门未激活」，绝不阻断启动。跳板接好之前，这一层是**死代码**，不会影响游戏。
+
+**解密工具**：`tools/decrypt_acc.py`（`--key/--iv` 支持 hex 与 base64，`--mode cbc|ecb`，`--selftest` 自检全绿），用来核对抓包里的 `acc=`。
+
 ## 2026-10-21 00:30 名字：本地存档保持中文，只在上传时换成拼音（单向）
 策略定稿：**不改存档、不改显示**。玩家和 NPC 的中文名照旧留在本地、照旧在界面上显示中文；
 只在数据离开设备（上传 `sns04/*.php`）时把明文里的中文名换成固定拼音；服务器响应里回来的拼音原样显示，不做反向还原。
