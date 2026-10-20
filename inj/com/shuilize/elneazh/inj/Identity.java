@@ -5,6 +5,8 @@ import android.app.Dialog;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
+import android.net.Uri;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -13,18 +15,20 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
-import android.content.Context;
-import android.content.DialogInterface;
-import android.content.SharedPreferences;
-import android.net.Uri;
-import android.util.Log;
 
 /**
- * 「更换游戏身份」. The game logs in with PlayerPrefs["uuid"] (UuidPlugin.GetUUID). If the server has put that identity
- * under 维护 / forces the account panel, the player can drop it here: we back up the save first (so the old identity can
- * be brought back from 存档备份), delete PlayerPrefs["uuid"], and kill the process. On the next start GetUUID finds no
- * cached id and (libil2cpp patch, so_patch_zh.py) makes a fresh random one instead of the device-derived id.
- * Nothing else in the save is touched, so the player never has to clear the game's data. Never throws.
+ * 「更换游戏身份」.
+ *
+ * 抓包事实：旧存档 + 新 uuid 登录时 login.php 回 “already login!”，所以只抹掉 uuid 没用 ——
+ * 服务器是拿旧存档里的账号信息去认人的。换成全新身份必须是「整套本地数据重来」：
+ *   1) 先 Backup.make(a, "换身份前")，返回非 null 才继续（备份里必须含 uuid / login_key，
+ *      见 Backup.backupForIdentity：它还会校验 zip 里真有 name="uuid" 或 name="login_key"）；
+ *   2) 清空游戏本地数据 —— 只删「这份备份登记过、且不在保留白名单里」的文件：
+ *      files/、shared_prefs/、ext/ 下的存档与账号文件全删；
+ *      汉化主表（zh/Contents 里我们投放的表）、我们自己的 elneazh_* 设置、UnityCache/il2cpp 缓存留下；
+ *   3) 结束进程，重开由 UuidPlugin 生成新 uuid、走新号流程。
+ * 旧身份随时能从「存档备份」里恢复那份「换身份前」—— restore 会把备份里的 uuid / login_key 一起写回。
+ * 全程 try/catch，失败只提示，不动数据。
  */
 final class Identity {
     static final String KEY = "uuid";
@@ -65,8 +69,10 @@ final class Identity {
             tv.setTextSize(14);
             tv.setLineSpacing(0, 1.25f);
             tv.setText("只在游戏一直卡「维护中」或强制要求输入账号时使用。\n\n"
-                    + "会换成一个新的游戏身份（服务器上相当于新号）。更换前自动备份当前存档，"
-                    + "想换回原来的身份，在「存档备份」里恢复「换身份前」那份即可。\n\n"
+                    + "点「确定更换」后会先把当前存档（含游戏身份）备份成一份「换身份前」，"
+                    + "成功后才清空本地存档并重新开始 —— 相当于一个全新账号。\n\n"
+                    + "旧存档不会丢：旧身份解封后，在「交流与支持 → 存档管理」里恢复那份「换身份前」备份，"
+                    + "就会连原来的身份一起回去。\n\n"
                     + "更换后游戏会自动关闭，请重新打开。");
             card.addView(tv, new LinearLayout.LayoutParams(-1, -2));
 
@@ -81,8 +87,8 @@ final class Identity {
                 @Override public void onClick(View v) { try { dlg.dismiss(); } catch (Throwable ignored) {} }
             }));
 
-            dlg.setOnDismissListener(new DialogInterface.OnDismissListener() {
-                @Override public void onDismiss(DialogInterface di) { if (!ok[0] && onCancel != null) onCancel.run(); }
+            dlg.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+                @Override public void onDismiss(android.content.DialogInterface di) { if (!ok[0] && onCancel != null) onCancel.run(); }
             });
             ScrollView sv = new ScrollView(a);
             sv.setVerticalScrollBarEnabled(false);
@@ -101,29 +107,47 @@ final class Identity {
         }
     }
 
+    /**
+     * 备份 → 校验身份 → 清空本地数据 → 结束进程。备份失败就不动任何数据（只提示）。
+     * 整个过程在后台线程跑，UI 线程只弹提示。
+     */
     static void reset(final Activity a) {
-        try { Backup.make(a, "换身份前"); } catch (Throwable t) { Log.w(Support.TAG, "identity backup", t); }
-        try {
-            SharedPreferences sp = a.getSharedPreferences(a.getPackageName() + ".v2.playerprefs", Context.MODE_PRIVATE);
-            Object old = sp.getAll().get(KEY);
-            SharedPreferences.Editor e = sp.edit();
-            for (String k : sp.getAll().keySet()) if (KEY.equals(k) || KEY.equals(Uri.decode(k))) e.remove(k);
-            if (!e.commit()) throw new Exception("commit failed");
-            if (old != null) {
-                a.getSharedPreferences("elneazh_identity", Context.MODE_PRIVATE).edit()
-                        .putString("prev_" + System.currentTimeMillis(), String.valueOf(old)).commit();
+        Backup.toast(a, "正在备份当前存档…");
+        final Activity act = a;
+        new Thread(new Runnable() { @Override public void run() {
+            Uri bk;
+            try {
+                bk = Backup.backupForIdentity(act);
+            } catch (Throwable t) {
+                Log.e(Support.TAG, "identity backup", t);
+                bk = null;
             }
-        } catch (Throwable t) {
-            Log.e(Support.TAG, "identity reset", t);
-            Backup.toast(a, "更换失败：" + t.getMessage());
-            return;
-        }
-        Backup.toast(a, "已更换游戏身份，请重新打开游戏");
-        try {
-            a.getWindow().getDecorView().postDelayed(new Runnable() {
-                @Override public void run() { kill(a); }
-            }, 1500);
-        } catch (Throwable t) { kill(a); }
+            if (bk == null) {
+                // 备份没成（或备份里没有 uuid/login_key）—— 中止，一个字节都不动
+                final String msg = "备份失败，未更换（当前存档原样保留）";
+                Log.e(Support.TAG, "identity: aborted, data untouched");
+                try {
+                    act.getWindow().getDecorView().post(new Runnable() { @Override public void run() {
+                        Backup.toast(act, msg);
+                    }});
+                } catch (Throwable t) { Backup.toast(act, msg); }
+                return;
+            }
+            try {
+                Backup.wipeForIdentity(act, bk);
+                Log.i(Support.TAG, "identity: wiped, restarting");
+            } catch (Throwable t) {
+                Log.e(Support.TAG, "identity wipe", t);
+                Backup.toast(act, "清空存档失败，已保留备份：" + t.getMessage());
+                return;
+            }
+            Backup.toast(act, "已换成新身份，请重新打开游戏");
+            try {
+                act.getWindow().getDecorView().postDelayed(new Runnable() {
+                    @Override public void run() { kill(act); }
+                }, 2000);
+            } catch (Throwable t) { kill(act); }
+        }}).start();
     }
 
     private static void kill(Activity a) {
