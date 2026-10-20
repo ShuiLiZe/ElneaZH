@@ -2,6 +2,47 @@
 
 > 这是给"接手的人或下一次会话"的交付文件：项目现在做到哪、怎么继续。每次有进展都会更新。
 
+## 2026-10-21 07:10 单机模式的联网/付费入口改成「直接隐藏」（Hark 审查 1faeed8 的修正）
+
+**改了什么**：06:15 版是「入口照常显示 + 原生层置成不可用（变灰）」。Hark 审查指出这不符合
+用户最终口径 —— 单机时联网/付费入口要**直接去掉：不显示、不置灰、不弹提示**。这一版全改：
+
+1. **BUTTON 族**（34 个 `*ButtonClick`）：单机时**原回调一行都不跑**，并把入口对象
+   `SetActive(false)` 再藏一次；不再调 `set_interactable`（入口已不可见，这层是双保险）。
+2. **HIDE 族**（原 FLAG 族，`TARGET_FLAG`→`TARGET_HIDE`，编号仍是 5）：`MenuCell.set_EnableFlag`/
+   `set_ActiveFlag`/`set_IsActive`/`set_Visible`/`set_Alpha`/`SetActiveSelf`、
+   `InfoMenuPanel.set_isActiveCheckBrokenPanelButton` —— **先跑原方法**（不打断游戏自己的显隐判断），
+   紧接着 `get_gameObject().SetActive(false)`，再让所在 Grid/Table `Reposition()`（解析得到才调，
+   避免留个空洞）。不再改 `EnableFlag`/`ActiveFlag` 的字段值。
+3. **GATE 族**（47 个 `Add*Panel`）：**工厂照跑、绝不返回 NULL**（调用方会立刻用返回值），
+   造出来的面板立刻用面板自己的 `CloseAll` → `CloseButtonClick` → `SetActive(false)` 收掉，
+   不留一个打不开又关不掉的灰面板。
+4. **关单机后恢复**：所有族回原样转发/执行、不再隐藏，下次界面重建时入口自然回来。
+   不主动 `SetActive(true)`，避免和游戏自己的显隐逻辑打架。
+
+**新增 native 工具函数**（`native/elneagate/eg_offline.c`）：
+`eg_hide_object()`（`Component.get_gameObject()` → `GameObject.SetActive(false)`，退 `set_active`/`set_visible`）、
+`eg_close_panel()`（`CloseAll` → `CloseButtonClick` → 隐藏）、`eg_relayout()`（Grid/Table `Reposition`）。
+全部走 `eg_invoke`（`il2cpp_object_get_class` 从实例拿类 + 按名解析），解析不到就静默跳过。
+**没有任何置灰调用**：`set_interactable` / `set_PanelEnabled` 从代码与名单里删除。
+`armv7` 分支的 `eg_dispatch` 标了 `__attribute__((unused))`，编译无噪音。
+
+**先合并了 `fix/anti-flag`**：`git fetch origin 5b1fe59` → merge 进 `feat/offline-share`
+（`5b1fe59 ci: 测试分支自动发布非 latest 预发布（test-antiflag / test-offline）`）。
+唯一冲突 `.github/workflows/build-check.yml`：两边步骤全留，取 anti-flag 版的
+「Publish test prerelease」步骤（`feat/offline-share` → tag `test-offline` 预发布）。
+
+**离线验证**：`verify_offline.py` 165→**172 项**（新增/改成：不出现 `set_interactable`、
+不出现 `PanelEnabled`、必须用 `SetActive`、GATE 必须用 `CloseAll`、隐藏后 `Reposition`、
+native 有 `EG_TARGET_HIDE` 且不再有 `EG_TARGET_FLAG`）；
+`OfflineTest` 198→**200 项**（`TARGET_HIDE=5`、`hideTable` 断言、按钮族不含 `interactable`）；
+`verify_gate.py` 的日志字符串改成新的六条；`build_gate.py` 双 ABI 成功
+（arm64 strip 后 55,448 B / armeabi-v7a 20,076 B）；CI 同款 `javac -Xlint:all --release 8`
+全 inj 源通过（仅已知 `overridePendingTransition` deprecation）+ `d8 --min-api 21`
+→ classes.dex **126,368 B**；`manifest_zh.py` 往返 `manifest ok 32056`。
+
+**没变**：HTTP 族不伪造回包、资源下载放行（边玩边下照旧）、分享/导出三功能。
+
 ## 2026-10-21 06:15 单机模式改成六族 native 钩子：入口照常显示但置成不可用
 
 **为什么改**：05:55 那版把 `Add*Panel` 一律 `return NULL`。玩家的反馈口径是「提示单机模式不可用」，

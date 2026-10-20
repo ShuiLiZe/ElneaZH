@@ -83,7 +83,7 @@ final class SelfCheck {
             r.append("offline native gate entries: ").append(OfflineGate.countLines(OfflineGate.gateTable())).append('\n');
             r.append("offline native panel entries: ").append(OfflineGate.countLines(OfflineGate.panelTable())).append('\n');
             r.append("offline native http entries: ").append(OfflineGate.countLines(OfflineGate.httpTable())).append('\n');
-            r.append("offline native flag entries: ").append(OfflineGate.countLines(OfflineGate.flagTable())).append('\n');
+            r.append("offline native hide entries: ").append(OfflineGate.countLines(OfflineGate.hideTable())).append('\n');
             r.append("offline native mask entries: ").append(OfflineGate.countLines(OfflineGate.masksTable())).append('\n');
             r.append("share: ").append(Share.describe()).append('\n');
             r.append("name table lines: ").append(Share.nameTableText(NameFix.aliasSnapshot()).split("\n").length).append('\n');

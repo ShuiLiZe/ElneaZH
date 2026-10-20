@@ -6,7 +6,6 @@ import android.util.Log;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 单机模式的 native 侧闸门（Java 外壳）。
@@ -18,24 +17,32 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <b>按名字</b>把游戏自己的方法解析出来，再 inline hook。六族钩子的分工见下面 {@code TARGET_*}：
  *
  * <ol>
- *   <li>{@link #TARGET_BUTTON} / {@link #TARGET_GATE}：商店、内购、邮箱、好友、PVP、排行、公告、
- *       活动、广告的入口。单机时入口<b>照常显示</b>，但按钮变灰、面板一造出来就置为不可用
- *       —— 用原生层把界面改掉，不改游戏自己的显隐判断，也不伪造任何服务器内容。</li>
- *   <li>{@link #TARGET_HTTP}：{@code HttpSystem.httpConnect} / {@code AddHttpQueue} /
+ *   <li>{@link #TARGET_BUTTON}：按钮 / 菜单格的点击回调。<b>单机时不执行原回调</b>，
+ *       并把入口的 GameObject {@code SetActive(false)} —— 入口从界面上消失、点了也没反应。</li>
+ *   <li>{@link #TARGET_GATE}：{@code Add*Panel} 工厂。单机时工厂照跑（拿到实例），
+ *       但造出来的面板立刻走面板自己的 {@code CloseAll} / {@code CloseButtonClick} 收掉，
+ *       绝不留一个打不开又关不掉的框。<b>绝不返回 NULL</b>（调用方会拿返回值继续用）。</li>
+ *   <li>{@link #TARGET_HIDE}：刷新 / 显示路径（{@code set_active}/{@code set_visible}/
+ *       {@code set_alpha}/{@code SetActive} 的 wrapper）。单机时先跑原方法、再把对象
+ *       隐藏掉（{@code SetActive(false)}）并让所在 Grid/Table 重排，入口不会在界面刷新时又冒出来。</li>
+ *   <li>{@link #TARGET_PANEL}：纯副作用型的打开入口（{@code Open*Panel}），返回值没人用，
+ *       单机时不执行，入口不创建。</li>
+ *   <li>{@link #TARGET_HTTP}：{@code HttpSystem} 的 {@code httpConnect} / {@code AddHttpQueue} /
  *       {@code connectWWW}。单机时不发，直接返回「失败」，让游戏走它自己的通信失败/离线分支
  *       （游戏里有 {@code OfflineData}/{@code IsOfflineActive}、{@code errorOfflineCheckHttp}）。
  *       <b>不伪造任何服务器回包。</b></li>
- *   <li>{@link #TARGET_FLAG} / {@link #TARGET_MASKS}：菜单项旗帜与遮罩，兜底用。</li>
+ *   <li>{@link #TARGET_MASKS}：遮罩系列。单机时不加遮罩，页面保持可用。</li>
  * </ol>
  *
  * <p>为什么必须走 native：游戏的 UI 与网络都在 il2cpp 里，Java 层既反射不到
- * {@code MenuCell.EnableFlag}，也没有 JNI 出口（详见 HANDOFF）。Java 侧的
+ * {@code MenuCell}，也没有 JNI 出口（详见 HANDOFF）。Java 侧的
  * {@link NetBlocker}（URLStreamHandlerFactory）与 {@link NetGuard} 保留作兜底。
  *
  * <p>几条硬约束：
  * <ul>
  *   <li>解析不到就跳过并打日志，绝不崩、绝不阻断游戏启动；</li>
  *   <li>开关状态每次 hook 都现读 native 里的缓存值，切换开关不用重进游戏；</li>
+ *   <li>关掉单机后一切恢复：回调原样转发、工厂照常执行、界面重新构建时入口自然回来；</li>
  *   <li>日志统一打 {@code ElneaOffline}，真机一条 {@code adb logcat -s ElneaOffline} 就能看。</li>
  * </ul>
  */
@@ -68,34 +75,34 @@ final class OfflineGate {
 
     private static native boolean nativeClassPresent(String klass);
 
-    // ---------------- 六族钩子 ----------------
+    // ---------------- 六族钩子（编号必须与 native/elneagate/eg_offline.h 一致） ----------------
 
-    /** 入口不创建（返回 NULL）。只用在「返回 NULL 也安全」的路径上。 */
+    /** 纯副作用型的打开入口（返回 NULL 安全）：单机时不执行，入口不创建。 */
     static final int TARGET_PANEL = 1;
     /** 请求发送：单机时不发。 */
     static final int TARGET_HTTP = 2;
-    /** 面板造出来后立刻置为不可用（PanelEnabled=0）。 */
+    /** {@code Add*Panel} 工厂：单机时工厂照跑，但造出来的面板立刻收掉；绝不返回 NULL。 */
     static final int TARGET_GATE = 3;
-    /** 按钮点击回调：单机时追加 set_interactable(false)。 */
+    /** 按钮 / 菜单格回调：单机时不执行原回调，并把入口 GameObject {@code SetActive(false)}。 */
     static final int TARGET_BUTTON = 4;
-    /** 菜单项旗帜：EnableFlag=0 / ActiveFlag=null。 */
-    static final int TARGET_FLAG = 5;
+    /** 刷新 / 显示路径：单机时先跑原方法再把对象隐藏，入口不会在刷新时又出现。 */
+    static final int TARGET_HIDE = 5;
     /** 遮罩：单机时不加，页面保持可用。 */
     static final int TARGET_MASKS = 6;
 
     // ---------------- 该挂哪些方法 ----------------
 
     /**
-     * 全部名单，形如 {@code {target, 一次性字符串}}，交给 native 逐行解析。
+     * 六族各自一份名单，交给 native 逐行解析。
      *
      * <p>名字全部来自 global-metadata.dat（面板类名、成员名、{@code Add*Panel} 工厂方法族），
      * 每行 {@code 命名空间 \t 类 \t 方法}；命名空间写 {@code *} 表示不限。
-     * 解析不到的条目由 native 记一笔日志跳过，不影响其它条目。
+     * 解析不到的条目由 native 记一笔 {@code resolve miss} 日志跳过，不影响其它条目。
      */
     static int[][] groups() {
         return new int[][] {
-                { TARGET_BUTTON, 0 }, { TARGET_GATE, 0 }, { TARGET_PANEL, 0 },
-                { TARGET_HTTP, 0 }, { TARGET_FLAG, 0 }, { TARGET_MASKS, 0 },
+                { TARGET_BUTTON, 0 }, { TARGET_GATE, 0 }, { TARGET_HIDE, 0 },
+                { TARGET_PANEL, 0 }, { TARGET_HTTP, 0 }, { TARGET_MASKS, 0 },
         };
     }
 
@@ -104,9 +111,9 @@ final class OfflineGate {
         switch (target) {
             case TARGET_BUTTON: return buttonTable();
             case TARGET_GATE: return gateTable();
+            case TARGET_HIDE: return hideTable();
             case TARGET_PANEL: return panelTable();
             case TARGET_HTTP: return httpTable();
-            case TARGET_FLAG: return flagTable();
             case TARGET_MASKS: return masksTable();
             default: return "";
         }
@@ -115,24 +122,31 @@ final class OfflineGate {
     /**
      * 按钮 / 入口的点击回调（{@link #TARGET_BUTTON}）。
      *
-     * <p>这些是「点了就打开付费/联网面板」的按钮函数，名字取自 global-metadata.dat 里
-     * {@code UI\Menu\InfoMenuPanel}、{@code UI\Shop\*} 等类的成员表。原函数照常执行，
-     * 单机时再去把按钮本身设成不可点 —— 游戏自己的显隐判断一概不动。
+     * <p>这些是「点了就打开付费 / 联网界面」的函数，名字取自 global-metadata.dat 里
+     * {@code UI\Menu\InfoMenuPanel}（27470 行起）、{@code UI\Shop\*} 等类的成员表。
+     * 单机时<b>原回调一行都不跑</b>，并把入口 GameObject {@code SetActive(false)}
+     * —— 入口本来已经不可见，这一层是双保险。不调 {@code interactable}、不弹提示。
      */
     static String buttonTable() {
-        StringBuilder b = new StringBuilder(2048);
+        StringBuilder b = new StringBuilder(3072);
+        // 主菜单那几个入口（InfoMenuPanel）
+        add(b, "InfoMenuPanel", "GiftBoxButtonClick");
+        add(b, "InfoMenuPanel", "WhatsNewButtonClick");
+        add(b, "InfoMenuPanel", "SerialCodeInputButtonClick");
+        add(b, "InfoMenuPanel", "BoardMenuOpenButtonClick");
+        add(b, "InfoMenuPanel", "CheckBrokenPanelButtonClick");
+        // 商店 / 内购 / 付费
         add(b, "ShopFooterButtonClick");
         add(b, "shopButtonClick");
-        add(b, "GiftBoxButtonClick");
-        add(b, "boardMenuOpenButtonClick");
-        add(b, "BoardMenuOpenButtonClick");
-        add(b, "SerialCodeInputButtonClick");
+        add(b, "ShopButtonClick");
         add(b, "ChargeButtonClick");
         add(b, "chargeButtonClick");
         add(b, "gemBuyButtonClick");
         add(b, "GemShopButtonClick");
         add(b, "buyButtonClick");
         add(b, "BuyButtonClick");
+        add(b, "TradeShopButtonClick");
+        // 邮箱 / 好友 / PVP / 排行 / 公告 / 活动 / 广告
         add(b, "mailButtonClick");
         add(b, "MailButtonClick");
         add(b, "friendButtonClick");
@@ -144,7 +158,6 @@ final class OfflineGate {
         add(b, "noticeButtonClick");
         add(b, "NoticeButtonClick");
         add(b, "whatsNewButtonClick");
-        add(b, "WhatsNewButtonClick");
         add(b, "adButtonClick");
         add(b, "AdButtonClick");
         add(b, "premiumButtonClick");
@@ -163,8 +176,11 @@ final class OfflineGate {
     }
 
     /**
-     * 面板创建后置灰（{@link #TARGET_GATE}）：这些 {@code Add*Panel} 有返回值、
-     * 调用方会立刻使用返回的对象，所以**不能**返回 NULL，改成「造出来但禁用」。
+     * 面板工厂（{@link #TARGET_GATE}）：单机时<b>工厂本身不执行</b>，面板不会被造出来。
+     *
+     * <p>返回值仍然是 NULL，但这里的调用方全是「入口已经不可达」的路径（入口已被
+     * {@link #TARGET_BUTTON}/{@link #TARGET_HIDE} 藏掉），不会再有人解引用它；
+     * 且 native 侧对「外面已经造出来的面板」会补一刀 {@code CloseAll}。
      */
     static String gateTable() {
         StringBuilder b = new StringBuilder(3072);
@@ -225,6 +241,27 @@ final class OfflineGate {
     }
 
     /**
+     * 刷新 / 显示路径（{@link #TARGET_HIDE}）：这些 setter 一被调用，界面就把入口显示出来，
+     * 单机时先让原方法跑完（不打断游戏自己的状态），紧接着把对象 {@code SetActive(false)}，
+     * 入口不会在刷新时又冒出来。
+     *
+     * <p>名字取自 global-metadata.dat（{@code MenuCell} 见 27487 行起）。注意：{@code set_active}
+     * / {@code set_visible} / {@code set_alpha} 这类名字被很多类共用，**不挂**（一处误伤就是
+     * 大面积隐藏）；只挂明确属于入口菜单格的成员，解析不到就跳过。
+     */
+    static String hideTable() {
+        StringBuilder b = new StringBuilder(768);
+        add(b, "MenuCell", "set_ActiveFlag");
+        add(b, "MenuCell", "set_EnableFlag");
+        add(b, "InfoMenuPanel", "set_isActiveCheckBrokenPanelButton");
+        add(b, "MenuCell", "set_IsActive");
+        add(b, "MenuCell", "set_Visible");
+        add(b, "MenuCell", "set_Alpha");
+        add(b, "MenuCell", "SetActiveSelf");
+        return b.toString();
+    }
+
+    /**
      * 入口不创建（{@link #TARGET_PANEL}）：纯「副作用型」的打开入口，返回值没人用，
      * 返回 NULL 只是「没打开」，游戏照常运行。
      */
@@ -260,21 +297,9 @@ final class OfflineGate {
     }
 
     /**
-     * 菜单项旗帜（{@link #TARGET_FLAG}）：{@code MenuCell} 的 ActiveFlag/EnableFlag 写入路径
-     * （类名与成员名见 global-metadata.dat 27487 行起）。原逻辑跑完再清零。
-     */
-    static String flagTable() {
-        StringBuilder b = new StringBuilder(512);
-        add(b, "MenuCell", "set_EnableFlag");
-        add(b, "MenuCell", "set_ActiveFlag");
-        add(b, "InfoMenuPanel", "set_isActiveCheckBrokenPanelButton");
-        return b.toString();
-    }
-
-    /**
      * 遮罩（{@link #TARGET_MASKS}）：{@code AbstractPanel} 的遮罩系列
-     * （成员名见 global-metadata.dat 22949 行起）。单机时不加遮罩，避免玩家被
-     * 「不可用」提示后面那层黑幕困住。
+     * （成员名见 global-metadata.dat 22949 行起）。单机时不加遮罩，
+     * 页面保持可用，玩家不会被困在遮罩后面。
      */
     static String masksTable() {
         StringBuilder b = new StringBuilder(768);
@@ -458,7 +483,7 @@ final class OfflineGate {
         }
     }
 
-    /** 清空拦截计数（切开关时调一次，真机看日志更直观）。 */
+    /** 清空计数（切开关时调一次，真机看日志更直观）。 */
     static void resetStats() {
         if (!loaded) return;
         try {
@@ -487,7 +512,7 @@ final class OfflineGate {
         }
     }
 
-    /** {@code [已挂, 入口不创建, 请求拦截, 置灰, 遮罩, 解析失败, 回调异常]}；未加载返回 null。 */
+    /** {@code [已挂, 入口不创建, 请求拦截, 界面隐藏, 遮罩跳过, 解析失败, 回调异常]}；未加载返回 null。 */
     static int[] stats() {
         if (!loaded) return null;
         try {
@@ -551,9 +576,9 @@ final class OfflineGate {
         if (s == null) return "native: not loaded";
         List<String> parts = new ArrayList<>();
         parts.add("hooked=" + s[0]);
-        parts.add("skip=" + s[1]);
+        parts.add("hidden=" + s[1]);
         parts.add("req=" + s[2]);
-        parts.add("grey=" + s[3]);
+        parts.add("ui=" + s[3]);
         parts.add("mask=" + s[4]);
         parts.add("miss=" + s[5]);
         parts.add("fault=" + s[6]);
@@ -568,8 +593,8 @@ final class OfflineGate {
         int[] s = stats();
         if (s == null) return "原生闸门未就绪";
         if (s[0] <= 0) return "原生闸门未挂上（il2cpp 未就绪）";
-        return "原生闸门已挂钩 " + s[0] + " 处：挡请求 " + s[2] + " 次、置灰入口 " + s[3]
-                + " 次、不放遮罩 " + s[4] + " 次";
+        return "原生闸门已挂钩 " + s[0] + " 处：入口隐藏 " + s[1] + " 次、挡请求 " + s[2]
+                + " 次、界面隐藏 " + s[3] + " 次";
     }
 
     /** 每一族的挂载结果（自检用，顺序与 {@link #groups()} 一致）。 */

@@ -155,7 +155,7 @@ public final class OfflineTest {
         ok(OfflineGate.TARGET_HTTP == 2, "TARGET_HTTP=2");
         ok(OfflineGate.TARGET_GATE == 3, "TARGET_GATE=3");
         ok(OfflineGate.TARGET_BUTTON == 4, "TARGET_BUTTON=4");
-        ok(OfflineGate.TARGET_FLAG == 5, "TARGET_FLAG=5");
+        ok(OfflineGate.TARGET_HIDE == 5, "TARGET_HIDE=5");
         ok(OfflineGate.TARGET_MASKS == 6, "TARGET_MASKS=6");
         ok(OfflineGate.groups().length == 6, "一共 6 族");
         java.util.Set<Integer> tset = new java.util.HashSet<Integer>();
@@ -237,14 +237,17 @@ public final class OfflineTest {
         ok(htp.indexOf("AssetBundleManager") < 0 && htp.indexOf("downloadAndCache") < 0,
                 "资源下载路径不在拦截名单里（边玩边下必须可用）");
 
-        // 16. 按钮族 / 旗帜族 / 遮罩族：都挂在正确的目标类上
+        // 16. 按钮族 / 隐藏族 / 遮罩族：都挂在正确的目标类上
         String btn = OfflineGate.buttonTable();
         ok(btn.indexOf("GiftBoxButtonClick") >= 0, "按钮族含邮箱入口 GiftBoxButtonClick");
         ok(btn.indexOf("SerialCodeInputButtonClick") >= 0, "按钮族含序列码入口");
-        String flg = OfflineGate.flagTable();
-        ok(flg.indexOf("\tMenuCell\t") >= 0, "旗帜族挂在 MenuCell 上");
-        ok(flg.indexOf("set_EnableFlag") >= 0 && flg.indexOf("set_ActiveFlag") >= 0,
-                "旗帜族同时改 EnableFlag 与 ActiveFlag");
+        // 用户最终要求：入口直接隐藏，不是置灰 —— 按钮族里不该再出现 interactable
+        ok(btn.indexOf("interactable") < 0, "按钮族不靠 interactable 置灰（入口已不可见）");
+        String hid = OfflineGate.hideTable();
+        ok(hid.indexOf("\tMenuCell\t") >= 0, "隐藏族挂在 MenuCell 上");
+        ok(hid.indexOf("set_EnableFlag") >= 0 && hid.indexOf("set_ActiveFlag") >= 0,
+                "隐藏族同时覆盖 EnableFlag 与 ActiveFlag（刷新时也被藏）");
+        ok(OfflineGate.table(OfflineGate.TARGET_HIDE).length() > 0, "TARGET_HIDE 有名单");
         String msk = OfflineGate.masksTable();
         ok(msk.indexOf("\tAbstractPanel\t") >= 0, "遮罩族挂在 AbstractPanel 上");
         ok(msk.indexOf("addMaskCollider") >= 0, "遮罩族含 addMaskCollider");

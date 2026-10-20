@@ -1,50 +1,66 @@
 # HANDOFF — 现状（只写当前状态；过程见 docs/CHANGELOG.md，规矩见 AGENTS.md）
 
-_最后更新：2026-10-21 06:15 CST_
+_最后更新：2026-10-21 07:10 CST_
 
-## 2026-10-21 06:15 单机模式：六族 native 钩子，联网/付费入口照常显示但置成不可用（待真机验证）
+## 2026-10-21 07:10 单机模式：联网/付费入口**直接隐藏**（六族 native 钩子，待真机验证）
 
-上一版（05:55）只挂两族：`Add*Panel` 直接返回 NULL（入口**不创建**）、`HttpSystem` 请求返回 0。
-问题很明显：**返回 NULL 的入口一旦被调用方解引用就会空引用**，而「入口整个消失」也不符合
-「提示单机模式不可用」的要求。这一版改成六族，**入口照常显示、在原生层置成不可用**。
+用户最终定调：单机时联网与付费入口**直接去掉——不显示、不置灰、不弹提示**。
+上一版（06:15）挂上去之后是把入口"置成不可用（变灰）"，不符合要求，已按下面改成隐藏。
+「入口返回 NULL 会空指针」的顾虑仍然成立，所以这一版**不出 NULL、不去设灰**，只做隐藏。
 
 ### 六族钩子（编号 = Java `OfflineGate.TARGET_*` = C `EG_TARGET_*`，两处必须一致）
 
 | # | 名字 | 挂什么 | 单机时怎么做 |
 |---|------|--------|--------------|
-| 1 | PANEL | 纯「打开面板」的入口（`OpenShopPanel` 等 12 条） | 返回 NULL，入口不创建（返回值没人用） |
+| 1 | PANEL | 纯「打开面板」的入口（`OpenShopPanel` 等） | 不执行，返回 NULL（返回值没人用） |
 | 2 | HTTP | `HttpSystem.httpConnect`/`connectWWW`/`AddHttpQueue`/`StartHttpQueue`/`UpdateUserInfoPair` | 返回 0，一个字节都不发，交给游戏自己的通信失败/离线分支 |
-| 3 | GATE | 47 个 `Add*Panel` 工厂（商店/内购/邮箱/好友/PVP/排行/公告/活动/广告…） | 面板照常创建，创建后立刻 `set_PanelEnabled(false)` |
-| 4 | BUTTON | 34 个 `*ButtonClick` 入口回调 | 原函数照常跑（不改游戏自己的显隐判断），再 `set_interactable(false)` |
-| 5 | FLAG | `MenuCell.set_EnableFlag`/`set_ActiveFlag`、`InfoMenuPanel.set_isActiveCheckBrokenPanelButton` | 原逻辑跑完后 EnableFlag=0、ActiveFlag=null |
-| 6 | MASKS | `AbstractPanel.addMaskCollider*`/`addNowLoadingPanel` | 不加遮罩，玩家不会被困在提示后面那层黑幕里 |
+| 3 | GATE | 47 个 `Add*Panel` 工厂 | 工厂照跑（拿到实例，**绝不返回 NULL**），造出来的面板立刻用面板自己的 `CloseAll` → `CloseButtonClick` → `SetActive(false)` 收掉 |
+| 4 | BUTTON | 34 个 `*ButtonClick` 入口回调 | **原回调一行都不跑**，并再 `SetActive(false)` 一次（入口本该已不可见，这是双保险）；不调 `interactable`、不弹提示 |
+| 5 | HIDE | `MenuCell.set_EnableFlag`/`set_ActiveFlag`/`set_IsActive`/`set_Visible`/`set_Alpha`/`SetActiveSelf`、`InfoMenuPanel.set_isActiveCheckBrokenPanelButton` | **先跑原方法**（不打断游戏自己的状态），紧接着 `GetComponent.gameObject.SetActive(false)` + 让所在 Grid/Table `Reposition()`（解析得到才调） |
+| 6 | MASKS | `AbstractPanel.addMaskCollider*`/`addNowLoadingPanel` | 不加遮罩，玩家不会被困在黑幕后面 |
 
-**为什么不用「全部返回 NULL」**：`Add*Panel` 的返回值调用方会立刻使用（`var p = AddMailPanel(...)`），
-返回 NULL 就是空指针；而 `set_PanelEnabled(false)` 是面板自己的开关，对象合法存在、内部按钮全禁用，
-崩不了。这条是本版最重要的设计判断。
+**隐藏而不是置灰**：入口对象走 `Component.get_gameObject()` → `GameObject.SetActive(false)`；
+退一步 `set_active` / `set_visible`。**不再有任何 `set_interactable` / `set_PanelEnabled` 调用**
+（`verify_offline.py` 有断言钉住这两者不出现，见下）。
+
+**为什么 GATE 不返回 NULL**：`Add*Panel` 的返回值调用方会立刻使用（`var p = AddMailPanel(...)`），
+返回 NULL 就是空指针。所以 GATE 走「照跑 + 立刻收掉」，且收的方法优先用**面板自己的**
+`CloseAll`/`CloseButtonClick`（metadata 22991 行起有 `CloseAll`、`CloseButtonClick`），
+最后才退到 `SetActive(false)` —— 不会留一个打不开又关不掉的框。
 
 ### 怎么做的（`native/elneagate/eg_offline.c`）
 1. `dlsym` 取 `il2cpp_domain_get` → `il2cpp_domain_get_assemblies` → `il2cpp_assembly_get_image`
-   → `il2cpp_class_from_name` → `il2cpp_class_get_method_from_name`；
-   另取 `il2cpp_object_get_class`（**从实例拿类**才能找到 setter，静态类型往往是 `object`）
-   和 `il2cpp_thread_attach`（在非游戏线程调托管方法前必须 attach）。
-2. 遍历所有 assembly 找类（表里命名空间写 `*` 表示不限），按 0..8 个参数依次试解析方法名，
+   → `il2cpp_class_from_name` → `il2cpp_class_get_method_from_name`；另取
+   `il2cpp_object_get_class`（**从实例拿类**才能找到 `get_gameObject`/`SetActive` 这类成员）和
+   `il2cpp_thread_attach`（非游戏线程调托管方法前必须 attach）。
+2. 遍历所有 assembly 找类（命名空间写 `*` 表示不限），按 0..6 个参数依次试解析方法名，
    取 `MethodInfo` 的**第一个字段**当函数地址。
 3. `A64HookFunction` 挂上去；`EG_MAX` 96 个槽，转发函数 `eg_hook_0..95` 用宏生成。
-4. `eg_invoke(self, "set_PanelEnabled", 1, NULL, NULL)` 这种按名字调 setter 的小工具；
-   所有单机时的追加动作都在 `eg_dispatch` 里按 `target_kind` 分派。
+4. 三个隐藏用的小工具：`eg_hide_object`（`SetActive(false)`，退 `set_active`/`set_visible`）、
+   `eg_close_panel`（`CloseAll` → `CloseButtonClick` → 隐藏）、`eg_relayout`（Grid/Table `Reposition`）。
+   不置灰、不写 alpha、不碰 interactable。
 5. 开关值 `'1'/'0'` 由 Java 侧 `push` 灌入、**每次回调现读**，切开关不用重进游戏。
 6. 解析不到的条目：`resolve miss: ...` 打一行日志并跳过，**绝不崩**。
 
-白名单全部在 `inj/.../OfflineGate.java`（`buttonTable()`/`gateTable()`/`panelTable()`/
-`httpTable()`/`flagTable()`/`masksTable()`），改名单只改这一个文件。
+白名单全部在 `inj/.../OfflineGate.java`（`buttonTable()`/`gateTable()`/`hideTable()`/
+`panelTable()`/`httpTable()`/`masksTable()`），改名单只改这一个文件。
 
 ### 接线
 - `ZhInit.onCreate`：`OfflineGate.install(getContext(), 1)`，自己的 try/catch，
   排在 `NameGate.install` / `NetBlocker.install` 之后、`SelfCheck.run` 之前。
 - `Support` 支援弹窗：开关翻转时先 `OfflineGate.push(next)` + `OfflineGate.resetStats()` 再改界面；
-  单机时多一行 `OfflineGate.summary()`（挂了几个点、已挡几次请求/置灰几次入口）。
+  单机时多一行 `OfflineGate.summary()`（挂了几个点、已挡几次请求/隐藏几次入口）。
+  文案写的是「联网/付费入口已隐藏」。
 - `SelfCheck`：`offline native: ...`、`offline native api: n/5`、六族条目数、`offline native per target: [...]`。
+
+### 真机怎么确认生效
+`adb logcat -s ElneaOffline`，认这几条（`verify_gate.py` 在 .so 里钉住了这些字符串）：
+- `offline: skip entry ... (not shown at all)` —— PANEL 族挡了打开入口；
+- `offline: drop request ... (report comm failure)` —— HTTP 族没发请求；
+- `offline: ... skipped (panel not created)` —— GATE 族收面板；
+- `offline: ... blocked (entry hidden=1)` —— BUTTON 族藏掉了入口；
+- `offline: ... hidden on refresh` —— HIDE 族在刷新时又藏了一次（`hidden=0` 说明 `get_gameObject`/`SetActive` 没解析上）；
+- `resolve miss: *	类	方法` —— 该条没解析上（跳过，无害）。
 
 ### 边界（刻意保留的，别改）
 - **不伪造服务器回包**：native 侧没有任何组包/造响应对象的逻辑；`verify_offline.py` 有断言钉住
@@ -54,15 +70,15 @@ _最后更新：2026-10-21 06:15 CST_
 - **资源下载不动**：下载走 `AssetBundleManager`，不带身份信息，边玩边下照旧。
 - **armv7 没有 hook 引擎**（And64InlineHook 只有 AArch64）：armv7 上 `nativeInstall` 返回 -4，
   整族跳过，只剩 Java 层 `NetBlocker` 兜底。真机以 arm64 为准。
+- **关掉单机后恢复**：所有族回原样转发/执行，不再隐藏；下次界面重新构建时入口自然回来。
+  已经在屏幕上的那个界面要重新进一次才回来（我们不主动 `SetActive(true)`，避免和游戏的显隐逻辑打架）。
 
 ### 必须先确认的（真机才知道，我不擅自改）
-1. **`set_PanelEnabled` / `set_interactable` / `set_EnableFlag` 是不是这些类型的真实成员名**：
-   名字全部来自 `global-metadata.dat`（`AbstractPanel` 22949 行起、`MenuCell` 27487 行起），
-   但**能不能在运行期的具体实例上解析到**只有真机日志能确认。
-   看 `adb logcat -s ElneaOffline`：有 `resolve miss: *\tK\tm` 就是该条没解析上（跳过，无害）；
-   有 `greyed`/`made inert`/`built but disabled` 就是生效了。
-2. **置灰后面板是否仍可正常关闭**：`set_PanelEnabled(false)` 会不会让面板连关闭按钮都点不动。
-   若会，把那几个 `Add*Panel` 从 `gateTable()` 移到 `panelTable()`（改成返回 NULL），或直接删掉该条。
+1. **`get_gameObject` / `SetActive` / `CloseAll` / `CloseButtonClick` / `Reposition` 能否在运行期解析到**：
+   名字来自 `global-metadata.dat`（`AbstractPanel` 22949 行起、`MenuCell` 27487 行起），
+   但具体实例上能不能解析只有真机能确认。日志里 `hidden=0` 就说明没解析上。
+2. **GATE 族收面板会不会打断游戏自己的流程**：如果某个面板被收掉后游戏状态异常，
+   把该条从 `gateTable()` 删掉（改由 HIDE/BUTTON 族隐藏入口）即可，不用改代码结构。
 3. **`httpConnect` 的返回值语义**：返回 0 对 `IEnumerator`（协程不跑）/`void`（直接返回）合法，
    对 `bool` 是 false。真机若表现为「一直转圈等网络」，把 `httpTable()` 清空，
    只留 Java 层 `NetBlocker`（`Offline.allowWhileOffline` 那条闸）。
@@ -70,7 +86,7 @@ _最后更新：2026-10-21 06:15 CST_
    那就**不要伪造回包**，改为只挡写操作（`Offline.WRITE` 表里的 `save2`/`save`/`kpi` 等），
    读类放行 —— 这条限制从第一版就写在 `Offline.limits()` 里。
 
-## 2026-10-21 05:55 单机模式改走 native（已被上面 06:15 版取代，只留结论）
+## 2026-10-21 05:55 单机模式改走 native（已被上面 07:10 版取代，只留结论）
 
 事实与 06:15 版相同，不再重复：Java 层反射不到 `MenuCell.EnableFlag`/`AbstractPanel`；
 `libil2cpp.so` 里 grep 不到这些名字（只在 `global-metadata.dat`）；
@@ -118,12 +134,16 @@ Java 层闸门 `NetBlocker`（`URL.setURLStreamHandlerFactory` + `ProxySelector`
 - 导出名字对照表：`elneazh_names` 别名表（中文↔拼音）→ `艾尔尼亚名字对照表.txt` → 分享。
 
 ## 离线验证（CI 里跑，不需要手机）
-- `python tools/verify_offline.py` —— **165 项**源码级护栏（含六族表的格式/互不冲突、
-  资源下载不在拦截名单、不伪造回包的负向断言）。
-- `tools/offline_test/` 的 `OfflineTest`（JDK 直跑）—— **198 项**：六族编号、表格式、
-  去重、交叉冲突、覆盖面、native 未加载时「安静失败不抛」。
+- `python tools/verify_offline.py` —— **172 项**源码级护栏（含六族表的格式/互不冲突、
+  资源下载不在拦截名单、「不置灰（`set_interactable`/`PanelEnabled` 不许出现）」、
+  「必须用 `SetActive` 隐藏」、GATE 必须用 `CloseAll` 收面板、隐藏后必须 `Reposition`、
+  不伪造回包的负向断言）。
+- `tools/offline_test/` 的 `OfflineTest`（JDK 直跑）—— **200 项**：六族编号、表格式、
+  去重、交叉冲突、覆盖面、`TARGET_HIDE` 名单、native 未加载时「安静失败不抛」。
 - `python tools/verify_gate.py` —— .so 里必须含 `ElneaOffline` 标签、7 个 JNI 导出、
-  六族钩子的日志字符串（只在 arm64 检查，armv7 没有 hook 引擎）。
+  六族钩子的日志字符串（`skip entry` / `drop request` / `panel not created` /
+  `blocked (entry hidden=` / `hidden on refresh` / `no mask for`；只在 arm64 检查，
+  armv7 没有 hook 引擎）。
 
 ## 现在能用的版本
 - Release `latest` 的 ElneaZH.apk（每次推送自动构建）。装前先在游戏「Support → 存档数据」备份，卸载原版后安装汉化版（签名不同）。

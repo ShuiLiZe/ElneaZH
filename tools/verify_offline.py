@@ -221,19 +221,20 @@ for name, src in (("ZhInit", zh), ("Support", sup)):
 og = read("OfflineGate.java")
 check("nativeInstall" in og, "OfflineGate 把 hook 安装交给 native")
 check("nativePush" in og, "OfflineGate 把开关状态推给 native（切开关立刻生效，不用重进游戏）")
-for t, msg in ((1, "入口不创建"), (2, "请求拦截"), (3, "面板置灰"), (4, "按钮失效"),
-               (5, "菜单旗帜"), (6, "遮罩")):
-    check(("TARGET_%d" % t) in og or ("TARGET_" + ["", "PANEL", "HTTP", "GATE", "BUTTON",
-                                                   "FLAG", "MASKS"][t]) in og,
+FAMILIES = ["", "PANEL", "HTTP", "GATE", "BUTTON", "HIDE", "MASKS"]
+for t, msg in ((1, "入口不创建"), (2, "请求拦截"), (3, "面板收掉"), (4, "按钮不执行"),
+               (5, "入口隐藏"), (6, "遮罩")):
+    check(("TARGET_%d" % t) in og or ("TARGET_" + FAMILIES[t]) in og,
           "第 %d 族 hook 存在（%s）" % (t, msg))
-for name in ("TARGET_PANEL", "TARGET_HTTP", "TARGET_GATE", "TARGET_BUTTON", "TARGET_FLAG",
+for name in ("TARGET_PANEL", "TARGET_HTTP", "TARGET_GATE", "TARGET_BUTTON", "TARGET_HIDE",
              "TARGET_MASKS"):
     check(name + " = " in og, "常量 %s 有固定值" % name)
-check("set_interactable" in og, "按钮失效走 Unity UI 的 set_interactable")
-# 置灰/失效/变灰用到的 setter 名字：真正的调用在 native 的 eg_invoke/eg_suppress_* 里，
-# Java 侧的表格与文档也要提到同一批名字，两边一旦走偏就静默不生效，这里把它钉住。
-check("PanelEnabled" in og and "EnableFlag" in og and "ActiveFlag" in og,
-      "置灰用到的成员名（PanelEnabled / EnableFlag / ActiveFlag）在 OfflineGate 有据可查")
+# 用户最终要求：入口直接去掉（隐藏），不是置灰。所以这两条反过来钉：
+check("set_interactable" not in og, "不靠 set_interactable 置灰（入口要直接消失）")
+check("PanelEnabled" not in og, "不靠 PanelEnabled 置灰（入口要直接消失）")
+check("SetActive" in og, "隐藏走 GameObject.SetActive(false)（入口直接消失）")
+check("EnableFlag" in og and "ActiveFlag" in og,
+      "菜单格的 EnableFlag / ActiveFlag 仍在 HIDE 族名单里（刷新时也被藏掉）")
 for bad in ("il2cpp_object_new", "il2cpp_string_new"):
     check(bad not in og, "OfflineGate 侧也不造任何服务器对象（无 %s）" % bad)
 for panel in ("AddShopPanel", "AddMailPanel", "AddFriendListPanel", "AddPvpPreparePanel",
@@ -280,8 +281,18 @@ if eg:
     check("if (!orig) return NULL" in eg or "!orig" in eg,
           "没挂上就原样返回（绝不拿空指针去调）")
     for t in ("EG_TARGET_PANEL", "EG_TARGET_HTTP", "EG_TARGET_GATE", "EG_TARGET_BUTTON",
-              "EG_TARGET_FLAG", "EG_TARGET_MASKS"):
+              "EG_TARGET_HIDE", "EG_TARGET_MASKS"):
         check(t in eg, "native 有 %s 分支" % t)
+    check("EG_TARGET_FLAG" not in eg,
+          "native 不再有置灰族 EG_TARGET_FLAG（改成隐藏）")
+    check("eg_hide_object" in eg and "\"SetActive\"" in eg,
+          "native 用 GameObject.SetActive 隐藏入口")
+    check("eg_close_panel" in eg and "\"CloseAll\"" in eg,
+          "GATE 兜底用面板自己的 CloseAll 收掉")
+    check("eg_relayout" in eg and "\"Reposition\"" in eg,
+          "隐藏后顺手让 Grid/Table 重排（解析不到就跳过）")
+    check("__attribute__((unused))\nstatic void *eg_dispatch" in eg,
+          "eg_dispatch 在 armv7 分支标 unused（编译无噪音）")
     check("il2cpp_object_get_class" in eg, "native 用 il2cpp_object_get_class 从实例拿类再找 setter")
     check("il2cpp_thread_attach" in eg, "调托管方法前先 attach 到 il2cpp 线程")
     check("eg_is_off()" in eg, "每次回调都现读开关（切开关立刻生效）")

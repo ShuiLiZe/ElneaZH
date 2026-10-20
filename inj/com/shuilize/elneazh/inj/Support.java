@@ -277,7 +277,7 @@ final class Support {
                             dl.setText(blocked);
                         }
                     }
-                    Toast.makeText(a, next ? "单机模式已开启：联网入口全部置灰，请求不发出去"
+                    Toast.makeText(a, next ? "单机模式已开启：联网/付费入口已隐藏，请求不发出去"
                                     : "单机模式已关闭：恢复正常联网",
                             Toast.LENGTH_SHORT).show();
                 } catch (Throwable t) {
@@ -302,7 +302,7 @@ final class Support {
             b.append("带账号/设备信息的接口（登录、存档、排行、邮件等）全部在本机被接住，不发出去。");
             b.append('\n').append("资源与扩展包边走边下不受影响：这条下载路径不带任何身份信息。");
             b.append('\n').append("游戏内商店、邮箱、好友、PVP、排行、公告、活动、广告的入口"
-                    + "照常显示，但在原生层被置成不可用（变灰、点不开），不发任何请求。");
+                    + "在原生层被直接隐藏、点了也不执行，不发任何请求。关掉单机后重新进界面就回来。");
             try {
                 String gate = OfflineGate.summary();
                 if (gate.length() > 0) b.append('\n').append(gate).append('。');

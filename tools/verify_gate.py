@@ -326,8 +326,8 @@ def main():
             # 六族钩子的日志：真机上靠这几条判断「哪一族挂上了」
             # 只在 arm64-v8a 上检查 —— armv7 没有 hook 引擎，eg_dispatch 会被优化掉。
             if abi == "arm64-v8a":
-                for tag in (b"skip panel entry", b"drop request", b"built but disabled",
-                            b"made inert", b"greyed", b"no mask for"):
+                for tag in (b"skip entry", b"drop request", b"panel not created",
+                            b"blocked (entry hidden=", b"hidden on refresh", b"no mask for"):
                     check(tag in data, "%s 含钩子日志 %r" % (abi, tag.decode()))
                 check(b"resolve miss" in data, "%s 含解析失败日志" % abi)
                 check(b"install: target=" in data, "%s 含安装汇总日志" % abi)
