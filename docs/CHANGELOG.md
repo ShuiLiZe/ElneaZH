@@ -1,3 +1,25 @@
+## 2026-10-21 18:55 第二轮：真机 logcat 钉死的两条硬伤（40 次等库 / base=0 解引用）
+
+拿到 OnePlus Android 16 arm64 完整 logcat（pid 8974），黑屏与随后的进程退出各有明确来源：
+17:17:20.184 我们 `40x500ms` 用光放弃，21.072 Unity 才 `dlopen` libil2cpp；
+21.219 Unity 崩溃处理器抓到 `ElneaOffline-in` 线程 **SIGSEGV / SEGV_MAPERR**，x0=0、
+x25=`0x18ad7e4`（EncryptRJ256 偏移）= base 为 0 时仍算 base+offset。Unity 接住了异常，
+所以没有 tombstone。
+
+- 等待改为「**等到 libil2cpp 出现为止**」：`WAIT_IL2CPP_MS=120_000L`、`RETRY_MS=200`、
+  `MAX_TRIES=600`，全程后台线程；`OfflineGate.INSTALL_WINDOW_MS` 30s。
+- 基址共享一份解析结果：`eg_sym.eg_lib_base()` 首选 `dl_iterate_phdr`（按 `libil2cpp.so`），
+  maps 兜底并缓存；`eg_offline.c` 不再自己读 maps。
+- base==0 / 槽 NULL / 目标不在可读映射 → 直接 return + 记日志，绝不解引用
+  （`eg_of_install` 头判 `eg_lib_present()`，enc fallback 判 `eg_find_base()` 与 `eg_mem_ok()`）。
+- 阶段日志补齐（ElneaGate，I 级，线程名/tid/单调 ms）：JNI_OnLoad 进出、installer 线程、
+  每次等库轮询、每个 class/method 解析前后、每个 hook 写槽前后与耗时。
+- 「关单机 = 只做拼音闸门」本地可复现：`OfflineGate.table()` 关单机时全空、
+  `encGateOnly()` 断言；`NativeGateTest` 34 → 40 项。
+- `verify_native_nonblock.py` 加第 8 节 12 条（含「主入口不许 sleep/await/join」）；
+  顺带修好 `--verbose` 不打印。
+- `ci_inj.py` 抓到 `NameGate` 常量前向引用（只有 android.jar 全量 javac 才报），已修。
+
 ## 2026-10-21 17:45 真机黑屏：主线程被 native 链卡住（修根因 + crash guard + 阶段日志）
 
 真机（OnePlus Android 16 arm64 PAC）：**单机开、单机关都黑屏**，过一会儿进程退出；

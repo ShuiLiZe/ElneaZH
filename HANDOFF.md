@@ -1,8 +1,69 @@
 # HANDOFF —— 现状（只写当前状态；过程见 docs/CHANGELOG.md，规则见 AGENTS.md）
 
-_最后更新：2026-10-21 17:45 CST_
+_最后更新：2026-10-21 18:55 CST_
 
-## 2026-10-21 17:45 真机黑屏事故：主线程被 native 链卡住（本提交修）
+## 2026-10-21 18:55 第二轮：按真机完整 logcat 定位的两条硬伤（c209de4 / ac590bd / 0e01a45）
+
+第一轮（17:45 那节）改的是「主线程被拖住」的结构，但真机仍然黑屏。拿到完整 logcat 后，
+病根被钉死在两处 —— 两处都在下面这节里写清楚，**别再改回去**。
+
+### 真机时间线（pid 8974，OnePlus Android 16 arm64）
+
+| 时刻 | 事件 |
+|------|------|
+| 17:17:00.427 | 进程启动，**之后主线程 20 秒没有任何日志** |
+| 17:17:06 | 系统 `Requested dump` —— 这就是黑屏（ANR 预警） |
+| 17:17:20.184 | `ElneaGate: il2cpp_string_new unresolved after 40 tries (stage=no-libil2cpp, base=0x0); giving up` |
+| 17:17:21.072 | Unity 才打出 `Context Type`（UnityPlayerActivity 创建，libil2cpp 这刻才 dlopen） |
+| 17:17:20.707 | `ElneaOffline: install started in background` |
+| 17:17:21.219 | Unity 崩溃处理器抓到线程 `ElneaOffline-in`：**SIGSEGV / SEGV_MAPERR**，x0=0，x25=`0x18ad7e4`（= EncryptRJ256 偏移） |
+
+两条结论：
+1. **40×500ms = 20s 刚好差一秒**。旧循环 20.18 秒放弃，库 21.07 秒才出现 —— 既白等满 20 秒
+   （主线程黑屏 / ANR），又永远等不到库。等待方式本身是错的。
+2. `x25 = base + 0x18ad7e4` 且 `x0 = 0`：**base 为 0 时仍去算地址并解引用**。
+   Unity 自带崩溃处理器接住了，所以没有 tombstone。
+
+### 改法（对应上面两条）
+
+- 等待改成「**等到 libil2cpp 出现为止**」：`NameGate.WAIT_IL2CPP_MS = 120_000L`、
+  `RETRY_MS = 200`、`MAX_TRIES = 600`；`OfflineGate.INSTALL_WINDOW_MS = 30s`。
+  **全程在后台线程**（`ElneaGate-install` / `ElneaOffline-install`），主线程一秒不等。
+- 基址**全仓只解析一份**：`eg_sym.c` 的 `eg_lib_base()`，首选 `dl_iterate_phdr`（按
+  `libil2cpp.so` 匹配，不受命名空间影响），maps 只做兜底，结果缓存。`eg_offline.c`
+  不再自己读 maps。
+- 所有 `base + offset` 之前先判：`eg_lib_present()` / `eg_find_base()==0` / 槽位 NULL →
+  **直接 return 并记日志，绝不解引用**；`eg_mem_ok()` 再确认目标落在本进程可读映射内。
+- 日志：`nativeInstall` 入口、每个 class/method 解析前后、每个 hook 写槽前后与耗时、
+  等库每次轮询结果、fallback 因 base 缺失而跳过 —— 全在 `adb logcat -s ElneaGate`。
+
+### 「关单机」= 只做拼音闸门（可本地复现，已钉成断言）
+
+- `OfflineGate.table(target)` 在单机关着时**一律返回空串**：native 拿不到任何 UI/Http
+  hook 名字；单机开着时同一份表里 4 张有 3 张非空（对照）。
+- `OfflineGate.encGateOnly()`：单机开关关 + 七张表全空 = 只做拼音闸门 / 兜底闸。
+- `NativeGateTest` 40 项真跑（JDK）：主线程 `NameGate.install` 0ms 返回、`OfflineGate.install`
+  14ms 返回、单机关着 `installedAny=false` / `total()==0` / `table(0..3)` 全空 /
+  `encGateOnly=true`，crash guard 连击 2 → 第三轮不加载 + selfcheck 写明
+  `native disabled by crash guard`，「原生加速（实验）」关掉 = 永不加载。
+- `ci_inj.py`（android.jar 真编译）暴露过一个只有全量 javac 才报的错：`NameGate` 常量
+  前向引用（`MAX_TRIES` 用了后面才声明的 `WAIT_IL2CPP_MS`）。**改 NameGate 常量顺序后
+  必须跑 `python tools/ci_inj.py`**，JDK 单测那条链路照不出来。
+
+### 真机验证（拿这版 APK 先跑这三条）
+
+```
+adb shell run-as <pkg> cat files/elneazh_selfcheck.txt | head -8   # native guard / native load 两行
+adb logcat -d -s ElneaGate | tail -60                              # 等库到最后一条 #N
+adb shell run-as <pkg> ls files/elneazh_native_boot                # 进游戏后应该「不存在」
+```
+
+判断标准：主线程在 17:17:06 那种空档**不该再有**；`ElneaGate` 里应看到
+`JNI_OnLoad enter/exit` → `installer thread started` → 多轮 `waiting for libil2cpp (poll …)`
+→ `name gate: base=0x…`（**非 0**）→ `name gate: hooked …`。若仍是黑屏，把 ElneaGate 最后
+60 行发回来，最后一条 #N 就是卡住的位置。
+
+## 2026-10-21 17:45 第一轮：主线程被 native 链卡住（历史，已并入上面）
 
 真机（OnePlus Android 16 arm64 PAC，17:13 selfcheck）：**单机开、单机关都黑屏**，
 过一会儿进程退出。crash 缓冲区 15:57 之后没有新 tombstone、没有 AndroidRuntime 异常，
