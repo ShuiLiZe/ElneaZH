@@ -93,6 +93,131 @@ static pthread_mutex_t g_pair_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile int g_stats_rewrites;   // 累计改过多少个名字
 static volatile int g_stats_calls;      // 累计进入 EncryptRJ256 的次数
 
+// ---- 单字拼音表（cp 升序，二分查找）：整名不在表里（玩家自己取的名字、表外 NPC）时逐字转拼音 ----
+// 以前只查整名表：玩家名不在表里就原样上传中文 —— 防封最关键的那一类名字反而漏掉。
+typedef struct {
+    unsigned cp;
+    char py[8];
+} eg_char_py;
+static eg_char_py *g_chars;
+static int g_char_count;
+
+static int eg_char_cmp(const void *a, const void *b) {
+    unsigned x = ((const eg_char_py *) a)->cp, y = ((const eg_char_py *) b)->cp;
+    return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+static const char *eg_char_lookup(unsigned cp) {
+    int lo = 0, hi = g_char_count - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (g_chars[mid].cp == cp) return g_chars[mid].py;
+        if (g_chars[mid].cp < cp) lo = mid + 1; else hi = mid - 1;
+    }
+    return NULL;
+}
+
+static int eg_utf8_cp(const unsigned char *s, size_t n, size_t i, unsigned *cp) {
+    unsigned c = s[i];
+    if (c < 0x80) { *cp = c; return 1; }
+    int len;
+    if ((c & 0xE0) == 0xC0) { len = 2; *cp = c & 0x1F; }
+    else if ((c & 0xF0) == 0xE0) { len = 3; *cp = c & 0x0F; }
+    else if ((c & 0xF8) == 0xF0) { len = 4; *cp = c & 0x07; }
+    else return 0;
+    if (i + (size_t) len > n) return 0;
+    for (int k = 1; k < len; k++) {
+        unsigned d = s[i + k];
+        if ((d & 0xC0) != 0x80) return 0;
+        *cp = (*cp << 6) | (d & 0x3F);
+    }
+    return len;
+}
+
+// 逐字转：ASCII 字母数字原样；汉字 -> 首字母大写拼音；其它符号（·、全角空格等）丢掉。
+// 有一个汉字查不到就整体放弃（返回 0，原样上传 + WARN），绝不产出半截名字。
+static int eg_map_chars(const char *name, size_t name_len, char *out, size_t cap, size_t *out_len) {
+    if (!g_chars || g_char_count == 0) return 0;
+    const unsigned char *u = (const unsigned char *) name;
+    size_t i = 0, o = 0;
+    int han = 0;
+    while (i < name_len) {
+        unsigned cp;
+        int k = eg_utf8_cp(u, name_len, i, &cp);
+        if (k == 0) return 0;
+        i += (size_t) k;
+        if (cp < 0x80) {
+            if ((cp >= '0' && cp <= '9') || (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z')
+                    || cp == '_') {
+                if (o + 1 >= cap) return 0;
+                out[o++] = (char) cp;
+            }
+            continue;
+        }
+        const char *py = eg_char_lookup(cp);
+        if (!py) {
+            if ((cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0x3400 && cp <= 0x4DBF)) return 0;
+            continue;
+        }
+        size_t pl = strlen(py);
+        if (o + pl >= cap) return 0;
+        memcpy(out + o, py, pl);
+        o += pl;
+        han++;
+    }
+    if (!han || o == 0 || o > 255) return 0;
+    *out_len = o;
+    return 1;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_shuilize_elneazh_inj_NameGate_nativeSetChars(JNIEnv *env, jclass cls, jstring table) {
+    (void) cls;
+    if (!table) return 0;
+    const char *s = (*env)->GetStringUTFChars(env, table, NULL);
+    if (!s) return -1;
+    size_t n = strlen(s);
+    eg_char_py *arr = (eg_char_py *) calloc(n / 3 + 8, sizeof(eg_char_py));
+    int cnt = 0;
+    size_t i = 0;
+    while (arr && i < n) {
+        size_t e = i;
+        while (e < n && s[e] != '\n') e++;
+        const char *line = s + i;
+        size_t ln = e - i;
+        const char *tab = memchr(line, '\t', ln);
+        unsigned cp;
+        if (tab && tab > line && eg_utf8_cp((const unsigned char *) line, (size_t) (tab - line), 0, &cp) > 0
+                && cp >= 0x80) {
+            size_t pl = ln - (size_t) (tab - line) - 1;
+            if (pl > 0 && pl < sizeof arr[cnt].py) {
+                int ok = 1;
+                for (size_t k = 0; k < pl; k++) {
+                    char c = tab[1 + k];
+                    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) { ok = 0; break; }
+                }
+                if (ok) {
+                    arr[cnt].cp = cp;
+                    memcpy(arr[cnt].py, tab + 1, pl);
+                    arr[cnt].py[pl] = 0;
+                    cnt++;
+                }
+            }
+        }
+        i = e + 1;
+    }
+    (*env)->ReleaseStringUTFChars(env, table, s);
+    if (!arr) return -1;
+    qsort(arr, (size_t) cnt, sizeof *arr, eg_char_cmp);
+    pthread_mutex_lock(&g_pair_lock);
+    free(g_chars);
+    g_chars = arr;
+    g_char_count = cnt;
+    pthread_mutex_unlock(&g_pair_lock);
+    LOGI("pinyin chars loaded: %d", cnt);
+    return cnt;
+}
+
 static int eg_map(void *ud, const char *name, size_t name_len, char *out, size_t cap, size_t *out_len) {
     (void) ud;
     pthread_mutex_lock(&g_pair_lock);
@@ -106,8 +231,10 @@ static int eg_map(void *ud, const char *name, size_t name_len, char *out, size_t
             return 1;
         }
     }
+    // 整名不在表里：逐字拼音兜底（玩家名、表外 NPC）
+    int r = eg_map_chars(name, name_len, out, cap, out_len);
     pthread_mutex_unlock(&g_pair_lock);
-    return 0;
+    return r;
 }
 
 // il2cpp String 布局：+0x10 = int32 length，+0x14 = UTF-16 字符

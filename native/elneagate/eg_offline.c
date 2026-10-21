@@ -195,9 +195,34 @@ static void eg_attach(void) {
 }
 
 // 在每个 assembly 的 image 里找 class（ns 传 "*" 或空表示不限命名空间）
+// il2cpp 运行时「真的初始化完了」才许碰 class_from_name / get_assemblies。
+// 真机 19:13:41（62799e0）：libil2cpp 刚映射、il2cpp_init 还在 UnityMain 上跑，后台线程就去
+// class_from_name("TitlePanel") → 运行时内部空指针 SIGSEGV，进程每次启动都死（无限闪退）。
+// 判据：il2cpp_get_corlib() 非空（它只是读 il2cpp_defaults.corlib 这个全局，Runtime::Init 里
+// 元数据装完才写；纯读、不分配、不加锁，和 init 并发也安全）。**不用 il2cpp_domain_get**：
+// init 之前调它会抢先分配 Domain 单例，和 init 线程赛跑可能留下一个空 Domain。
+// 第一次看到 corlib 后再等 EG_RT_MARGIN_MS（让 Runtime::Init 把剩下的类和 AppDomain 建完）才放行。
+#define EG_RT_MARGIN_MS 2000
+typedef void *(*fn_get_corlib)(void);
+static fn_get_corlib g_get_corlib;
+static long long g_rt_ready_at;
+static int eg_runtime_ready(void) {
+    long long now = eg_now_ms();
+    if (g_rt_ready_at) return now - g_rt_ready_at >= EG_RT_MARGIN_MS;
+    if (!eg_lib_present()) return 0;
+    if (!g_get_corlib) g_get_corlib = (fn_get_corlib) eg_sym("il2cpp_get_corlib");
+    if (!g_get_corlib) return 0;
+    void *corlib = g_get_corlib();
+    if (!corlib) return 0;
+    g_rt_ready_at = now;
+    LOGI("il2cpp runtime ready (corlib=%p); classes allowed after %dms", corlib, EG_RT_MARGIN_MS);
+    return 0;
+}
+
 static Il2CppClass *eg_find_class(const char *ns, const char *klass) {
     if (!klass || !klass[0]) return NULL;
     if (!eg_api_load()) return NULL;
+    if (!eg_runtime_ready()) return NULL;
     Il2CppDomain *d = g_api.domain_get();
     if (!d) return NULL;
     size_t n = 0;
@@ -919,6 +944,12 @@ int eg_of_install(int target, const char *names) {
              target, enc, eg_now_ms() - t0);
         return -1;
     }
+    if (!eg_runtime_ready()) {
+        pthread_mutex_unlock(&g_install_lock);
+        EG_I("offline: target=%d deferred, il2cpp runtime not initialised yet (%lldms)",
+             target, eg_now_ms() - t0);
+        return -1;
+    }
 #if !defined(__aarch64__)
     pthread_mutex_unlock(&g_install_lock);
     LOGW("no hook engine for this ABI; nothing hooked for target %d", target);
@@ -1076,6 +1107,7 @@ int eg_of_is_off(void) {
 // 自检用：某个类现在能不能看到（不调用任何方法）
 int eg_of_class_present(const char *klass) {
     if (!klass || !klass[0]) return 0;
+    if (!eg_runtime_ready()) return 0;
     return eg_find_class("*", klass) != NULL;
 }
 

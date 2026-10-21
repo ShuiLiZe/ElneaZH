@@ -41,6 +41,8 @@ final class NameGate {
 
     private static native int nativeSetNames(String table);
 
+    private static native int nativeSetChars(String table);
+
     private static native int[] nativeStats();
 
     private static native String nativeFilterJson(String plain);
@@ -114,6 +116,14 @@ final class NameGate {
             Log.i(TAG, "names pushed: " + n);
         } catch (Throwable t) {
             Log.w(TAG, "pushNames failed: " + t);
+        }
+        // 单字拼音兜底：玩家自己取的名字 / 表外 NPC 名不在上面的整名表里，native 逐字转拼音。
+        try {
+            Pinyin.attach(ctx.getAssets());
+            int c = nativeSetChars(Pinyin.charTable());
+            Log.i(TAG, "pinyin chars pushed: " + c);
+        } catch (Throwable t) {
+            Log.w(TAG, "push pinyin chars failed: " + t);
         }
     }
 

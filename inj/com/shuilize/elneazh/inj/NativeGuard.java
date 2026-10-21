@@ -161,6 +161,15 @@ final class NativeGuard {
      * 可以重复调（第二次起直接返回）。
      */
     static void markSurvived(String why) {
+        // 真机 19:13（62799e0）：Activity 一 resume 就清了标记，40ms 后后台安装线程才崩 →
+        // 连击永远是 0，崩溃保护从不生效，变成无限闪退。native 的危险期在 Activity 起来**之后**
+        // （il2cpp 初始化、各族安装都在那之后），所以「activity resumed」不再算活下来，
+        // 只认后台计时器（SURVIVE_MS）。
+        if (why != null && why.startsWith("activity resumed")) {
+            Log.i(TAG, "boot guard: " + why + " (not counted; waiting " + (surviveMs / 1000)
+                    + "s timer)");
+            return;
+        }
         synchronized (NativeGuard.class) {
             if (cleared) return;
             cleared = true;

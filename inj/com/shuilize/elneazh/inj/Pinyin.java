@@ -152,4 +152,20 @@ final class Pinyin {
     private static Object ICU;
 
     static synchronized int tableSize() { return TABLE.size(); }
+
+    /**
+     * 单字表「字\t首字母大写拼音\n」，交给 native 名字闸门做逐字兜底（整名不在名字表时用）。
+     * 只用打包的 GB2312 表（不走 ICU）：native 那边没有 ICU，两边要保证同一个字永远同一个拼音。
+     */
+    static synchronized String charTable() {
+        StringBuilder b = new StringBuilder(TABLE.size() * 8);
+        for (Map.Entry<Integer, String> e : TABLE.entrySet()) {
+            String py = e.getValue().replace(" ", "");
+            int sp = py.indexOf(',');
+            if (sp > 0) py = py.substring(0, sp);
+            if (py.isEmpty()) continue;
+            b.appendCodePoint(e.getKey()).append('\t').append(cap(py.toLowerCase())).append('\n');
+        }
+        return b.toString();
+    }
 }

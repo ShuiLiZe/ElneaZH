@@ -152,7 +152,9 @@ static unsigned char *eg_filter_raw(eg_filter_ctx *ctx, const unsigned char *raw
         if (!eg_has_han((const char *) src + i + 2, (size_t) sl)) { i += 2 + (size_t) sl; continue; }
         char ascii[256];
         size_t an = 0;
-        if (ctx->map(ctx->ud, (const char *) src + i + 2, (size_t) sl, ascii, sizeof ascii, &an) != 0
+        // map 约定：返回非 0 = 已映射（见 eg_names.h / elneagate.c eg_map）。
+        // 旧代码写成 `!= 0` 就跳过 —— 等于「找到了反而不换」，真机上一个名字都没换过。
+        if (ctx->map(ctx->ud, (const char *) src + i + 2, (size_t) sl, ascii, sizeof ascii, &an) == 0
                 || an == 0 || an > 255) {
             i += 2 + (size_t) sl;
             continue;
@@ -419,7 +421,18 @@ fail:
 
 char *eg_filter_json(eg_filter_ctx *ctx, const char *plain, size_t plain_len, size_t *out_len) {
     if (!ctx || !plain) return NULL;
-    if (!eg_has_han(plain, plain_len)) return NULL;   // 纯 ASCII 请求体直接跳过
+    // 注意：真实请求体里的中文只出现在 base64(zlib(...)) 里面，明文 JSON 本身是纯 ASCII。
+    // 旧代码在这里用「明文里没汉字就跳过」，结果 save2.php 的 ws_profiles / ws_familys 永远被跳过
+    // （2026-10-21 用真机抓到的 save2 明文本地复现：0 个名字被换）。
+    // 现在只按形状筛：没有内层存档块（\"ws_）就直接放行，省掉无关接口的扫描。
+    {
+        int has_ws = 0;
+        for (size_t k = 0; k + 4 < plain_len; k++) {
+            if (plain[k] == '\\' && plain[k + 1] == '"' && plain[k + 2] == 'w' && plain[k + 3] == 's'
+                    && plain[k + 4] == '_') { has_ws = 1; break; }
+        }
+        if (!has_ws) return NULL;
+    }
     eg_sb sb;
     memset(&sb, 0, sizeof sb);
     size_t i = 0, copied = 0, n = plain_len;
