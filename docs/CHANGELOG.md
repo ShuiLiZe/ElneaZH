@@ -1,3 +1,57 @@
+## 2026-10-21 15:40 单机真机可用（native 真的加载）+ 换身份清干净 + Support UI 合并
+
+### 1. native .so 真的进 APK、真的加载（f488ec5）
+
+真机 `files/elneazh_selfcheck.txt` 显示 `gate installed: false`、`offline native: native: not loaded`、
+`api -1/5`，`logcat -s ElneaOffline ElneaGate ElneaZH` 全空 —— 一个 .so 都没加载。三处根因一起修：
+
+1. **打包链路根本没带 .so**：`Pipeline.addZh` 只搬 Contents/map/about/data/bundles 五个子目录，
+   `MainViewModel` 只 `copyAssetDir(assets, "elneazh", zhDir)` 一层 → 游戏 APK 里没有
+   `assets/elneagate/…`，解包必失败。现在两个 abi 的 `libelneagate.so` 都写进
+   `assets/elneagate/lib<abi>/`，`MainViewModel` 同步拷 `elneagate` 子目录。
+2. **加载方式错**：两个闸门都先 `Libs.ensure` 解包到 files/lib，再 `System.loadLibrary("elneagate")`
+   —— 游戏 APK 的 lib 目录没有这个库，必然 UnsatisfiedLinkError，而 `loadTried` 一次性锁死，
+   失败后再也不重试。新增 `NativeLoad`（唯一加载入口）：解包取绝对路径 → `System.load(path)`，
+   失败每 2s 可重试，成功/失败都走 `android.util.Log`，`describe()` 留 dlopen 原文。
+3. **自检在加载前写**：`ZhInit.onCreate` 里 `SelfCheck.run` 同步执行，记录的永远是加载前状态。
+   现在自检里加 `native load:` / `native load error:` / `name gate: hooked=` / `offline gate:` /
+   `written:`，且两闸门在 `NativeLoad` 挂上之后（`OfflineGate.install` 入口与 `installAll` 末尾）
+   调 `SelfCheck.rewriteAsync` 重写一次。
+
+新增 `tools/verify_native_load.py`（.so 双 ABI + ELF + JNI 导出符号、打包链路、Java 只用
+`System.load`、自检重写），三个 workflow 都加了这一步；`verify_offline.py` 的旧断言同步改掉。
+
+### 2. 换身份清不干净（1f104fc）
+
+玩家「卡在上个账号」：设备码 `getExternalFilesDir(null)/althi_uniq`（41 字符）与
+`files/zh/ws_account` 等副本从来没被删过。
+
+- 新增纯 JDK `IdentityFiles`：`althi_uniq` / `ws_account` / `login_key` / `uuid` /
+  `unity.cloud_userid` 及变体入库，`elneazh_*` 一律保留。
+- `Backup.wipeIdentityCopies` 扫 `/sdcard` 根、Documents、Downloads、
+  `getExternalFilesDir(null)`、`getExternalFilesDirs()`、no_backup（浅层 + login/account/uuid/althi 子目录），
+  删完用 `ElneaZH` 日志一行列出「removed N 身份副本: 路径…」；没权限的目录静默跳过。
+- `wipeForIdentity` 末尾接上这一步；存档、汉化、资源、`elneazh_*` 不动。
+- 「只恢复存档（保留当前身份）」额外跳过身份副本文件（`isRestoreIdentityCopy`），
+  并继续 `stripIdentityKeys`；单机开关 `elneazh_settings` 也不进备份、恢复时保留当前值。
+- 新增 `IdentityWipeTest`（63 项，含真删夹具里 41 字符设备码）；`verify_identity.py` 加 13 项断言。
+
+### 3. Support UI（84a3f39）
+
+- 「导出分享」并入「立即备份」：点「立即备份」直接备份，成功 Toast 给完整路径，并在下面长出
+  「分享到…（发给朋友或存到网盘）」；「导入存档」单独整宽一行；「导出名字对照表」保留为文字链接。
+  新增 `Share.shareExisting`（分享已打好的那份备份，不重新打包）。
+- 单机开关文案改「单机模式：已开启（点击关闭）」/「单机模式：已关闭（点击开启）」。
+- `verify_offline.py` 改断言，259 项全过。
+
+### CI
+
+- 1f104fc：build-check #39561910615 success，test-release #39561910633 success
+- 84a3f39：build-check #39563028982 success，test-release #39563028908 success
+- 预发布 test-offline 资产 ElneaZH-test-offline.apk 33,520,807 B（≈31.97 MB）
+
+---
+
 ## 2026-10-21 13:35 ci: 单机单测 javac 加 -sourcepath inj（从根上杜绝漏编译兄弟类）
 
 
