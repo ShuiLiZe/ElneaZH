@@ -131,43 +131,45 @@ final class Support {
         addSep(a, d, card, 10);
         caption(a, d, card, "存档");
 
-        // 主按钮：立即备份（整个弹窗只有这一个橙色）
+        // 主按钮：立即备份（整个弹窗只有这一个橙色）。
+        // 「导出分享」不再是独立按钮 —— 玩家分不清「备份」和「导出分享」有什么区别；
+        // 备份成功后直接给一个「分享到…」，想发给别人就点它。
+        final TextView[] shareBtn = new TextView[1];
         card.addView(button(a, d, "立即备份", ORANGE, ORANGE_DARK, Color.WHITE, new View.OnClickListener() {
             @Override public void onClick(View v) {
                 try {
-                    Backup.manage(a);
+                    Backup.manual(a, new Backup.OnBackupDone() {
+                        @Override public void onDone(final String name) {
+                            if (name == null) return;
+                            if (shareBtn[0] != null) return;   // 已经有分享按钮了，别叠
+                            final TextView share = button(a, d, "分享到…（发给朋友或存到网盘）",
+                                    CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
+                                        @Override public void onClick(View v2) {
+                                            try {
+                                                Share.shareExisting(a, name);
+                                            } catch (Throwable t) {
+                                                Log.w(TAG, "share backup", t);
+                                                Toast.makeText(a, "分享出错：" + t, Toast.LENGTH_LONG).show();
+                                            }
+                                        }
+                                    });
+                            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+                            lp.topMargin = (int) (10 * d);
+                            card.addView(share, lp);
+                            shareBtn[0] = share;
+                        }
+                    });
                 } catch (Throwable t) {
                     Log.w(TAG, "backup", t);
                     Toast.makeText(a, "备份出错：" + t, Toast.LENGTH_LONG).show();
                 }
             }
         }));
-        smallLine(a, d, card, "启动时也会自动备份，卸载游戏也不丢。");
+        smallLine(a, d, card, "启动时也会自动备份，卸载游戏也不丢。备份成功后可以「分享到…」发给别人。");
 
-        // 并排：导出分享 / 导入存档
-        LinearLayout row = new LinearLayout(a);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, -2);
-        rlp.topMargin = (int) (10 * d);
-        card.addView(row, rlp);
-
-        LinearLayout.LayoutParams half = new LinearLayout.LayoutParams(0, (int) (46 * d), 1f);
-        half.rightMargin = (int) (6 * d);
-        TextView exp = button(a, d, "导出分享", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                try {
-                    Share.shareBackup(a);
-                } catch (Throwable t) {
-                    Log.w(TAG, "export save", t);
-                    Toast.makeText(a, "导出出错：" + t, Toast.LENGTH_LONG).show();
-                }
-            }
-        });
-        row.addView(exp, half);
-
-        LinearLayout.LayoutParams half2 = new LinearLayout.LayoutParams(0, (int) (46 * d), 1f);
-        half2.leftMargin = (int) (6 * d);
+        // 剩下的只有「导入存档」（导出分享已并入立即备份）
+        LinearLayout.LayoutParams impLp = new LinearLayout.LayoutParams(-1, (int) (46 * d));
+        impLp.topMargin = (int) (10 * d);
         TextView imp = button(a, d, "导入存档", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
             @Override public void onClick(View v) {
                 try {
@@ -185,8 +187,8 @@ final class Support {
                 }
             }
         });
-        row.addView(imp, half2);
-        // 单机说明写在这一行：选择「只恢复存档」的原因主要就是单机
+        card.addView(imp, impLp);
+        // 单机说明写在导入下面：选择「只恢复存档」的原因主要就是单机
         smallLine(a, d, card, "导入时可只恢复存档、保留当前身份；单机模式请选这一项。");
 
         // 小文字链接：导出名字对照表
@@ -317,7 +319,8 @@ final class Support {
     /**
      * 单机模式：一个开关 + 一行说明。
      *
-     * 开关状态存 shared_prefs/elneazh_settings（键 offline），Backup 会随存档一起备份/恢复。
+     * 开关状态存 shared_prefs/elneazh_settings（键 offline）。它**不参与**备份/恢复：
+     * 恢复别人的存档不该顺手把「单机开/关」换掉（Backup 写入端已排除这个 prefs 文件）。
      * 点一下即生效（NetBlocker / 原生闸门每个请求都现读 Offline.isOn()，不需要重进游戏）。
      * 详细状态（挂钩了多少入口、挡了几次）只写 logcat（标签 ElneaOffline），不占弹窗版面。
      */
@@ -377,7 +380,7 @@ final class Support {
     }
 
     private static String toggleLabel(boolean on) {
-        return on ? "单机模式：开 ✓（点击关闭）" : "单机模式：关（点击开启）";
+        return on ? "单机模式：已开启（点击关闭）" : "单机模式：已关闭（点击开启）";
     }
 
     /** 开关下面那一行：必须一行说清「开了会怎样、要不要重启」。 */

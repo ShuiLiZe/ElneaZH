@@ -237,14 +237,18 @@ check("noHistory" in man, "SupportActivity noHistory（弹窗式，不堆栈）"
 sup = read("Support.java")
 check("Offline.set" in sup, "Support 弹窗里能写单机开关")
 check("Offline.isOn" in sup, "Support 弹窗读当前状态")
-check("shareBackup" in sup, "Support 弹窗有「导出存档」入口")
+# 「导出分享」已并入「立即备份」：不再有独立的导出按钮，备份成功后才出现「分享到…」。
+check("Backup.manual" in sup, "Support 弹窗的「立即备份」直接备份（不再只是打开列表）")
+check("Share.shareExisting" in sup, "备份成功后给「分享到…」按钮")
 check("shareNameTable" in sup, "Support 弹窗有「导出名字对照表」入口")
 check("Backup.pick" in sup or "restore" in sup, "Support 弹窗有「导入存档」入口")
 
-# 弹窗版面（第四批）：一条 QQ 群、收款码折叠、存档组、单机一个开关、账号组、底部链接
+# 弹窗版面（第五批）：一条 QQ 群、收款码折叠、存档组、单机一个开关、账号组、底部链接
 check(sup.count("ORANGE, ORANGE_DARK, Color.WHITE") == 1, "整个弹窗只有一个橙色按钮")
-for label in ("立即备份", "导出分享", "导入存档", "更换游戏身份", "关闭"):
+for label in ("立即备份", "导入存档", "更换游戏身份", "关闭"):
     check('"%s"' % label in sup, "弹窗按钮「%s」" % label)
+check('"导出分享"' not in sup, "「导出分享」按钮已并入「立即备份」（不留旧按钮）")
+check("分享到…" in sup, "备份成功后显示「分享到…」按钮")
 for label in ("导出名字对照表", "联系原作者", "赞赏支持"):
     check(label in sup and "link(a, d," in sup, "「%s」是小文字链接" % label)
 check("fold.setVisibility(View.GONE)" in sup, "收款码默认折叠")
@@ -313,6 +317,9 @@ if "OfflineGate.install" in zh2:
 sup3 = read("Support.java")
 check("OfflineGate.push" in sup3, "Support 切开关时推状态给原生闸门")
 check("ElneaOffline" in sup3 and "describe()" in sup3, "闸门现状进 logcat（弹窗不再占版面）")
+# 开关文案：用户要求说「已开启 / 已关闭」，不要「开 ✓ / 关」
+check("已开启" in sup3 and "已关闭" in sup3, "单机开关文案是「已开启 / 已关闭」")
+check("toggleLabel" in sup3, "开关文案由一个函数统一生成（开/关两处同步）")
 
 sc = read("SelfCheck.java")
 check("offline native" in sc, "SelfCheck 报了原生闸门状态")

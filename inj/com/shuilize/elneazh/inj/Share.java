@@ -259,7 +259,50 @@ final class Share {
         }
     }
 
-    // ---------------- 2. 导出名字对照表 ----------------
+    // ---------------- 2. 分享已有的一份备份 ----------------
+
+    /**
+     * 分享「已经打好的那份备份」（Support 里「立即备份」成功后的「分享到…」按钮）。
+     * 与 {@link #shareBackup} 的区别：不重新打包，直接把刚生成的文件送出去。
+     */
+    static void shareExisting(final android.app.Activity a, final String name) {
+        if (a == null || name == null) return;
+        try {
+            new Thread(new Runnable() { @Override public void run() {
+                File staged = null;
+                String err = null;
+                try {
+                    Uri u = Backup.uriOf(a, name);
+                    if (u == null) err = "找不到备份文件：" + name;
+                    else {
+                        staged = stage(a, u, name);
+                        if (staged == null) err = "备份没能放到临时目录";
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "shareExisting worker", t);
+                    err = "分享出错：" + t;
+                }
+                final File f = staged;
+                final String e = err;
+                a.runOnUiThread(new Runnable() { @Override public void run() {
+                    try {
+                        if (e != null) { Backup.toast(a, e); return; }
+                        if (send(a, f, "application/zip", "艾尔尼亚存档 " + f.getName(), "分享到")) return;
+                        String p = saveToFolder(a, f, f.getName());
+                        Backup.toast(a, p == null ? "分享失败：手机不让写文件" : "已存到 " + p);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "shareExisting ui", t);
+                        Backup.toast(a, "分享出错：" + t);
+                    }
+                }});
+            }}).start();
+        } catch (Throwable t) {
+            Log.w(TAG, "shareExisting", t);
+            Backup.toast(a, "分享出错：" + t);
+        }
+    }
+
+    // ---------------- 3. 导出名字对照表 ----------------
 
     /** 名字对照表正文（纯函数，离线可测）：中文<TAB>上传用 ASCII，按中文排序。 */
     static String nameTableText(Map<String, String> aliases) {

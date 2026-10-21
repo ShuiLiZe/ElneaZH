@@ -1259,12 +1259,35 @@ final class Backup {
     // ---------------- UI ----------------
 
     static void manual(final Activity a) {
+        manual(a, null);
+    }
+
+    /**
+     * 立即备份；成功时把文件名回调给调用方（Support 用它弹「分享到…」）。
+     * 回调跑在主线程。
+     */
+    static void manual(final Activity a, final OnBackupDone done) {
         toast(a, "正在备份存档…");
         new Thread(new Runnable() { @Override public void run() {
             final String n = make(a, "手动");
-            toast(a, n == null ? "备份失败（手机存储不可写？）" : "已备份：" + n);
+            if (n == null) {
+                toast(a, "备份失败（手机存储不可写？）");
+                if (done != null) new Handler(Looper.getMainLooper()).post(new Runnable() {
+                    @Override public void run() { done.onDone(null); }
+                });
+                return;
+            }
+            final String where = (rootOk(a) ? "/sdcard/" : "Documents/") + DIR + "/" + n;
+            toast(a, "已备份：" + where);
+            Log.i(TAG, "manual backup ok: " + where);
+            if (done != null) new Handler(Looper.getMainLooper()).post(new Runnable() {
+                @Override public void run() { done.onDone(n); }
+            });
         }}).start();
     }
+
+    /** 备份完成回调（主线程）；n 为 null 表示失败。 */
+    interface OnBackupDone { void onDone(String name); }
 
     static void pick(Activity a) {
         try {
