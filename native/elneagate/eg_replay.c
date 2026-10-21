@@ -839,6 +839,38 @@ static int32_t rp_inet_hook(void *mi) {
     }
     return r;
 }
+// 真机 10-22 01:33：test-8 internetReachability 已报有网，Kpi 后仍卡切换区域，无日志、无 HttpSystem 请求。
+// 怀疑区域切换走 UnityWebRequest 直接拉资源（不经 HttpSystem）。记下每个 URL。
+typedef void *(*fn_uwr_send)(void *, void *);
+typedef void *(*fn_uwr_url)(void *, void *);
+static fn_uwr_send g_uwr_orig;
+static fn_uwr_url g_uwr_url;
+static void *rp_uwr_hook(void *self, void *mi) {
+    static int n;
+    if (n < 200 && self && g_uwr_url) {
+        n++;
+        size_t l = 0;
+        void *u = g_uwr_url(self, NULL);
+        char *t = u ? eg_rec_str(u, &l) : NULL;
+        if (t && strlen(t) > 400) t[400] = 0;
+        RPW("UnityWebRequest %s%s", t ? t : "?", eg_of_is_off() ? "（单机）" : "");
+        free(t);
+    }
+    return g_uwr_orig ? g_uwr_orig(self, mi) : NULL;
+}
+// 方法表 dump 在内部目录，用户拿不到：拷一份到 /sdcard/Android/data/<包>/files/ 方便导出分析
+static void rp_copy_dump(void) {
+    FILE *in = fopen("/data/data/jp.co.althi.elnea.en/files/elneazh_dump.tsv", "rb");
+    if (!in) return;
+    FILE *out = fopen("/sdcard/Android/data/jp.co.althi.elnea.en/files/elneazh_dump.tsv", "wb");
+    if (out) {
+        char b[65536]; size_t r;
+        while ((r = fread(b, 1, sizeof b, in)) > 0) fwrite(b, 1, r, out);
+        fclose(out);
+        RPI("方法表已拷到外部目录 files/elneazh_dump.tsv");
+    }
+    fclose(in);
+}
 static void rp_dlog_install(void) {
     int nf = 0;
     g_ex_msg = (fn_str0) eg_of_method_ptr("System.Exception", "get_Message", 0, &nf);
@@ -854,12 +886,19 @@ static void rp_dlog_install(void) {
     void *inet = eg_of_method_ptr("UnityEngine.Application", "get_internetReachability", 0, &nf);
     if (inet) A64HookFunction(inet, (void *) rp_inet_hook, (void **) &g_inet_orig);
     RPI("网络状态接管 inet=%p", inet);
+    g_uwr_url = (fn_uwr_url) eg_of_method_ptr("UnityEngine.Networking.UnityWebRequest", "get_url", 0, &nf);
+    void *uwr = eg_of_method_ptr("UnityEngine.Networking.UnityWebRequest", "SendWebRequest", 0, &nf);
+    if (uwr && g_uwr_url) A64HookFunction(uwr, (void *) rp_uwr_hook, (void **) &g_uwr_orig);
+    RPI("UnityWebRequest 记录 send=%p url=%p", uwr, (void *) g_uwr_url);
     RPI("Unity 日志接管 err=%p warn=%p exc=%p msg=%p", le, lw, lx, (void *) g_ex_msg);
 }
 #endif
 
 static void *rp_seed_thread(void *a) {
     (void) a;
+#if defined(__aarch64__)
+    rp_copy_dump();
+#endif
     rp_seed_from_netrec();
     return NULL;
 }
