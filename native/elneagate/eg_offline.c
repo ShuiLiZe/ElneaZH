@@ -1157,7 +1157,20 @@ void *eg_of_method_ptr(const char *klass, const char *method, int argc, int *not
     if (not_found) *not_found = 0;
     if (!klass || !method) return NULL;
     if (!eg_api_load() || !eg_runtime_ready()) return NULL;
-    Il2CppClass *c = eg_find_class("*", klass);
+    // 支持 "命名空间.类名"（如 MiniJSON.Json）；不带点的仍只找全局命名空间
+    Il2CppClass *c = NULL;
+    const char *dot = strrchr(klass, '.');
+    if (dot && dot > klass && dot[1]) {
+        char ns[96];
+        size_t nl = (size_t) (dot - klass);
+        if (nl < sizeof ns) {
+            memcpy(ns, klass, nl);
+            ns[nl] = 0;
+            c = eg_find_class(ns, dot + 1);
+        }
+    } else {
+        c = eg_find_class("*", klass);
+    }
     void *p = c ? eg_resolve(c, method, argc) : NULL;
     if (!p && not_found) *not_found = 1;
     return eg_strip_pac(p);

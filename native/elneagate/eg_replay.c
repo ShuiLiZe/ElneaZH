@@ -470,8 +470,8 @@ void eg_rp_install(void) {
     int nf = 0;
     void *parse = eg_of_method_ptr("HttpRequest", "Parse", 1, &nf);
     void *conn = eg_of_method_ptr("HttpSystem", "connectWWW", 1, &nf);
-    g_ser = (fn_ser) eg_of_method_ptr("Json", "Serialize", 1, &nf);
-    g_deser = (fn_deser) eg_of_method_ptr("Json", "Deserialize", 1, &nf);
+    g_ser = (fn_ser) eg_of_method_ptr("MiniJSON.Json", "Serialize", 1, &nf);
+    g_deser = (fn_deser) eg_of_method_ptr("MiniJSON.Json", "Deserialize", 1, &nf);
     g_getp = (fn_getp) eg_of_method_ptr("HttpRequest", "get_Param", 0, &nf);
     g_iserr = (fn_iserr) eg_of_method_ptr("HttpRequest", "get_IsError", 0, &nf);
     g_notify_mi = eg_of_method_info("HttpRequest", "HttpNotify", 1);
