@@ -136,7 +136,7 @@ public final class OfflineTest {
         //    native 相关的方法在 JDK 下必然「安静失败」，这里正好把「失败也绝不抛异常」钉住。
         ok(!OfflineGate.push(true), "native 未加载时 push 返回 false 而不是抛异常");
         ok(!OfflineGate.push(false), "native 未加载时 push(false) 也不抛");
-        ok(OfflineGate.stats() == null || OfflineGate.stats().length == 7, "stats 要么 null 要么 7 项");
+        ok(OfflineGate.stats() == null || OfflineGate.stats().length == 7, "stats 要么 null 要么 7 项（EG_STATS_SLOTS）");
         ok(OfflineGate.describe() != null && OfflineGate.describe().length() > 0, "describe 有内容");
         ok(OfflineGate.summary() != null && OfflineGate.summary().length() > 0, "summary 有内容");
         ok(OfflineGate.probe() < 0, "native 未加载时 probe 返回负数（不假装已就绪）");
@@ -150,21 +150,30 @@ public final class OfflineTest {
         OfflineGate.resetStats();   // 未加载时也必须静默
         ok(true, "resetStats 在未加载时静默返回");
 
-        // 12. 六族钩子的编号：Java 与 native 头文件必须一一对上
+        // 12. 族编号：Java 与 native 头文件必须一一对上
         ok(OfflineGate.TARGET_PANEL == 1, "TARGET_PANEL=1");
         ok(OfflineGate.TARGET_HTTP == 2, "TARGET_HTTP=2");
         ok(OfflineGate.TARGET_GATE == 3, "TARGET_GATE=3");
         ok(OfflineGate.TARGET_BUTTON == 4, "TARGET_BUTTON=4");
         ok(OfflineGate.TARGET_HIDE == 5, "TARGET_HIDE=5");
         ok(OfflineGate.TARGET_MASKS == 6, "TARGET_MASKS=6");
-        ok(OfflineGate.groups().length == 6, "一共 6 族");
+        ok(OfflineGate.TARGET_LPLAY == 7, "TARGET_LPLAY=7（单机不弹账号输入面板）");
+        ok(OfflineGate.groups().length == 7, "一共 7 族");
         java.util.Set<Integer> tset = new java.util.HashSet<Integer>();
         for (int[] g : OfflineGate.groups()) tset.add(g[0]);
-        ok(tset.size() == 6 && tset.contains(1) && tset.contains(2) && tset.contains(3)
-                && tset.contains(4) && tset.contains(5) && tset.contains(6),
-                "groups() 覆盖 1..6 且不重复");
-        ok(OfflineGate.table(0).isEmpty() && OfflineGate.table(7).isEmpty(),
+        ok(tset.size() == 7 && tset.contains(1) && tset.contains(2) && tset.contains(3)
+                && tset.contains(4) && tset.contains(5) && tset.contains(6)
+                && tset.contains(7),
+                "groups() 覆盖 1..7 且不重复");
+        ok(OfflineGate.table(0).isEmpty() && OfflineGate.table(8).isEmpty(),
                 "非法 target 返回空表而不是抛异常");
+        // 本地装玩族：入口必须全在（少一个就还会弹框），反向 setter 必须单独判
+        String lp = OfflineGate.table(OfflineGate.TARGET_LPLAY);
+        ok(lp.contains("openAccountPanel") && lp.contains("AccountInputButtonClick")
+                && lp.contains("requestErrorAlert"), "本地装玩族含三个弹框入口");
+        ok(lp.contains("set_disableLocalPlay") && lp.contains("set_isAccountInput")
+                && lp.contains("set_isEmytyLocalAccount"), "本地装玩族含三个状态 setter");
+        ok(lp.contains("TitlePanel"), "本地装玩族挂在 TitlePanel");
         ok(OfflineGate.countLines("") == 0, "空表行数为 0");
         ok(OfflineGate.countLines("# 注释\n\nns\tK\tm1\nns\tK\tm2\n") == 2, "注释行和空行不计入");
         ok(OfflineGate.countLines(null) == 0, "null 表行数为 0");
