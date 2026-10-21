@@ -199,7 +199,12 @@ final class NativeLoad {
             } finally {
                 if (fd != null) fd.close();
             }
-            if (out.isFile() && out.length() == want && want > 0) return out.getAbsolutePath();
+            // 只比长度会误用旧库（新旧 .so 恰好同长时）；再比一个「游戏 APK 安装时间」戳，
+            // 每次重新打包安装游戏后都会重新解包。
+            String stampWant = want + ":" + new File(ctx.getApplicationInfo().sourceDir).lastModified();
+            File stamp = new File(dir, "lib" + name + ".so.stamp");
+            if (out.isFile() && out.length() == want && want > 0 && stampWant.equals(readSmall(stamp)))
+                return out.getAbsolutePath();
             InputStream in = ctx.getAssets().open(asset);
             try {
                 File tmp = new File(dir, "lib" + name + ".so.tmp");
@@ -224,6 +229,7 @@ final class NativeLoad {
                 out.setExecutable(true, false);
             } catch (Throwable ignored) {
             }
+            writeSmall(stamp, stampWant);
             Log.i(TAG, "unpacked " + asset + " -> " + out + " (" + out.length() + " B)");
             return out.getAbsolutePath();
         } catch (Throwable t) {
@@ -244,5 +250,32 @@ final class NativeLoad {
             c = c.getCause();
         }
         return b.toString();
+    }
+
+    private static String readSmall(File f) {
+        try {
+            java.io.FileInputStream in = new java.io.FileInputStream(f);
+            try {
+                byte[] b = new byte[128];
+                int n = in.read(b);
+                return n > 0 ? new String(b, 0, n, "UTF-8") : "";
+            } finally {
+                in.close();
+            }
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private static void writeSmall(File f, String v) {
+        try {
+            FileOutputStream o = new FileOutputStream(f);
+            try {
+                o.write(v.getBytes("UTF-8"));
+            } finally {
+                o.close();
+            }
+        } catch (Throwable ignored) {
+        }
     }
 }
