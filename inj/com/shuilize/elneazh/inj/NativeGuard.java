@@ -43,7 +43,10 @@ final class NativeGuard {
     /** 连击多少次启动失败就停用 native。 */
     static final int MAX_STRIKES = 2;
     /** 活过这么久就算「这一轮没坏」：运行满就清标记。 */
-    static final long SURVIVE_MS = 60_000;
+    // 真机 23:08：玩家断网进游戏卡住、20~30s 内自己退出，连续两次就被判「没活下来」而停用 native
+    // （单机闸门也随之失效）。native 的危险期是安装那 1~2s，15s 足够；同时要求主线程还能响应
+    // （见 scheduleSurvive），真卡死的黑屏照样会被计入。
+    static final long SURVIVE_MS = 15_000;
     /** 实际使用的存活阈值（单测会临时改小）。 */
     private static long surviveMs = SURVIVE_MS;
     /** Support 里「原生加速（实验）」的开关键。 */
@@ -201,7 +204,14 @@ final class NativeGuard {
                     Thread.currentThread().interrupt();
                     return;
                 }
-                markSurvived("alive " + (ms / 1000) + "s");
+                // 主线程能跑到这个 Runnable 才算活着（主线程卡死的黑屏不算）
+                try {
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(new Runnable() {
+                        @Override public void run() { markSurvived("alive " + (ms / 1000) + "s, main thread ok"); }
+                    });
+                } catch (Throwable e) {
+                    markSurvived("alive " + (ms / 1000) + "s");
+                }
             }
         }, "ElneaGate-survive");
         t.setDaemon(true);
