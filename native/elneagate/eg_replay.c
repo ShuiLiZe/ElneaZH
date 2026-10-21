@@ -772,6 +772,7 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
     RPI("单机重放: %s", made ? (rp_is_write(tx) ? "write-ack" : "empty-data") : sign);
     (void) cls;
     if (!rp_emulate(self, hit)) g_parse_orig(self, www, mi);
+    RPI("  -> %s cond=%d", cls, *(int32_t *) ((char *) self + 0x10));
     free(made);
     free(tx);
 }
@@ -787,6 +788,47 @@ static void *rp_conn_hook(void *self, void *req, void *mi) {
     *(int32_t *) ((char *) req + 0x10) = 1;   // 与原生没网分支一致：先置「请求中」
     rp_parse_hook(req, NULL, NULL);             // 重放（未命中则原始 Parse 报没网）
     return NULL;                                // 协程见 null 直接结束，不 yield、不 finishWWW
+}
+#endif
+
+#if defined(__aarch64__)
+// 真机 10-22 01:24：Kpi 之后卡「正在切换区域」，没有任何网络请求，Unity 日志在正式包里看不到。
+// 把游戏的 Debug.LogError / LogWarning / LogException 写进 native.log，下一次就能看到是哪里抛了异常。
+typedef void (*fn_dlog)(void *, void *);
+typedef void *(*fn_str0)(void *, void *);
+static fn_dlog g_le_orig, g_lw_orig, g_lx_orig;
+static fn_str0 g_ex_msg, g_ex_st;
+static int g_dlog_n;
+static void rp_dlog(const char *lv, void *o) {
+    if (!o || g_dlog_n > 400) return;
+    g_dlog_n++;
+    size_t n = 0;
+    const char *c = rp_cls(o);
+    char *t = NULL, *st = NULL;
+    if (strcmp(c, "String") == 0) t = eg_rec_str(o, &n);
+    else if (strstr(c, "Exception") && g_ex_msg) {
+        void *m = g_ex_msg(o, NULL); t = m ? eg_rec_str(m, &n) : NULL;
+        void *s2 = g_ex_st ? g_ex_st(o, NULL) : NULL; st = s2 ? eg_rec_str(s2, &n) : NULL;
+    }
+    if (t && strlen(t) > 700) t[700] = 0;
+    if (st && strlen(st) > 1500) st[1500] = 0;
+    RPW("Unity %s [%s] %s%s%s", lv, c, t ? t : "", st ? " @ " : "", st ? st : "");
+    free(t); free(st);
+}
+static void rp_le_hook(void *o, void *mi) { rp_dlog("错误", o); if (g_le_orig) g_le_orig(o, mi); }
+static void rp_lw_hook(void *o, void *mi) { rp_dlog("警告", o); if (g_lw_orig) g_lw_orig(o, mi); }
+static void rp_lx_hook(void *o, void *mi) { rp_dlog("异常", o); if (g_lx_orig) g_lx_orig(o, mi); }
+static void rp_dlog_install(void) {
+    int nf = 0;
+    g_ex_msg = (fn_str0) eg_of_method_ptr("System.Exception", "get_Message", 0, &nf);
+    g_ex_st = (fn_str0) eg_of_method_ptr("System.Exception", "get_StackTrace", 0, &nf);
+    void *le = eg_of_method_ptr("UnityEngine.Debug", "LogError", 1, &nf);
+    void *lw = eg_of_method_ptr("UnityEngine.Debug", "LogWarning", 1, &nf);
+    void *lx = eg_of_method_ptr("UnityEngine.Debug", "LogException", 1, &nf);
+    if (le) A64HookFunction(le, (void *) rp_le_hook, (void **) &g_le_orig);
+    if (lw) A64HookFunction(lw, (void *) rp_lw_hook, (void **) &g_lw_orig);
+    if (lx) A64HookFunction(lx, (void *) rp_lx_hook, (void **) &g_lx_orig);
+    RPI("Unity 日志接管 err=%p warn=%p exc=%p msg=%p", le, lw, lx, (void *) g_ex_msg);
 }
 #endif
 
@@ -823,6 +865,7 @@ void eg_rp_install(void) {
     void *reach = eg_of_method_ptr("HttpSystem", "get_IsReachable", 0, &nf);
     if (reach) A64HookFunction(reach, (void *) rp_reach_hook, (void **) &g_reach_orig);
     if (g_parse_orig && g_conn_orig) g_rp_ready = 1;
+    rp_dlog_install();
     RPI("单机重放已挂 ready=%d reach=%p (wb=%p vget=%p)", g_rp_ready, (void *) g_reach_orig, (void *) g_wb, (void *) g_vget);
 #endif
 }
