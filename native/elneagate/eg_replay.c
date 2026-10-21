@@ -873,8 +873,90 @@ static const char *rp_manifest_local(void) {
     fclose(m);
     return g_manifest_local[0] ? g_manifest_local : NULL;
 }
+// test-10 真机：改 URL 读 jar 里的清单仍然报错重试。改成不走下载：
+// AssetBundleManager.getManifest() 返回 manifestBundle(+0x38).LoadAsset<AssetBundleManifest>，
+// downloadAndCache 只在它为 null 时才去下载清单。单机时预先 AssetBundle.LoadFromFile(本地清单) 填进 +0x38。
+#define AB_INT "/data/data/jp.co.althi.elnea.en/files/elneazh_ab_Android"
+#define AB_EXT "/sdcard/Android/data/jp.co.althi.elnea.en/files/elneazh_ab/Android"
+typedef void *(*fn_abload)(void *, void *);
+typedef void *(*fn_getman)(void *, void *);
+static fn_abload g_abload;
+static fn_getman g_getman_orig;
+static int g_ab_tried;
+// 从已安装的 APK 里把 STORED 条目 assets/elneazh/ab/Android 拷到内部目录
+static int rp_extract_manifest(void) {
+    if (access(AB_INT, R_OK) == 0) return 1;
+    char apk[600] = {0};
+    FILE *m = fopen("/proc/self/maps", "r");
+    if (!m) return 0;
+    char line[1024];
+    while (fgets(line, sizeof line, m)) {
+        char *p = strchr(line, '/');
+        if (!p || !strstr(p, "base.apk") || !strstr(p, "jp.co.althi.elnea.en")) continue;
+        char *nl = strchr(p, '\n'); if (nl) *nl = 0;
+        snprintf(apk, sizeof apk, "%s", p); break;
+    }
+    fclose(m);
+    if (!apk[0]) return 0;
+    FILE *f = fopen(apk, "rb");
+    if (!f) return 0;
+    const char *want = "assets/elneazh/ab/Android";
+    size_t wl = strlen(want);
+    // 读文件尾找 EOCD
+    fseek(f, 0, SEEK_END); long sz = ftell(f);
+    long tail = sz < 70000 ? sz : 70000;
+    unsigned char *b = (unsigned char *) malloc((size_t) tail);
+    int ok = 0;
+    if (b && fseek(f, sz - tail, SEEK_SET) == 0 && fread(b, 1, (size_t) tail, f) == (size_t) tail) {
+        long e = -1;
+        for (long i = tail - 22; i >= 0; i--) if (b[i]==0x50&&b[i+1]==0x4b&&b[i+2]==5&&b[i+3]==6) { e = i; break; }
+        if (e >= 0) {
+            uint32_t cdsz = b[e+12]|b[e+13]<<8|b[e+14]<<16|(uint32_t)b[e+15]<<24;
+            uint32_t cdoff = b[e+16]|b[e+17]<<8|b[e+18]<<16|(uint32_t)b[e+19]<<24;
+            unsigned char *cd = (unsigned char *) malloc(cdsz);
+            if (cd && fseek(f, cdoff, SEEK_SET) == 0 && fread(cd, 1, cdsz, f) == cdsz) {
+                for (uint32_t i = 0; i + 46 <= cdsz;) {
+                    if (!(cd[i]==0x50&&cd[i+1]==0x4b&&cd[i+2]==1&&cd[i+3]==2)) break;
+                    uint16_t meth = cd[i+10]|cd[i+11]<<8;
+                    uint32_t csz = cd[i+20]|cd[i+21]<<8|cd[i+22]<<16|(uint32_t)cd[i+23]<<24;
+                    uint16_t nl = cd[i+28]|cd[i+29]<<8, xl = cd[i+30]|cd[i+31]<<8, cl = cd[i+32]|cd[i+33]<<8;
+                    uint32_t lho = cd[i+42]|cd[i+43]<<8|cd[i+44]<<16|(uint32_t)cd[i+45]<<24;
+                    if (nl == wl && memcmp(cd + i + 46, want, wl) == 0 && meth == 0) {
+                        unsigned char lh[30];
+                        if (fseek(f, lho, SEEK_SET) == 0 && fread(lh, 1, 30, f) == 30) {
+                            uint16_t ln = lh[26]|lh[27]<<8, lx = lh[28]|lh[29]<<8;
+                            fseek(f, lho + 30 + ln + lx, SEEK_SET);
+                            unsigned char *d = (unsigned char *) malloc(csz);
+                            if (d && fread(d, 1, csz, f) == csz) {
+                                FILE *o = fopen(AB_INT ".tmp", "wb");
+                                if (o) { fwrite(d, 1, csz, o); fclose(o); ok = rename(AB_INT ".tmp", AB_INT) == 0; }
+                            }
+                            free(d);
+                        }
+                        break;
+                    }
+                    i += 46 + nl + xl + cl;
+                }
+            }
+            free(cd);
+        }
+    }
+    free(b); fclose(f);
+    RPI("内置资源清单解出 %s", ok ? "成功" : "失败");
+    return ok;
+}
+static void *rp_getman_hook(void *self, void *mi) {
+    if (self && eg_of_is_off() && g_abload && !*(void **) ((char *) self + 0x38) && g_ab_tried < 3) {
+        g_ab_tried++;
+        const char *path = access(AB_EXT, R_OK) == 0 ? AB_EXT : (rp_extract_manifest() ? AB_INT : NULL);
+        void *ab = path ? g_abload(g_snew(path), NULL) : NULL;
+        if (ab) rp_setf(self, 0x38, ab);
+        RPI("单机：本地资源清单 %s -> %s", path ? path : "(无)", ab ? "已载入" : "载入失败");
+    }
+    return g_getman_orig ? g_getman_orig(self, mi) : NULL;
+}
 static void *rp_uwr_hook(void *self, void *mi) {
-    if (self && g_uwr_url && g_uwr_seturl && eg_of_is_off()) {
+    if (0 && self && g_uwr_url && g_uwr_seturl && eg_of_is_off()) {
         size_t l = 0;
         void *u = g_uwr_url(self, NULL);
         char *t = u ? eg_rec_str(u, &l) : NULL;
@@ -933,6 +1015,10 @@ static void rp_dlog_install(void) {
     g_uwr_seturl = (fn_uwr_seturl) eg_of_method_ptr("UnityEngine.Networking.UnityWebRequest", "set_url", 1, &nf);
     if (uwr && g_uwr_url) A64HookFunction(uwr, (void *) rp_uwr_hook, (void **) &g_uwr_orig);
     RPI("UnityWebRequest 记录 send=%p url=%p", uwr, (void *) g_uwr_url);
+    g_abload = (fn_abload) eg_of_method_ptr("UnityEngine.AssetBundle", "LoadFromFile", 1, &nf);
+    void *gm = eg_of_method_ptr("AssetBundleManager", "getManifest", 0, &nf);
+    if (gm && g_abload) A64HookFunction(gm, (void *) rp_getman_hook, (void **) &g_getman_orig);
+    RPI("资源清单接管 getManifest=%p LoadFromFile=%p", gm, (void *) g_abload);
     RPI("Unity 日志接管 err=%p warn=%p exc=%p msg=%p", le, lw, lx, (void *) g_ex_msg);
 }
 #endif
