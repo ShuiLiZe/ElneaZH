@@ -2,6 +2,31 @@
 
 > 这是给"接手的人或下一次会话"的交付文件：项目现在做到哪、怎么继续。每次有进展都会更新。
 
+## 2026-10-21 12:30 单机不弹账号面板（LPLAY 族）+ 更换游戏身份整机清理
+
+真机两条新反馈：① 单机开着仍弹「账号输入」面板，进不去本地存档；② 点「更换游戏身份」
+后不清数据再进仍卡登录。
+
+① 面板不靠服务器回包 —— 它在 `TitlePanel` 里按本地状态自己弹，所以 09:05 那条
+`EncryptRJ256` 出口兜底闸拦不住它。新增第八族 `EG_TARGET_LPLAY`：
+`openAccountPanel` / `AccountInputButtonClick` / `requestErrorAlert` 单机时不执行；
+`set_isAccountInput(false)` / `set_disableLocalPlay(false)` / `set_isEmytyLocalAccount(true)`
+把状态按到「本地装玩」。不伪造回包，关掉单机立即恢复。顺带修 `eg_offline.h`
+丢失的 `#ifndef`（上一版其实编译不过），`EG_MAX` 96 -> 112，双 ABI 重编入库。
+
+② 换身份只清了 14 个 key，prefs xml 还在，旧 uuid 仍被当成老号（`acc_samples` 里
+同 uuid 第二次 `login.php` 回 `already login!`）。`Backup.wipeIdentity` 改成按文件枚举
+`shared_prefs/` 整文件删除（黑名单跳过汉化自身设置与备份），再清 `files/zh_backup`、
+缓存、Play 安装 id 候选；**不碰 `files/*/sv1_ws_*` 存档**。
+
+自测：`build_gate.py` 双 ABI OK；`verify_gate.py` PASS；`verify_offline.py` 255 项全通过
+（新增 19 项 LPLAY）；`verify_identity.py` OK；`ci_inj.py` javac OK / 85 classes；
+`acc_forensics.py --selftest` PASS(10)；`verify_upload_names.py` PASS；`verify_names.py` OK。
+
+commit：`1eb5801`（身份）、`00482bc`（单机），均在 `feat/offline-share`。
+`fix/anti-flag` 的树里没有单机整条链，A 镜像不过去；B 因分支 `Backup.java` 结构差异
+cherry-pick 撞文件删除冲突，已在 HANDOFF 里如实写明。
+
 ## 2026-10-21 09:05 单机模式真机失效：请求出口兜底闸 + 安装链重写
 
 真机：单机开着仍上传存档、邮箱能领、仍弹账号登录面板。根因是**钩子一个都没挂上**：

@@ -1,6 +1,55 @@
 # HANDOFF — 现状（只写当前状态；过程见 docs/CHANGELOG.md，规矩见 AGENTS.md）
 
-_最后更新：2026-10-21 09:05 CST_
+_最后更新：2026-10-21 12:30 CST_
+
+## 2026-10-21 12:30 单机不弹账号面板 + 更换游戏身份整机清理（待真机验证）
+
+两条独立修复，都在 `feat/offline-share`，已同步到 `fix/anti-flag`（那边只有审计与身份部分，见下）。
+
+### A. 单机仍弹「账号输入」面板 -> 新增本地装玩族 LPLAY（commit 00482bc）
+
+真机：单机开着照样弹面板要账号，进不去本地存档。上一版的请求出口兜底闸（`EG_TARGET_ENC`）
+拦的是 `Cipher::EncryptRJ256`，而**这个面板不靠服务器回包**：它在 `TitlePanel` 里按本地状态
+（要不要账号 / 是不是空本地账号）自己弹。所以堵请求不会让它消失。
+
+第八族 `EG_TARGET_LPLAY`（Java `TARGET_LPLAY = 7` / C `EG_TARGET_LPLAY 8`）：
+
+| 成员 | 单机时 |
+|------|--------|
+| `openAccountPanel` / `AccountInputButtonClick` / `requestErrorAlert` | 直接不执行（返回 NULL）—— 账号框、通信错误框都不出 |
+| `set_isAccountInput(bool)` / `set_disableLocalPlay(bool)` | 传 `false` |
+| `set_isEmytyLocalAccount(bool)` | 传 `true` |
+
+**不伪造任何服务器回包**，只按游戏自己的状态机方向按住；关掉单机立刻恢复原行为。
+顺手修了上一版遗漏的 `eg_offline.h` 头文件保护（`#ifndef` 丢了导致编译失败），
+`EG_MAX` 96 -> 112。两个 ABI 都重编 + strip 并入库。
+
+真机自查：`adb logcat -s ElneaOffline`，应能看到
+`offline: TitlePanel::openAccountPanel skipped (no account/error popup)`；
+`install` 逐族日志里 `family 8 -> k` 的 k 必须 >= 3。
+
+### B. 更换游戏身份仍卡登录 -> 整机身份清理（commit 1eb5801）
+
+真机：点「更换游戏身份」不清数据再进，仍卡登录。原因是只清了 14 个 key：
+prefs xml 仍在，游戏读到旧 uuid 依旧不当新号（`acc_samples` 里同 uuid 第二次 `login.php`
+回的就是 `already login!`）。
+
+`Backup.wipeIdentity` 现在：枚举 `shared_prefs/` 下所有 xml，按文件名黑名单跳过
+（`elneazh_*` / 备份 / 汉化自身设置），**其余整文件删除**——不再假设 key 名单完备；
+再清 `files/zh_backup`、缓存目录、Play 安装 id 候选文件。**不碰玩家存档**
+（`files/*/sv1_ws_*`）。每步 `ElneaOffline` 日志，失败不吞。
+
+`tools/verify_identity.py` 的 prefs 枚举规则按真机文件重写并全绿。
+
+### 分支差异（如实写）
+
+`fix/anti-flag` **没有**单机模式整条链（`Offline.java` / `OfflineGate.java` /
+`NetBlocker.java` / `eg_offline.c` / `tools/verify_offline.py` 都不在该分支树里），
+所以 A 无法镜像过去；B 只涉及 `Backup.java` + `verify_identity.py`，但该分支的
+`Backup.java` 结构与本地装玩/单机部分不同，cherry-pick 必然撞文件删除冲突。
+在 branch 树补齐单机链之前，**B 只在 `feat/offline-share` 生效**；`fix/anti-flag`
+目前只同步了第 5 项（上传审计 `docs/UPLOAD_AUDIT.md` + `tools/acc_forensics.py`，
+commit 5b4920f）。
 
 ## 2026-10-21 09:05 单机模式真机失效：请求出口兜底闸 + 安装链重写（待真机验证）
 
