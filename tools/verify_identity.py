@@ -191,6 +191,52 @@ def main():
         got = 'skip' if f.lower().startswith('elneazh_') else 'scan'
         check('prefs-scan', got, want, f)
 
+    # ---------------------------------------------------------------- 双恢复模式
+    # 真机事故：换身份后导入老存档，restore 把备份里的 uuid/login_key 写回 ->
+    # 身份又变回旧的，还是卡登录。所以恢复必须分两种，且「只恢复存档」一个身份键都不能碰。
+    print('--- 恢复存档：完整 / 只恢复存档 两种模式 ---')
+    import os as _os
+    bj = open(_os.path.join(ROOT, 'inj', 'com', 'shuilize', 'elneazh', 'inj', 'Backup.java'),
+              encoding='utf-8').read()
+    got_sig = 'has-param' if ('final Uri u, final boolean withIdentity' in bj) else '旧签名'
+    check('restore', got_sig, 'has-param', 'restore 带 withIdentity 参数')
+    check('restore', 'has' if 'restore(a, u, true)' in bj else 'missing',
+              'has', '存在「完整恢复（含身份）」入口')
+    check('restore', 'has' if 'restore(a, u, false)' in bj else 'missing',
+              'has', '存在「只恢复存档（保留当前身份）」入口')
+    check('restore', 'has' if '完整恢复（含身份）' in bj else 'missing',
+              'has', 'UI 文案「完整恢复（含身份）」')
+    check('restore', 'has' if '只恢复存档（保留当前身份）' in bj else 'missing',
+              'has', 'UI 文案「只恢复存档（保留当前身份）」')
+    got_skip = ('has' if ('!withIdentity && p.startsWith("shared_prefs/")' in bj
+                          and 'isIdentityPrefFile(' in bj) else 'missing')
+    check('restore', got_skip, 'has', '只恢复存档时跳过身份 prefs 文件')
+    # 关键：只恢复存档模式下 restoreIdentityFile 绝不能被无条件调用
+    check('restore', 'guarded' if 'if (withIdentity) {' in bj and 'restoreIdentityFile(a, prefsXml)' in bj
+              else 'unguarded', 'guarded', 'restoreIdentityFile 受 withIdentity 守卫')
+    check('restore', 'has' if 'stripIdentityKeys' in bj else 'missing',
+              'has', '只恢复存档时逐键剔除身份键（保留画面/音量设置）')
+    check('restore', 'has' if 'isIdentityKey' in bj else 'missing',
+              'has', '身份键共用同一个判定 isIdentityKey')
+
+    # 两处必须同源：换身份删除 / 只恢复存档剔除，都用 isIdentityKey
+    check('identity-key', 'single-source'
+              if bj.count('isIdentityKey(') >= 4 and 'isLoginPrefKey(k, true) || isLoginPrefKey' not in
+              bj.split('static boolean isIdentityKey')[1].split('}')[0] + '}'
+              else 'diverged', 'single-source',
+              'isIdentityKey 是唯一身份键判据（删除与恢复共用）')
+    # 身份键必须真的覆盖第 6 项列出的全部键 + 设备指纹
+    for k in ('uuid', 'login_key', 'althi_uniq', 'token', 'token_id', 'user_id', 'user_uniq',
+              'user_pass', 'user_name', 'user_rename', 'account', 'session', 'session_id', 'device_id'):
+        check('identity-key', pref_key_action(k, 'jp.co.althi.elnea.en.v2.playerprefs.xml'),
+                  'delete', f'身份键 {k} 会被剔除')
+    check('identity-key', pref_key_action('unity.cloud_userid', 'x.xml'), 'delete',
+              '设备指纹 unity.cloud_userid 会被剔除')
+    # 反向：设置键不能被误删
+    for k in ('volume', 'bgm_volume', 'assetbundle_version', 'quality_level'):
+        check('identity-key', pref_key_action(k, 'jp.co.althi.elnea.en.v2.playerprefs.xml'),
+                  'keep', f'设置键 {k} 保留（只恢复存档不能丢设置）')
+
     print('identity wipe OK' if bad == 0 else f'identity wipe WRONG ({bad})')
     return 0 if bad == 0 else 1
 

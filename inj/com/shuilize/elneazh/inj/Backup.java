@@ -543,6 +543,25 @@ final class Backup {
         return LOGIN_PREF_FILES.contains(b);
     }
 
+    /**
+     * 身份键的**唯一**判定入口 —— 换身份删除与「只恢复存档」跳过必须用同一套，
+     * 否则一处删了、一处又写回来，等于没换。
+     * 覆盖：LOGIN_PREF_KEYS 固定名单 + 宽匹配（WIDE_KEY_PARTS）
+     * + Unity 设备级指纹 unity.cloud_userid；KEEP_KEY_PARTS 里的设置键永远不算。
+     */
+    static boolean isIdentityKey(String key) {
+        if (key == null) return false;
+        return isLoginPrefKey(key, true) || isLoginPrefKey(android.net.Uri.decode(key), true);
+    }
+
+    /**
+     * 某个 shared_prefs xml「整文件是不是身份文件」。是则「只恢复存档」整份跳过；
+     * 否则逐键按 {@link #isIdentityKey} 剔除。
+     */
+    static boolean isIdentityPrefFile(String fileName) {
+        return isLoginPrefFile(fileName);
+    }
+
     private static boolean isLoginPrefKey(String k) {
         return isLoginPrefKey(k, false);
     }
@@ -770,7 +789,8 @@ final class Backup {
             boolean whole = isLoginPrefFile(name);
             for (String k : all.keySet()) {
                 String kd = android.net.Uri.decode(k);
-                if (whole || isLoginPrefKey(k, true) || isLoginPrefKey(kd, true)) {
+                // 与「只恢复存档」共用 isIdentityKey —— 一处删、一处留会让换身份两头漏
+                if (whole || isIdentityKey(k) || isIdentityKey(kd)) {
                     e.remove(k);
                     if (hit.length() < 200) hit.append(k).append(' ');
                     n++;
@@ -783,6 +803,40 @@ final class Backup {
             }
             return n;
         } catch (Throwable t) { Log.w(TAG, "clearLoginPrefs " + name, t); return 0; }
+    }
+
+    /**
+     * 「只恢复存档」用：把刚被备份覆盖回来的 PlayerPrefs xml 里的身份键逐条去掉，
+     * 其余设置（画面 / 音量 / 资源版本）保留。判据与换身份删除是同一套
+     * {@link #isIdentityKey}，不会出现「这边删那边留」。
+     */
+    private static void stripIdentityKeys(Context ctx, File prefsXml) {
+        try {
+            String xml = readText(prefsXml);
+            if (xml == null) return;
+            StringBuilder out = new StringBuilder(xml.length());
+            int removed = 0, kept = 0;
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("<(string|int|long|boolean|float)\\s+name=\"([^\"]+)\"[^>]*>[^<]*</\\1>")
+                    .matcher(xml);
+            int pos = 0;
+            while (m.find()) {
+                String k = m.group(2);
+                if (isIdentityKey(k)) {
+                    out.append(xml, pos, m.start());
+                    pos = m.end();
+                    removed++;
+                } else {
+                    kept++;
+                }
+            }
+            out.append(xml.substring(pos));
+            if (removed == 0) { Log.i(TAG, "restore: prefs had no identity key to strip"); return; }
+            java.io.FileOutputStream fo = new java.io.FileOutputStream(prefsXml);
+            try { fo.write(out.toString().getBytes("UTF-8")); } finally { fo.close(); }
+            Log.i(TAG, "restore: stripped " + removed + " identity key(s), kept " + kept
+                    + " setting(s) from " + prefsXml.getName());
+        } catch (Throwable t) { Log.w(TAG, "stripIdentityKeys", t); }
     }
 
     /** 恢复备份时把里面带的 uuid / login_key 一起写回（旧身份能直接回去）。 */
@@ -1116,9 +1170,17 @@ final class Backup {
         try {
             final boolean[] chosen = {false};
             Pop p = new Pop(a, "恢复存档")
-                    .msg("会用这个备份覆盖当前存档（当前存档会先自动备份一份）。恢复后游戏会关闭，请重新打开。")
-                    .btn("恢复", 0, new Runnable() { @Override public void run() { chosen[0] = true; restore(a, u); } })
-                    .btn("取消", 3, null);
+                    .msg("会覆盖当前存档（当前存档先自动备份一份）。恢复后游戏会关闭，请重新打开。");
+            // 身份要不要跟着回来，是两件完全不同的事，必须让用户自己选一次：
+            //  - 完整恢复：连 uuid / login_key 一起写回 —— 等于「回到备份那台机器的身份」。
+            //  - 只恢复存档：跳过全部身份/登录键 —— 换身份之后导老存档用这个，否则一导入身份就回去了。
+            p.row("完整恢复（含身份）",
+                    "存档 + 旧账号身份一起回来；想回到备份时的那个号选这个。",
+                    new Runnable() { @Override public void run() { chosen[0] = true; restore(a, u, true); } });
+            p.row("只恢复存档（保留当前身份）",
+                    "只写回存档，不动 uuid / login_key；换过身份后用这个。单机模式用这个。",
+                    new Runnable() { @Override public void run() { chosen[0] = true; restore(a, u, false); } });
+            p.btn("取消", 3, null);
             p.dlg.setOnDismissListener(new DialogInterface.OnDismissListener() {
                 @Override public void onDismiss(DialogInterface d) { if (!chosen[0]) closeIfRestoreOnly(a); }
             });
@@ -1130,20 +1192,28 @@ final class Backup {
         try { if (a.getIntent() != null && a.getIntent().getBooleanExtra("restore", false)) a.finish(); } catch (Throwable ignored) {}
     }
 
-    private static void restore(final Activity a, final Uri u) {
-        toast(a, "正在恢复…");
+    private static void restore(final Activity a, final Uri u, final boolean withIdentity) {
+        toast(a, withIdentity ? "正在完整恢复…" : "正在恢复存档（保留当前身份）…");
         new Thread(new Runnable() { @Override public void run() {
             try {
                 if (!looksLikeBackup(a, u)) { toast(a, "这不是汉化版的存档备份"); return; }
                 make(a, "恢复前");
                 File data = a.getFilesDir().getParentFile();
                 String base = data.getCanonicalPath() + File.separator;
-                int n = 0;
+                int n = 0, skipped = 0;
                 try (ZipInputStream z = new ZipInputStream(a.getContentResolver().openInputStream(u))) {
                     ZipEntry e;
                     while ((e = z.getNextEntry()) != null) {
                         String p = e.getName();
                         if (e.isDirectory()) continue;
+                        // 「只恢复存档」：身份文件整份跳过 —— 里面就是 uuid / login_key，
+                        // 写回一个 uuid 就等于把旧身份又装回了，换身份白做。
+                        if (!withIdentity && p.startsWith("shared_prefs/")
+                                && isIdentityPrefFile(p.substring("shared_prefs/".length()))) {
+                            skipped++;
+                            Log.i(TAG, "restore: skipped identity prefs " + p);
+                            continue;
+                        }
                         File t;
                         if (p.startsWith("files/") || p.startsWith("shared_prefs/")) {
                             t = new File(data, p);
@@ -1161,10 +1231,21 @@ final class Backup {
                         n++;
                     }
                 }
-                Log.i(TAG, "restored " + n + " files");
-                // 身份（uuid / login_key）一起写回：旧身份解封后恢复即回去
-                File prefsXml = new File(data, "shared_prefs/" + prefsName(a) + ".xml");
-                if (prefsXml.isFile()) restoreIdentityFile(a, prefsXml);
+                Log.i(TAG, "restored " + n + " files, skipped " + skipped + " identity file(s), withIdentity=" + withIdentity);
+                // 身份（uuid / login_key）一起写回：旧身份解封后恢复即回去。只恢复存档时**绝不写**。
+                if (withIdentity) {
+                    File prefsXml = new File(data, "shared_prefs/" + prefsName(a) + ".xml");
+                    if (prefsXml.isFile()) restoreIdentityFile(a, prefsXml);
+                } else {
+                    // 游戏的 PlayerPrefs xml 里除了身份还有画面/音量/资源版本等设置，整份跳过会丢设置，
+                    // 所以这里逐键剔除：身份键全部删掉，其余设置保留。
+                    File prefsXml = new File(data, "shared_prefs/" + prefsName(a) + ".xml");
+                    if (prefsXml.isFile()) stripIdentityKeys(a, prefsXml);
+                    // 双保险：即使 prefs 文件没被扫到（老格式备份放在别处），也按同一套判定再清一次，
+                    // 保证「保留当前身份」这件事在结果上成立。
+                    int wiped = clearAllPrefs(a, data);
+                    Log.i(TAG, "restore: kept current identity, cleared " + wiped + " identity key(s)");
+                }
                 // 换成新身份后本机可能已经跑出了新号的存档；恢复旧备份时先删掉这些「备份里没有的 sv1_*」，
                 // 否则新旧两份存档混在一起。只碰 sv1_*，不碰缓存、不碰汉化表。
                 try {
@@ -1184,7 +1265,8 @@ final class Backup {
                         }
                     }
                 } catch (Throwable t) { Log.w(TAG, "restore cleanup", t); }
-                toast(a, "已恢复 " + n + " 个文件，游戏即将关闭，请重新打开");
+                toast(a, (withIdentity ? "已完整恢复 " : "已恢复存档（身份保留）") + n
+                        + " 个文件，游戏即将关闭，请重新打开");
                 new Handler(Looper.getMainLooper()).postDelayed(new Runnable() { @Override public void run() {
                     try { a.finishAffinity(); } catch (Throwable ignored) {}
                     android.os.Process.killProcess(android.os.Process.myPid());

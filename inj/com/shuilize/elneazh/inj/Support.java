@@ -186,6 +186,8 @@ final class Support {
             }
         });
         row.addView(imp, half2);
+        // 单机说明写在这一行：选择「只恢复存档」的原因主要就是单机
+        smallLine(a, d, card, "导入时可只恢复存档、保留当前身份；单机模式请选这一项。");
 
         // 小文字链接：导出名字对照表
         TextView names = link(a, d, "导出名字对照表（NPC 中文名 ↔ 上传用英文）");

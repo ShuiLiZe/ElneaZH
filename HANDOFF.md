@@ -1,6 +1,54 @@
 # HANDOFF — 现状（只写当前状态；过程见 docs/CHANGELOG.md，规矩见 AGENTS.md）
 
-_最后更新：2026-10-21 12:30 CST_
+_最后更新：2026-10-21 13:05 CST_
+
+## 2026-10-21 13:05 恢复存档拆成两种：完整恢复 / 只恢复存档（保留当前身份）
+
+真机事故链（就是「换完身份还卡登录」的真正原因）：
+
+1. 「更换游戏身份」= 先备份 → **清存档 + 清账号文件**（见上一条）；
+2. 用户随即「导入存档」把刚才的备份导回来；
+3. 而备份里带着 `uuid` / `login_key`，`restore()` 会调用 `restoreIdentityFile()` 把它们**写回**；
+4. 于是身份又变回旧的 —— 换身份这一步白做。**这就是为什么清完还卡登录。**
+
+### 改法
+
+| 改动 | 位置 | 说明 |
+|------|------|------|
+| `restore(a, u, withIdentity)` | `Backup.java` | 加一个明确参数，不再有「隐式连身份一起回来」 |
+| 二次确认弹窗改双选项 | `Backup.confirmRestore` | **完整恢复（含身份）** / **只恢复存档（保留当前身份）** |
+| 只恢复模式下跳身份 prefs | `restore()` 解压循环 | `shared_prefs/` 里命中 `isIdentityPrefFile` 的整份跳过 |
+| 游戏 prefs 逐键剔除 | `stripIdentityKeys()` | 其余设置（画面/音量/资源版本）保留，只删身份键 |
+| 兜底再清一次 | `clearAllPrefs()` | 老格式备份放在别处也能保证结果 |
+| 身份键唯一判据 | `isIdentityKey()` | 换身份删除与只恢复跳过**共用**这一套，杜绝「一处删一处留」 |
+| UI 一行说明 | `Support.java` 存档组 | 「导入时可只恢复存档、保留当前身份；单机模式请选这一项。」 |
+
+`isIdentityKey` 覆盖：`uuid / login_key / althi_uniq / token / token_id / user_id / user_uniq /
+user_pass / user_name / user_rename / account / session / session_id / device_id`
++ 宽匹配（`ulid / udid / login / uniq / session / account / migrant / transfer / device / …`）
++ 设备指纹 `unity.cloud_userid`；`volume / assetbundle_version` 这类设置键永不误删。
+
+### 必须写清楚的事实（抓包结论）
+
+真机抓包（`acc_samples.json`，同一 uuid 连续两次 `login.php`）：**联网时「新 uuid + 旧存档」并不等于能玩**
+——服务器对着一个它没见过的 uuid 回 `already login!` / 或要求重新走登录，存档里的
+`user_id` 与请求身份对不上就会被踢回登录界面。
+
+所以：
+
+- **「只恢复存档（保留当前身份）」主要是给单机模式用的** —— 单机不连服务器，存档就是一切，
+  身份是谁无所谓，还能保住刚换过的新身份 / 或者干脆不换。
+- 联网状态下想玩旧号的存档，要选**「完整恢复（含身份）」**：身份和存档一起回去，
+  对服务器而言就是同一台设备的老账，不会撞 `already login!`。
+- UI 上已用一行字说明（见上表最后一行），不再靠用户猜。
+
+### 自测
+
+`verify_identity.py` 新增 32 项：双模式入口与文案、`restoreIdentityFile` 必须受 `withIdentity` 守卫、
+只恢复模式跳身份 prefs、14 个身份键逐个必须被剔除、`unity.cloud_userid` 必须被剔除、
+`volume / bgm_volume / assetbundle_version / quality_level` 必须保留、
+`isIdentityKey` 单一判据。结果 `identity wipe OK`。
+`ci_inj.py` javac OK / 87 classes；`verify_offline.py` 255 项全通过。
 
 ## 2026-10-21 12:30 单机不弹账号面板 + 更换游戏身份整机清理（待真机验证）
 

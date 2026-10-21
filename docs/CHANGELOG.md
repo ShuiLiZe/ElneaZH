@@ -2,6 +2,24 @@
 
 > 这是给"接手的人或下一次会话"的交付文件：项目现在做到哪、怎么继续。每次有进展都会更新。
 
+## 2026-10-21 13:05 恢复存档拆成「完整恢复」/「只恢复存档」，修掉换身份被备份写回
+
+真机事故链：换身份（备份后清存档+账号文件）→ 立刻导入刚才的备份 → `restore()` 里的
+`restoreIdentityFile()` 把备份中的 `uuid` / `login_key` 写回 → 身份又变回旧的，白换。
+这就是「清完还卡登录」的真正原因。
+
+改法：`restore(a, u, withIdentity)` 显式传参；二次确认给两个选项；
+只恢复模式下 `shared_prefs/` 里的身份文件整份跳过，游戏 prefs 用 `stripIdentityKeys()`
+逐键剔除身份键（画面/音量/资源版本保留），再用 `clearAllPrefs()` 兜底；
+换身份删除与恢复跳过共用 `isIdentityKey()` 一套判据。Support 存档组加一行说明。
+
+抓包事实（`acc_samples.json`，同 uuid 连续两次 `login.php`）：联网时「新 uuid + 旧存档」
+会撞 `already login!`，所以**只恢复存档主要给单机用**，联网玩旧号要选「完整恢复（含身份）」。
+HANDOFF 已写清。
+
+自测：`verify_identity.py` 新增 32 项，`identity wipe OK`；`ci_inj.py` javac OK / 87 classes；
+`verify_offline.py` 255 项全通过。
+
 ## 2026-10-21 12:30 单机不弹账号面板（LPLAY 族）+ 更换游戏身份整机清理
 
 真机两条新反馈：① 单机开着仍弹「账号输入」面板，进不去本地存档；② 点「更换游戏身份」
