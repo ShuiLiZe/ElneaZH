@@ -1062,8 +1062,9 @@ final class Backup {
 
     private static void showList(final Activity a, final List<Item> items) {
         final boolean root = rootOk(a);
-        Pop p = new Pop(a, "存档备份");
-        if (items.isEmpty()) p.msg("还没有备份。");
+        Pop p = new Pop(a, "存档管理");
+        p.msg("联网和单机共用这些备份（单机记录也在里面）。点「读取」恢复，「删除」删掉。");
+        if (items.isEmpty()) p.msg("这里还没看到备份。重装过游戏的话，点「从文件导入」去 Documents/" + DIR + " 里选。");
         for (final Item it : items) p.item(head(it), size(it),
                 new Runnable() { @Override public void run() { confirmRestore(a, it.uri); } },
                 new Runnable() { @Override public void run() { confirmDelete(a, it); } });
@@ -1076,8 +1077,22 @@ final class Backup {
                 manage(a);
             }}).start();
         }});
+        p.btn("从文件导入（别人发的 / 重装前的）", 1, new Runnable() { @Override public void run() { importFile(a); } });
         p.btn("关闭", 3, null);
         p.show();
+    }
+
+    /** 系统文件选择器选一个备份 zip；结果只有 SupportActivity 收得到，所以不在它里面时转过去。 */
+    static void importFile(final Activity a) {
+        try {
+            if (a instanceof SupportActivity) { pick(a); return; }
+            Intent i = new Intent(a, SupportActivity.class);
+            i.putExtra("restore", true);
+            a.startActivity(i);
+        } catch (Throwable t) {
+            Log.w(TAG, "import", t);
+            toast(a, "打不开文件选择器");
+        }
     }
 
     private static void confirmDelete(final Activity a, final Item it) {
