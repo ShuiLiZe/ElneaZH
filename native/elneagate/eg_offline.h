@@ -91,6 +91,10 @@ void *eg_name_gate_target(void);
 // 按名字解析方法入口（剥 PAC）；运行时未就绪返回 NULL 且 *not_found=0
 void *eg_of_method_ptr(const char *klass, const char *method, int argc, int *not_found);
 
+// 方案 B 录制（eg_rec.c）：联网时录请求/回包明文 + 进程内方法表 dump
+void eg_rec_install(void);
+void eg_rec_req(void *plain_str, void *fp);
+
 #ifdef __cplusplus
 }
 #endif

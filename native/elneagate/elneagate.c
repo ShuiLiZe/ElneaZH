@@ -283,6 +283,7 @@ static void *eg_hook(void *plain_str) {
     // 单机：每个请求体的唯一出口在这里断掉 —— 不加密、不发送、不伪造回包（返回 NULL，
     // 调用方走它自己的发送失败分支）。offline 的兜底闸不再另挂这个入口。
     if (eg_of_is_off()) return NULL;
+    if (g_depth == 0) eg_rec_req(plain_str, __builtin_frame_address(0));
     if (g_depth > 0 || !g_orig_enc || !g_string_new) return g_orig_enc ? g_orig_enc(plain_str) : NULL;
     if (plain_str == NULL) return g_orig_enc(plain_str);
 
@@ -530,6 +531,7 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeInstall(JNIEnv *env, jclass cls) {
     g_enc_target = target;
     g_hooked = 1;
     g_diag_code = 0;
+    eg_rec_install();   // 方案 B 录制：只在单机关时录，只读不改
     EG_I("name gate: hooked EncryptRJ256 @ %p+0x%x (base %p, trampoline %p, %lldms)",
          target, ENC_OFFSET, base, (void *) g_orig_enc, eg_now_ms() - t0);
     return 0;

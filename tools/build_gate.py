@@ -32,6 +32,8 @@ SRC = ["native/elneagate/elneagate.c",
        "native/elneagate/eg_names.c",
        "native/elneagate/eg_sym.c",
        "native/elneagate/eg_offline.c",
+       # 方案 B 第一步：联网录制（请求/回包明文 + 进程内方法表）
+       "native/elneagate/eg_rec.c",
        "native/elneagate/vendor/And64InlineHook.cpp"]
 HDRS = ["native/elneagate", "native/elneagate/vendor"]
 

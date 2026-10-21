@@ -106,7 +106,7 @@ def main():
 
     # 2) 没有构造函数
     for name in ("eg_boot.c", "eg_guard.c", "elneagate.c", "eg_offline.c", "eg_sym.c",
-                 "eg_names.c"):
+                 "eg_names.c", "eg_rec.c"):
         p = os.path.join(NAT, name)
         src = strip_comments(read(p))
         check("__attribute__((constructor" not in src.replace(" ", ""),
@@ -185,7 +185,12 @@ def main():
         check("return -1" in head, "eg_of_install 库不在时返回 -1（不是继续往下算偏移）")
     enc = func_body(eg_off, r"static\s+int\s+eg_install_enc_fallback\s*\(\s*void\s*\)")
     check(enc is not None, "eg_install_enc_fallback 存在")
-    if enc:
+    if enc and "EG_ENC_OFFSET" not in enc:
+        # 360d07b 起兜底闸不再按固定偏移写代码，只看名字闸门是否挂上：没有 base+offset 可算。
+        check("eg_name_gate_hooked()" in enc and "A64HookFunction" not in enc
+              and "eg_slot_replace" not in enc,
+              "enc fallback 不写代码（只认名字闸门是否已挂上 EncryptRJ256）")
+    elif enc:
         enc_head = enc.split("EG_ENC_OFFSET")[0]
         check("eg_find_base()" in enc_head and "return -1" in enc_head,
               "enc fallback 算 base+offset 之前先判库存在（base==0 直接 return -1）")
