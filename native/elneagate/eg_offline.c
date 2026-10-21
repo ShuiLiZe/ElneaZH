@@ -537,6 +537,9 @@ static void *eg_dispatch(eg_hook_entry *e, void *a0, void *a1, void *a2, void *a
         }
 
         case EG_TARGET_MASKS:
+            // 方案 B：重放时流程照常，遮罩也照常。真机 23:28：TitlePanel.addMaskCollider →
+            // addMaskColliderClear(ScreenButtonClick) —— 「点击屏幕开始」就是这块遮罩，吞掉它点屏无反应。
+            if (off && eg_replay_active()) break;
             if (off) {
                 g_stats_wait++;
                 LOGI("offline: no mask for %s::%s (page stays usable)", e->klass, e->method);
