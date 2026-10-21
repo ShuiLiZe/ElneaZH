@@ -212,9 +212,34 @@ final class NetBlocker {
             }
         }
 
+        private static volatile URLStreamHandler sysHttp, sysHttps;
+
+        private static URLStreamHandler sysHandler(String proto) {
+            boolean tls = "https".equals(proto);
+            URLStreamHandler h = tls ? sysHttps : sysHttp;
+            if (h != null) return h;
+            String[] names = tls ? new String[]{"com.android.okhttp.HttpsHandler", "libcore.net.http.HttpsHandler"}
+                    : new String[]{"com.android.okhttp.HttpHandler", "libcore.net.http.HttpHandler"};
+            for (String n : names) {
+                try {
+                    java.lang.reflect.Constructor<?> c = Class.forName(n).getDeclaredConstructor();
+                    c.setAccessible(true);
+                    h = (URLStreamHandler) c.newInstance();
+                    break;
+                } catch (Throwable ignored) {
+                }
+            }
+            if (tls) sysHttps = h; else sysHttp = h;
+            return h;
+        }
+
         private URLConnection realDirect(URL u, java.net.Proxy p) throws IOException {
             try {
-                URL copy = new URL(proto, u.getHost(), u.getPort(), u.getFile());
+                // 必须显式带系统 handler：new URL(proto,...) 会再走我们自己的工厂 → 无限递归
+                // （真机 10-22 00:02 firebase 上报 StackOverflowError）。
+                URLStreamHandler h = sysHandler(proto);
+                URL copy = h != null ? new URL(proto, u.getHost(), u.getPort(), u.getFile(), h)
+                        : new URL(proto, u.getHost(), u.getPort(), u.getFile());
                 if (p != null) return copy.openConnection(p);
                 return copy.openConnection();
             } catch (IOException e) {

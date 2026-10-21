@@ -124,6 +124,18 @@ static void rec_write(const char *dir, const char *txt, size_t n, void *fp) {
     pthread_mutex_unlock(&g_rec_lock);
 }
 
+// native.log 摘要：用户导出日志常常漏掉 netrec.log，关键请求/错误回包同时写一份短摘要。
+static void rec_brief(const char *dir, const char *s, size_t n) {
+    if (!s || !n) return;
+    int done = strstr(s, "\"$_sys_result_$\":\"Done.\"") != NULL;
+    if (dir[0] == 'R' && done) return;           // 正常回包不刷屏
+    char b[701];
+    size_t w = n > 700 ? 700 : n, o = 0;
+    for (size_t i = 0; i < w; i++) { char c = s[i]; b[o++] = (c == '\n' || c == '\r') ? ' ' : c; }
+    b[o] = 0;
+    EG_I("rec %s%s len=%lu: %s", dir, done ? "" : (dir[0] == 'R' ? " NOT-DONE" : ""), (unsigned long) n, b);
+}
+
 // 名字闸门的 EncryptRJ256 hook 调进来（入参 = 请求明文 il2cpp String）
 void rp_set_last_tx(char *s);   // eg_replay.c：最近一条请求明文（接管所有权）
 void rp_learn(const char *rx, size_t n);   // eg_replay.c：联网时把「最近请求 → 这条回包」存进重放库
@@ -134,6 +146,7 @@ void eg_rec_req(void *plain_str, void *fp) {
     size_t n = 0;
     char *s = rec_str(plain_str, &n);
     rec_write("TX", s, n, fp);
+    rec_brief("TX", s, n);
     rp_set_last_tx(s);
 }
 
@@ -153,6 +166,7 @@ static void *rec_dec_hook(void *a0) {
         size_t n = 0;
         char *s = rec_str(r, &n);
         rec_write("RX", s, n, __builtin_frame_address(0));
+        rec_brief("RX", s, n);
         if (s && n) rp_learn(s, n);
         if (s && n > 64 && rec_looks_login(s)) {
             FILE *f = fopen(LOGIN_PATH, "w");
