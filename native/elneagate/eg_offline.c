@@ -43,6 +43,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include "vendor/And64InlineHook.hpp"
 
@@ -60,6 +62,14 @@ typedef struct Il2CppAssembly Il2CppAssembly;
 typedef struct Il2CppImage Il2CppImage;
 typedef struct Il2CppClass Il2CppClass;
 typedef struct MethodInfo MethodInfo;
+
+// il2cpp 的 MethodInfo 是「类在托管侧的样子」：第一个字段就是方法入口指针。
+// 这里只用到布局，所以自己声明一个只读视图，不依赖 libil2cpp 的头文件。
+typedef struct {
+    void *methodPointer;   // 0x00：被调用的真实地址（运行时 thunk，可能带 PAC）
+    void *virtualMethod;
+    void *klass;           // 顺序与 il2cpp 头一致，只为了取到第一个字段
+} eg_methodinfo_view;
 
 typedef Il2CppDomain *(*fn_domain_get)(void);
 typedef const Il2CppAssembly **(*fn_domain_get_assemblies)(const Il2CppDomain *domain, size_t *size);
@@ -178,7 +188,9 @@ static Il2CppClass *eg_find_class(const char *ns, const char *klass) {
 
 // 解析 method 的地址；method 为空表示取 static 构造（.cctor）/实例构造（.ctor）
 // argc < 0 表示「参数个数未知，按 0..8 依次试」。
-static void *eg_resolve(void *c, const char *method, int argc) {
+// restore != NULL 时把它填成「MethodInfo->methodPointer 这个字段本身的地址」——
+// 替换 hook 就写在那个槽里（不是往函数体里塞跳转桩）。
+static void *eg_resolve_slot(void *c, const char *method, int argc, void **restore) {
     if (!c || !g_api.ready) return NULL;
     Il2CppClass *klass = (Il2CppClass *) c;
     const MethodInfo *mi = NULL;
@@ -194,7 +206,12 @@ static void *eg_resolve(void *c, const char *method, int argc) {
     }
     if (!mi) return NULL;
     // MethodInfo 的第一个字段就是 methodPointer
+    if (restore) *restore = (void *) (uintptr_t) &((const eg_methodinfo_view *) mi)->methodPointer;
     return *(void **) (const void *) mi;
+}
+
+static void *eg_resolve(void *c, const char *method, int argc) {
+    return eg_resolve_slot(c, method, argc, NULL);
 }
 
 // 运行期：从对象拿它的类（用于「不知道静态类型、但有实例」的 setter 查找）
@@ -242,8 +259,10 @@ typedef struct {
     char ns[48];
     char klass[64];
     char method[64];
-    void *target;        // 解析到的函数地址
-    void *orig;          // trampoline
+    void *target;        // 解析到的函数地址（= MethodInfo->methodPointer，连调用约定都按它）
+    void *slot;          // 该 MethodInfo->methodPointer 字段的地址（改指针就改这里）
+    void *orig;          // 被替换掉的原始函数地址（裸函数指针，调用时直接跳）
+    void *hook;          // 装到槽里的我们的函数
     int target_kind;     // EG_TARGET_*（见 eg_offline.h）
     int installed;
 } eg_hook_entry;
@@ -351,12 +370,20 @@ static int eg_close_panel(void *panel) {
     return eg_hide_object(panel);
 }
 
-// 通用转发：按 x0..x7 原样转给 trampoline。
+// 通用转发：按 x0..x7 原样转给原函数。
+// 原函数地址是 MethodInfo->methodPointer 的原值（已 strip PAC）——直接跳过去即可，
+// 没有 trampoline、没有指令改组，所以 33s 那个 SIGBUS 的路径从这里起就不存在了。
+static void *eg_orig_call(void *orig, void *a0, void *a1, void *a2, void *a3,
+                          void *a4, void *a5, void *a6, void *a7) {
+    if (!orig) return NULL;
+    typedef void *(*fn_t)(void *, void *, void *, void *, void *, void *, void *, void *);
+    return ((fn_t) orig)(a0, a1, a2, a3, a4, a5, a6, a7);
+}
+
 __attribute__((unused))
 static void *eg_dispatch(eg_hook_entry *e, void *a0, void *a1, void *a2, void *a3,
                          void *a4, void *a5, void *a6, void *a7) {
-    typedef void *(*fn_t)(void *, void *, void *, void *, void *, void *, void *, void *);
-    fn_t orig = (fn_t) e->orig;
+    void *orig = e->orig;
     int off = eg_is_off();
 
     switch (e->target_kind) {
@@ -403,7 +430,7 @@ static void *eg_dispatch(eg_hook_entry *e, void *a0, void *a1, void *a2, void *a
         case EG_TARGET_HIDE: {
             // 先跑原方法（让游戏自己把对象初始化/显示完），再立刻藏掉；
             // 这样既不会打断游戏自己的状态，入口也不会在刷新时冒出来。
-            void *r = orig ? orig(a0, a1, a2, a3, a4, a5, a6, a7) : NULL;
+            void *r = eg_orig_call(orig, a0, a1, a2, a3, a4, a5, a6, a7);
             if (off) {
                 if (eg_hide_object(a0)) {
                     g_stats_ui++;
@@ -448,10 +475,10 @@ static void *eg_dispatch(eg_hook_entry *e, void *a0, void *a1, void *a2, void *a
                 g_stats_ui++;
                 LOGI("offline: %s::%s forced to local-play", e->klass, e->method);
                 if (eg_is_lplay_off_setter(e->method)) {
-                    orig(a0, (void *) 0, a1, a2, a3, a4, a5, a6);   // false
+                    eg_orig_call(orig, a0, (void *) 0, a1, a2, a3, a4, a5, a6);   // false
                     return NULL;
                 }
-                orig(a0, (void *) 1, a1, a2, a3, a4, a5, a6);       // true
+                eg_orig_call(orig, a0, (void *) 1, a1, a2, a3, a4, a5, a6);       // true
                 return NULL;
             }
             break;
@@ -459,8 +486,7 @@ static void *eg_dispatch(eg_hook_entry *e, void *a0, void *a1, void *a2, void *a
         default:
             break;
     }
-    if (!orig) return NULL;
-    return orig(a0, a1, a2, a3, a4, a5, a6, a7);
+    return eg_orig_call(orig, a0, a1, a2, a3, a4, a5, a6, a7);
 }
 
 // 兜底入口（挂 EncryptRJ256）。与 eg_dispatch 分开写：这条路径在「开关关着」时必须
@@ -472,7 +498,7 @@ static void *eg_enc_hook(void *a0) {
         LOGI("offline: request body refused at EncryptRJ256 (nothing sent)");
         return NULL;
     }
-    return g_enc_orig ? g_enc_orig(a0) : NULL;
+    return g_enc_orig ? ((eg_enc_fn) g_enc_orig)(a0) : NULL;
 }
 
 #if defined(__aarch64__)
@@ -569,9 +595,77 @@ static int eg_resolve_line(eg_hook_entry *e, const char *line) {
     }
     if (!c) c = eg_find_class("*", e->klass);
     if (!c) return 0;
-    void *fn = eg_resolve(c, e->method, -1);
-    if (!fn) return 0;
+    void *slot = NULL;
+    void *fn = eg_resolve_slot(c, e->method, -1, &slot);
+    // fn == 0 表示这是个没有方法体的成员（抽象/外部实现），没有可替换的地址，跳过
+    if (!fn || !slot) return 0;
     e->target = fn;
+    e->slot = slot;
+    return 1;
+}
+
+// ---------------------------------------------------------------- 指针槽替换（不用 inline hook）
+
+// 真机上为什么会崩（BUS_ADRALN，pc=x17=0xd61f022058000051）：
+// 老做法是 A64HookFunction 往解析到的地址写「LDR X17,#8; BR X17」的跳转桩。而 il2cpp 的方法
+// 地址来自 MethodInfo->methodPointer —— 那是**运行时生成的 thunk**（调用约定适配），函数体里
+// 常有分支跳进自己的中段（如 libil2cpp+0x1b00e9c 里的 `b 0x1b01124`）。往里塞桩 = 把一段
+// 代码的中间挖掉，跨过桩的那条分支会落回被改过的字节上；一旦桩字节被当函数指针读出，
+// `ldr x17,[slot]; br x17` 就直接跳到 0xd61f022058000051 上，SIGBUS。
+//
+// 正确做法：只改 MethodInfo->methodPointer 这一个指针（写真正函数地址、不写字节），
+// 不碰任何指令，所以永远不可能把指令字节当地址，也不会和游戏自己的跳转分支打架。
+
+#define EG_PTR_MASK 0x0000FFFFFFFFFFFFULL
+
+// strip 掉指针上的 PAC / 高位标签（MTE）；ARMv8.3 有 xpaclri，更老的核直接按掩码清
+static void *eg_strip_pac(void *p) {
+    if (!p) return NULL;
+#if defined(__aarch64__)
+    register uintptr_t x17 __asm__("x17") = (uintptr_t) p;
+    __asm__ volatile("hint #7" : "+r"(x17));   // xpaclri
+    p = (void *) x17;
+#endif
+    return (void *) ((uintptr_t) p & (uintptr_t) EG_PTR_MASK);
+}
+
+// 页保护：打开写，用来改 MethodInfo（它在 libil2cpp 的 rw / 映射里，多数时候本来就可写）
+static int eg_page_writable(void *slot) {
+    long ps = sysconf(_SC_PAGESIZE);
+    if (ps <= 0) ps = 4096;
+    uintptr_t start = (uintptr_t) slot & ~((uintptr_t) ps - 1);
+    uintptr_t end = ((uintptr_t) slot + sizeof(void *)) & ~((uintptr_t) ps - 1);
+    if (mprotect((void *) start, (size_t) (end - start) + (size_t) ps, PROT_READ | PROT_WRITE) != 0) {
+        return 0;
+    }
+    __builtin___clear_cache((char *) start, (char *) (end + (uintptr_t) ps));
+    return 1;
+}
+
+// 把 slot 指向的函数换成 hook；orig 里留下原来的（已 strip 的）真实函数地址。
+// 失败返回 0，不改任何东西（真的什么都没写）。
+static int eg_slot_replace(void *slot, void *hook, void **orig) {
+    if (!slot || !hook) return 0;
+    void **p = (void **) slot;
+    void *cur = *p;
+    void *real = eg_strip_pac(cur);
+    // 只接受「看起来像函数」的地址：可读可执行。异常值一律不动。
+    if (!real) return 0;
+    if (!eg_page_writable(slot)) return 0;
+    // ⚠ 不要在这里再 strip 一次 hook 自身：写进去的是我们自己的函数地址，
+    // 带不带 PAC 由编译器说了算，硬清掩码反而会让最后一次 ret 校验失败。
+    *p = hook;
+    __sync_synchronize();
+    if (orig) *orig = real;
+    return 1;
+}
+
+// 还原一个槽（把 orig 写回去）；返回 1 成功
+static int eg_slot_restore(void *slot, void *orig) {
+    if (!slot) return 0;
+    if (!eg_page_writable(slot)) return 0;
+    *(void **) slot = orig;
+    __sync_synchronize();
     return 1;
 }
 
@@ -584,14 +678,26 @@ static int eg_install_enc_fallback(void) {
     void *target = (void *) ((uintptr_t) base + EG_ENC_OFFSET);
     int ok = eg_verify_enc(target);
     if (ok <= 0) {
-        LOGW("encrypt prologue mismatch at %p+0x%x; fallback hook skipped", base, EG_ENC_OFFSET);
+        // 具体字节：真机上才能判断是「基址变了」还是「这版序言不一样」
+        const unsigned char *cur = (const unsigned char *) target;
+        LOGW("encrypt prologue mismatch at %p+0x%x: head=%02x%02x%02x%02x%02x%02x%02x%02x "
+             "(fallback skipped)",
+             base, EG_ENC_OFFSET, cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7]);
         return -3;
     }
 #if defined(__aarch64__)
-    A64HookFunction(target, (void *) eg_enc_hook, (void **) &g_enc_orig);
-    if (!g_enc_orig) { LOGW("fallback hook engine returned no trampoline"); return -2; }
+    // 单机六族一律「改 MethodInfo->methodPointer」；EncryptRJ256 是两个闸门共用的固定偏移入口，
+    // 没有可在运行时解析的 MethodInfo 槽（名字闸门先挂，这里只在它没挂上时补位）。
+    if (eg_name_gate_hooked()) {
+        LOGI("gate: EncryptRJ256 offset hook already owned by name gate; offline fallback skipped");
+        return 1;
+    }
+    if (!eg_slot_replace(target, (void *) eg_enc_hook, (void **) &g_enc_orig)) {
+        LOGW("fallback slot replace failed at %p+0x%x; nothing hooked", base, EG_ENC_OFFSET);
+        return -2;
+    }
     g_enc_hooked = 1;
-    LOGI("fallback hooked EncryptRJ256 @ %p+0x%x", base, EG_ENC_OFFSET);
+    LOGI("fallback hooked EncryptRJ256 @ %p+0x%x (pointer slot replaced)", base, EG_ENC_OFFSET);
     return 1;
 #else
     return -4;
@@ -630,25 +736,28 @@ int eg_of_install(int target, const char *names) {
                 int ok = eg_resolve_line(&tmp, line);
                 int dup = 0;
                 for (int i = 0; ok && i < g_hook_count; i++) {
-                    if (g_hooks[i].target && g_hooks[i].target == tmp.target) { dup = 1; break; }
+                    // 同一个 MethodInfo 槽（同一方法被两族同时点名）只挂一次
+                    if (g_hooks[i].slot && g_hooks[i].slot == tmp.slot) { dup = 1; break; }
                 }
-                if (ok && tmp.target && !dup) {
+                if (ok && tmp.target && tmp.slot && !dup) {
                     int idx = g_hook_count;
                     eg_hook_entry *slot = &g_hooks[idx];
                     *slot = tmp;
                     slot->target_kind = target;
-                    A64HookFunction(slot->target, EG_HOOK_FNS[idx], (void **) &slot->orig);
-                    if (slot->orig) {
+                    slot->hook = EG_HOOK_FNS[idx];
+                    if (EG_HOOK_FNS[idx] && eg_slot_replace(slot->slot, slot->hook, &slot->orig)) {
                         slot->installed = 1;
                         g_hook_count++;          // 提交：从现在起回调读得到这一项
                         g_stats_resolve++;
                     } else {
                         memset(slot, 0, sizeof *slot);
                         skipped++;
-                        LOGW("hook engine returned no trampoline for %s", line);
+                        g_stats_skipped++;
+                        LOGW("slot replace failed (nothing written): %s", line);
                     }
                 } else if (!ok) {
                     skipped++;
+                    g_stats_skipped++;
                     LOGW("resolve miss: %s", line);
                 }
                 if (g_hook_count >= EG_MAX) break;
@@ -662,8 +771,9 @@ int eg_of_install(int target, const char *names) {
     LOGI("install: target=%d hooked %d, skipped %d (total hooked %d, fallback=%d, off=%d)",
          target, added, skipped, g_hook_count, enc, eg_is_off());
     for (int i = before; i < g_hook_count; i++) {
-        LOGI("  hooked[%d] kind=%d %s::%s @ %p", i, g_hooks[i].target_kind,
-             g_hooks[i].klass, g_hooks[i].method, g_hooks[i].target);
+        LOGI("  hooked[%d] kind=%d %s::%s fn=%p slot=%p orig=%p via=slot-replace", i,
+             g_hooks[i].target_kind, g_hooks[i].klass, g_hooks[i].method, g_hooks[i].target,
+             g_hooks[i].slot, g_hooks[i].orig);
     }
     return added;
 }
@@ -672,15 +782,14 @@ int eg_of_uninstall(void) {
     pthread_mutex_lock(&g_install_lock);
     int n = 0;
     if (g_enc_hooked && g_enc_orig) {
-        A64HookFunction((void *) ((uintptr_t) eg_find_base() + EG_ENC_OFFSET),
-                        (void *) g_enc_orig, NULL);
+        eg_slot_restore((void *) ((uintptr_t) eg_find_base() + EG_ENC_OFFSET), (void *) g_enc_orig);
         g_enc_hooked = 0;
         n++;
     }
 #if defined(__aarch64__)
     for (int i = 0; i < g_hook_count; i++) {
-        if (g_hooks[i].installed && g_hooks[i].target) {
-            A64HookFunction(g_hooks[i].target, g_hooks[i].orig, NULL);
+        if (g_hooks[i].installed && g_hooks[i].slot) {
+            eg_slot_restore(g_hooks[i].slot, g_hooks[i].orig);
             g_hooks[i].installed = 0;
             n++;
         }

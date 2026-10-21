@@ -451,6 +451,14 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeHooked(JNIEnv *env, jclass cls) {
     return g_hooked ? JNI_TRUE : JNI_FALSE;
 }
 
+// 给单机闸门用：这个固定偏移上的 EncryptRJ256 是否已经由名字闸门挂上。
+// 两个闸门是同一份 .so 里的两个 .c，靠这个函数协调：谁先挂谁负责，另一个不再动那 40 字节。
+int eg_name_gate_hooked(void);
+
+int eg_name_gate_hooked(void) {
+    return g_hooked ? 1 : 0;
+}
+
 // 自检用：解析诊断。0 = 已挂上；1 = 符号没解析到；2 = 符号有但 40B 入口校验不过；
 // 3 = hook 引擎没给 trampoline；4 = 此 ABI 没有 hook 引擎；-1 = 还没试过。
 // 同时把「用什么方式解析的 / libil2cpp 基址 / 校验位置和实际字节」一起交给 Java 写进 selfcheck。
