@@ -92,6 +92,19 @@ final class OfflineGate {
 
     private static native boolean nativeClassPresent(String klass);
 
+    /** 逐条 hook 台账：每个目标的名字 / 解析到的地址 / 挂的方式 / 成功或失败原因。 */
+    private static native String nativeHookReport();
+
+    /** 台账的安全包装：native 没加载或旧 so 没有这个符号时给一句人话，绝不抛出去。 */
+    static String hookReport() {
+        try {
+            String s = nativeHookReport();
+            return s != null ? s : "hooks: n/a (native returned null)";
+        } catch (Throwable t) {
+            return "hooks: n/a (" + t.getClass().getSimpleName() + ")";
+        }
+    }
+
     // ---------------- 六族钩子（编号必须与 native/elneagate/eg_offline.h 一致） ----------------
 
     /** 纯副作用型的打开入口（返回 NULL 安全）：单机时不执行，入口不创建。 */
@@ -697,7 +710,7 @@ final class OfflineGate {
         }
     }
 
-    private static int encState() {
+    static int encState() {
         try {
             return loaded ? nativeEncState() : -1;
         } catch (Throwable t) {

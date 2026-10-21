@@ -630,3 +630,13 @@ Java_com_shuilize_elneazh_inj_OfflineGate_nativeClassPresent(
     if (k) (*env)->ReleaseStringUTFChars(env, klass, k);
     return ok ? JNI_TRUE : JNI_FALSE;
 }
+
+// 自检用：逐条 hook 台账（名字 / 解析到的地址 / 方式 / 成功或失败原因）。
+JNIEXPORT jstring JNICALL
+Java_com_shuilize_elneazh_inj_OfflineGate_nativeHookReport(JNIEnv *env, jclass cls) {
+    (void) cls;
+    static char buf[6144];
+    int n = eg_of_hook_report(buf, (int) sizeof buf);
+    if (n <= 0) return (*env)->NewStringUTF(env, "hooks: 0 installed / 0 failed");
+    return (*env)->NewStringUTF(env, buf);
+}

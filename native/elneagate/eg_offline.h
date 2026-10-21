@@ -79,6 +79,10 @@ int eg_of_resolvable(const char *ns, const char *klass, const char *method);
 // 只查不调用：这个类在不在运行时里（不区分命名空间）
 int eg_of_class_present(const char *klass);
 
+// 自检：把每一个 hook 目标（已挂 / 未挂）写成多行台账，
+// 每行含 名字 / 解析到的地址 / hook 方式 / 结果或失败原因。返回写入字符数。
+int eg_of_hook_report(char *buf, int cap);
+
 // 名字闸门（elneagate.c）是否已经把固定偏移上的 EncryptRJ256 挂上。
 // 两个闸门共享同一个入口偏移：谁先挂谁负责，另一个不再动那段指令。
 int eg_name_gate_hooked(void);

@@ -123,6 +123,8 @@ final class SelfCheck {
             r.append("offline native http entries: ").append(OfflineGate.countLines(OfflineGate.httpTable())).append('\n');
             r.append("offline native hide entries: ").append(OfflineGate.countLines(OfflineGate.hideTable())).append('\n');
             r.append("offline native mask entries: ").append(OfflineGate.countLines(OfflineGate.masksTable())).append('\n');
+            // 5b) 逐条 hook 台账：名字 / 解析到的地址 / 挂的方式 / 成功或失败原因。
+            r.append("offline native hook report:\n").append(OfflineGate.hookReport()).append('\n');
             r.append("share: ").append(Share.describe()).append('\n');
             r.append("name table lines: ").append(Share.nameTableText(NameFix.aliasSnapshot()).split("\n").length).append('\n');
             // 2b) 存档区块名字槽：0x01 + 长度 + UTF-8 —— 中文名换拼音，其它字节必须不动
@@ -172,6 +174,17 @@ final class SelfCheck {
         r.append("gate installed: ").append(NetGuard.installed())
                 .append(" (native hooked=").append(NameGate.hooked()).append(")\n");
         r.append("offline native: ").append(OfflineGate.describe()).append('\n');
+        if (Offline.isOn(ctx)) {
+            // 单机开着时，native 一个 hook 都没挂上就等于界面/面板那几族没生效：
+            // Java 层的请求拦截还在兜底，但这里必须自己说明白，别让人以为已经全拦住了。
+            boolean nativeOk = OfflineGate.installedAny() || OfflineGate.encState() == 1;
+            r.append("offline native effective: ").append(nativeOk ? "yes" : "no").append('\n');
+            if (!nativeOk) {
+                r.append("offline native note: 单机未完全生效（native 未挂上任何 hook；"
+                        + "请求仍由 Java 层拦截兜底，界面/面板族未生效）\n");
+                r.append("offline native hook report:\n").append(OfflineGate.hookReport()).append('\n');
+            }
+        }
         String text = r.toString();
         Log.i(TAG, "\n" + text);
         try (FileOutputStream o = new FileOutputStream(new File(ctx.getFilesDir(), "elneazh_selfcheck.txt"))) {

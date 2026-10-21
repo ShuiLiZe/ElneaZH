@@ -269,6 +269,45 @@ typedef struct {
 
 static eg_hook_entry g_hooks[EG_MAX];
 
+// ------------------------------------------------------- 失败台账（自检要看）
+// 每个没挂上的目标都记一条：名字、解析到的地址（解析到就有）、挂的方式、失败原因。
+// 用小块字符数组而不是指针，免得还得管生命周期；环形缓冲，最多的几十条都留得住。
+#define EG_MAX_FAIL 40
+#define EG_FAIL_LINE 168
+static char g_fail[EG_MAX_FAIL][EG_FAIL_LINE];
+static int g_fail_count;
+static void eg_fail_add(const char *why, const eg_hook_entry *e, const char *extra) {
+    int i = g_fail_count;
+    if (i >= EG_MAX_FAIL) return;
+    const char *ns = (e && e->ns[0] && !(e->ns[0] == '*' && !e->ns[1])) ? e->ns : "";
+    const char *klass = e ? e->klass : "?";
+    const char *method = (e && e->method[0]) ? e->method : "?";
+    snprintf(g_fail[i], EG_FAIL_LINE, "%s%s%s::%s kind=%d addr=%p slot=%p way=slot-replace why=%s%s%s",
+             ns, ns[0] ? "::" : "", klass, method, e ? e->target_kind : 0,
+             e ? e->target : NULL, e ? e->slot : NULL, why ? why : "?",
+             (extra && extra[0]) ? " " : "", (extra && extra[0]) ? extra : "");
+    g_fail_count++;
+}
+
+// 把失败台账拼成多行文本（一行一条，'\n' 分隔）。buf 不够就截断，绝越界。
+__attribute__((unused))
+static int eg_fail_dump(char *buf, int cap) {
+    if (!buf || cap <= 0) return 0;
+    buf[0] = 0;
+    int used = 0, n = 0;
+    for (int i = 0; i < g_fail_count; i++) {
+        int need = (int) strlen(g_fail[i]) + (i ? 1 : 0);
+        if (used + need + 1 >= cap) break;
+        if (i) buf[used++] = '\n';
+        int len = (int) strlen(g_fail[i]);
+        memcpy(buf + used, g_fail[i], (size_t) len);
+        used += len;
+        buf[used] = 0;
+        n++;
+    }
+    return n;
+}
+
 // GATE 兜底用：上一次成功造出来的面板实例（没有就是 NULL）。
 // 关单机时工厂照常跑，就顺手把它的返回值记在这里；单机时 GATE 族会把最新那个面板收掉。
 static void *eg_panel_last;
@@ -588,17 +627,27 @@ static int eg_resolve_line(eg_hook_entry *e, const char *line) {
     } else {
         e->method[0] = 0;
     }
+    if (!e->method[0]) {
+        eg_fail_add("empty-method-name", e, NULL);
+        return 0;
+    }
     // 『*』表示不限命名空间；否则先按给的名字空间找，找不到再退回不限
     Il2CppClass *c = NULL;
     if (e->ns[0] && !(e->ns[0] == '*' && !e->ns[1])) {
         c = eg_find_class(e->ns, e->klass);
     }
     if (!c) c = eg_find_class("*", e->klass);
-    if (!c) return 0;
+    if (!c) {
+        eg_fail_add("class-not-found", e, NULL);
+        return 0;
+    }
     void *slot = NULL;
     void *fn = eg_resolve_slot(c, e->method, -1, &slot);
     // fn == 0 表示这是个没有方法体的成员（抽象/外部实现），没有可替换的地址，跳过
-    if (!fn || !slot) return 0;
+    if (!fn || !slot) {
+        eg_fail_add("method-not-found-or-no-body", e, NULL);
+        return 0;
+    }
     e->target = fn;
     e->slot = slot;
     return 1;
@@ -750,15 +799,21 @@ int eg_of_install(int target, const char *names) {
                         g_hook_count++;          // 提交：从现在起回调读得到这一项
                         g_stats_resolve++;
                     } else {
+                        eg_hook_entry keep = *slot;   // 留一份带名字和地址的，用来记失败
                         memset(slot, 0, sizeof *slot);
                         skipped++;
                         g_stats_skipped++;
+                        const char *why = EG_HOOK_FNS[idx] ? "slot-write-failed" : "no-hook-fn-for-index";
+                        eg_fail_add(why, &keep, NULL);
                         LOGW("slot replace failed (nothing written): %s", line);
                     }
                 } else if (!ok) {
                     skipped++;
                     g_stats_skipped++;
                     LOGW("resolve miss: %s", line);
+                } else if (dup) {
+                    // 同一族重复点名，不算失败，但留个记号方便对账
+                    eg_fail_add("duplicate-slot-already-hooked", &tmp, NULL);
                 }
                 if (g_hook_count >= EG_MAX) break;
             }
@@ -842,4 +897,42 @@ int eg_of_is_off(void) {
 int eg_of_class_present(const char *klass) {
     if (!klass || !klass[0]) return 0;
     return eg_find_class("*", klass) != NULL;
+}
+
+// ------------------------------------------------------- 自检：逐条 hook 台账
+// 每个挂上的目标一条：名字 / 解析到的地址 / 方式 / 结果。
+// 每个没挂上的也一条：名字 / 解析到的地址（解析到就有）/ 方式 / 失败原因。
+// 返回写入的字符数；超出 cap 就截断（以整行为单位，不切半个字节）。
+int eg_of_hook_report(char *buf, int cap) {
+    if (!buf || cap <= 0) return 0;
+    int used = 0;
+    buf[0] = 0;
+    int total = g_hook_count;
+    int written = snprintf(buf, (size_t) cap, "hooks: %d installed / %d failed\n",
+                           total, g_fail_count);
+    if (written < 0) return 0;
+    if (written >= cap) written = cap - 1;
+    used = written;
+    for (int i = 0; i < total; i++) {
+        const eg_hook_entry *h = &g_hooks[i];
+        const char *ns = (h->ns[0] && !(h->ns[0] == '*' && !h->ns[1])) ? h->ns : "";
+        int n = snprintf(buf + used, (size_t) (cap - used),
+                         "  ok[%d] %s%s%s::%s kind=%d addr=%p slot=%p way=slot-replace orig=%p\n",
+                         i, ns, ns[0] ? "::" : "", h->klass, h->method, h->target_kind,
+                         h->target, h->slot, h->orig);
+        if (n < 0 || used + n >= cap) {
+            buf[used] = 0;
+            return used;
+        }
+        used += n;
+    }
+    for (int i = 0; i < g_fail_count; i++) {
+        int n = snprintf(buf + used, (size_t) (cap - used), "  fail[%d] %s\n", i, g_fail[i]);
+        if (n < 0 || used + n >= cap) {
+            buf[used] = 0;
+            return used;
+        }
+        used += n;
+    }
+    return used;
 }
