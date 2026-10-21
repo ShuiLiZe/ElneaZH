@@ -10,6 +10,9 @@
 //   4 BUTTON  按钮 / 菜单格点击回调：单机时不执行原回调，并把入口对象 SetActive(false)
 //   5 HIDE    入口对象自身 SetActive / set_active / set_visible / 刷新：先跑原方法再隐藏
 //   6 MASKS   AbstractPanel 遮罩：单机时不加遮罩，页面保持可用
+//   7 ENC     Cipher::EncryptRJ256 兜底闸：单机时请求体一律不出去（按固定偏移挂，不靠名字解析）
+//   8 LPLAY   本地装玩：把 TitlePanel「需要输入账号」的状态按成「用本地存档」，
+//             单机时不弹账号输入面板、不弹通信错误框
 #ifndef ELNEAZH_EG_OFFLINE_H
 #define ELNEAZH_EG_OFFLINE_H
 
@@ -26,9 +29,11 @@ extern "C" {
 // 兜底族：Cipher::EncryptRJ256（每个 sns04 请求体的唯一出口）。不需要 il2cpp 按名解析，
 // 用固定偏移挂；单机时直接返回 NULL，让调用方走自己的「加密/发送失败」分支。
 #define EG_TARGET_ENC    7
+// 本地装玩：按 TitlePanel 自己的本地游玩字段把状态按住（不伪造回包）。
+#define EG_TARGET_LPLAY  8
 
 #define EG_TARGET_MIN    1
-#define EG_TARGET_MAX    7
+#define EG_TARGET_MAX    8
 
 // 统计槽数：已挂 / 入口不创建 / 请求拦截 / 隐藏或收面板 / 遮罩跳过 / 解析失败 / 回调异常 / 兜底闸
 #define EG_STATS_SLOTS   8

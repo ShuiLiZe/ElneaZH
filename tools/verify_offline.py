@@ -384,8 +384,38 @@ fp = os.path.join(ROOT, "native/elneagate/eg_offline.h")
 if os.path.isfile(fp):
     hdr = io.open(fp, encoding="utf-8").read()
 check("EG_TARGET_ENC    7" in hdr, "头文件 EG_TARGET_ENC = 7")
-check("EG_TARGET_MAX    7" in hdr, "头文件 EG_TARGET_MAX = 7（兜底族在范围内）")
+check("EG_TARGET_MAX    8" in hdr, "头文件 EG_TARGET_MAX = 8（含本地装玩族）")
+check("EG_TARGET_LPLAY  8" in hdr, "头文件 EG_TARGET_LPLAY = 8（不弹账号输入面板）")
 check("EG_STATS_SLOTS   8" in hdr, "头文件统计槽 8 个（含兜底闸状态）")
+
+# 本地装玩族：单机时不许弹账号输入面板 / 通信错误框
+og = read("OfflineGate.java")
+cro = read_c if False else None  # noqa: F841
+check("TARGET_LPLAY = 7" in og.replace("TARGET_LPLAY = 7 ", "TARGET_LPLAY = 7"),
+      "Java TARGET_LPLAY 常量")
+check("static String lplayTable()" in og, "Java 有 lplayTable()")
+check("{ TARGET_LPLAY, 0 }" in og, "lplayTable 已加入 groups()（会被安装）")
+check("case TARGET_LPLAY: return lplayTable();" in og, "table() 分发到 lplayTable")
+for m in ("openAccountPanel", "AccountInputButtonClick", "requestErrorAlert"):
+    check('"%s"' % m in og, "本地装玩入口 %s 已挂钩（单机不弹）" % m)
+for m in ("set_disableLocalPlay", "set_isAccountInput", "set_isEmytyLocalAccount"):
+    check('"%s"' % m in og, "本地装玩 setter %s 已挂钩（按住为本地存档）" % m)
+check('add(b, "TitlePanel"' in og, "本地装玩钩子挂在 TitlePanel（metadata 里那套本地游玩状态就在这里）")
+
+egc_full = ""
+fp2 = os.path.join(ROOT, "native/elneagate/eg_offline.c")
+if os.path.isfile(fp2):
+    egc_full = io.open(fp2, encoding="utf-8").read()
+check("case EG_TARGET_LPLAY:" in egc_full, "native 有 EG_TARGET_LPLAY 分支")
+check("eg_is_lplay_entry" in egc_full, "native 区分「弹框入口」")
+check("eg_is_lplay_off_setter" in egc_full, "native 区分反向 setter（disableLocalPlay）")
+check("strcmp(m, \"set_disableLocalPlay\") == 0" in egc_full,
+      "set_disableLocalPlay 传 false（true 才是禁用本地装玩）")
+check("单机时不弹账号输入面板" in egc_full or "no account/error popup" in egc_full,
+      "native 注释写清「不弹账号框」")
+# 兜底闸绝不能因为加族而失效
+check("EG_TARGET_ENC    7" in hdr and "eg_enc_hook" in egc_full, "兜底闸仍独立于新族")
+check("EG_MAX 112" in egc_full, "EG_MAX 扩容到 112（装得下新族）")
 
 # Java 侧：安装必须在后台重试到 il2cpp 出现，而不是等 1ms 就返回
 check("INSTALL_WINDOW_MS" in og, "安装窗口是长窗口（不是等 1ms）")

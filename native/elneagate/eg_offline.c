@@ -51,7 +51,7 @@
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-#define EG_MAX 96   // 钩子上限（六族合计）
+#define EG_MAX 112  // 钩子上限（含新增的本地装玩族）
 
 // ---------------------------------------------------------------- il2cpp API
 
@@ -213,6 +213,28 @@ static volatile int g_enabled = 1;
 void eg_of_set_enabled(int on) { g_enabled = on ? 1 : 0; }
 void eg_of_set_state(const char *s) { if (s && s[0]) g_offline_flag = s[0]; }
 static int eg_is_off(void) { return g_enabled && g_offline_flag == '1'; }
+
+// ---------------------------------------------------------------- 本地装玩分类
+//
+// TitlePanel 的成员分两种（见 Java 侧 OfflineGate.lplayTable 的注释）：
+//   * 入口：弹账号框 / 弹通信错误框 —— 单机时直接不执行；
+//   * 状态 setter：把「要不要账号」「是不是空本地账号」按住为「本地装玩」。
+// 注意 set_disableLocalPlay 语义相反（true = 禁用本地装玩），所以要按名字分开判。
+
+// 返回非 0 表示这是「弹框入口」，单机时应直接不执行。
+static int eg_is_lplay_entry(const char *m) {
+    if (!m) return 0;
+    return strcmp(m, "openAccountPanel") == 0
+        || strcmp(m, "AccountInputButtonClick") == 0
+        || strcmp(m, "requestErrorAlert") == 0;
+}
+
+// 返回非 0 表示这个 setter 要传 false（禁用本地装玩），否则传 true。
+static int eg_is_lplay_off_setter(const char *m) {
+    if (!m) return 0;
+    return strcmp(m, "set_disableLocalPlay") == 0
+        || strcmp(m, "set_isAccountInput") == 0;
+}
 
 // ---------------------------------------------------------------- 钩子表
 
@@ -406,6 +428,30 @@ static void *eg_dispatch(eg_hook_entry *e, void *a0, void *a1, void *a2, void *a
             if (off) {
                 g_stats_http++;
                 LOGI("offline: request body refused at %s::%s (nothing sent)", e->klass, e->method);
+                return NULL;
+            }
+            break;
+
+        case EG_TARGET_LPLAY:
+            // 本地装玩。分两种成员：
+            //   * 纯副作用入口（openAccountPanel / AccountInputButtonClick / requestErrorAlert）
+            //     —— 返回值没人用，单机时直接不执行，账号框和通信错误框都不会出现；
+            //   * 状态 setter（set_isAccountInput / set_isEmytyLocalAccount /
+            //     set_disableLocalPlay）—— 单机时把参数固定成「本地装玩」，让游戏自己走
+            //     本地存档那条路。**不伪造任何服务器回包**，只是按它自己的状态机方向按住。
+            if (off) {
+                if (eg_is_lplay_entry(e->method)) {
+                    g_stats_panel++;
+                    LOGI("offline: %s::%s skipped (no account/error popup)", e->klass, e->method);
+                    return NULL;
+                }
+                g_stats_ui++;
+                LOGI("offline: %s::%s forced to local-play", e->klass, e->method);
+                if (eg_is_lplay_off_setter(e->method)) {
+                    orig(a0, (void *) 0, a1, a2, a3, a4, a5, a6);   // false
+                    return NULL;
+                }
+                orig(a0, (void *) 1, a1, a2, a3, a4, a5, a6);       // true
                 return NULL;
             }
             break;

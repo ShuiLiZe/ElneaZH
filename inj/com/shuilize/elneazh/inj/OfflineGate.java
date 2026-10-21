@@ -103,6 +103,8 @@ final class OfflineGate {
     static final int TARGET_HIDE = 5;
     /** 遮罩：单机时不加，页面保持可用。 */
     static final int TARGET_MASKS = 6;
+    /** 本地装玩：单机时把 {@code TitlePanel} 的状态按成「用本地存档」，不弹账号输入面板。 */
+    static final int TARGET_LPLAY = 7;
 
     // ---------------- 该挂哪些方法 ----------------
 
@@ -117,10 +119,11 @@ final class OfflineGate {
         return new int[][] {
                 { TARGET_BUTTON, 0 }, { TARGET_GATE, 0 }, { TARGET_HIDE, 0 },
                 { TARGET_PANEL, 0 }, { TARGET_HTTP, 0 }, { TARGET_MASKS, 0 },
+                { TARGET_LPLAY, 0 },
         };
     }
 
-    /** 按 target 取名单。参数 {@code target} 必须是上面六个常量之一。 */
+    /** 按 target 取名单。参数 {@code target} 必须是上面那些常量之一。 */
     static String table(int target) {
         switch (target) {
             case TARGET_BUTTON: return buttonTable();
@@ -129,6 +132,7 @@ final class OfflineGate {
             case TARGET_PANEL: return panelTable();
             case TARGET_HTTP: return httpTable();
             case TARGET_MASKS: return masksTable();
+            case TARGET_LPLAY: return lplayTable();
             default: return "";
         }
     }
@@ -318,6 +322,34 @@ final class OfflineGate {
         add(b, "AccountInputPanel", "LoginButtonClick");
         add(b, "AccountInputPanel", "createButtonClick");
         add(b, "AccountInputPanel", "SendLogin");
+        return b.toString();
+    }
+
+    /**
+     * 本地游玩（{@link #TARGET_LPLAY}）：把 {@code TitlePanel} 的「没有服务器也要能进」
+     * 开关按游戏自己的那套字段按下去，于是登录失败时不再弹账号输入面板，直接进本地存档。
+     *
+     * <p>依据：{@code TitlePanel} 的成员表里就有一整套本地游玩状态（global-metadata 顺序）：
+     * {@code isChangeUnity} {@code disableLocalPlay} {@code closeLocalPlay}
+     * {@code isAccountInput} {@code isEmytyLocalAccount} {@code isViewLocalPlayWarning}
+     * {@code accountCheck} {@code startLoginRequest} {@code openAccountPanel}
+     * {@code requestErrorAlert}。也就是说「单机」是游戏原生就支持的状态，
+     * 我们只要不让它把状态翻成「需要输入账号」。
+     *
+     * <p>注意：这里<b>不让任何方法返回伪造的回包</b>，只是把「登录没了 → 去要账号」这一步
+     * 换成「登录没了 → 用本地存档」。native 侧对 {@code openAccountPanel} /
+     * {@code requestErrorAlert} 这类纯副作用入口做法与 PANEL 族一致：不执行。
+     */
+    static String lplayTable() {
+        StringBuilder b = new StringBuilder(512);
+        // 「弹账号框 / 弹通信错误」的入口：单机时不执行（返回值没人用）
+        add(b, "TitlePanel", "openAccountPanel");
+        add(b, "TitlePanel", "AccountInputButtonClick");
+        add(b, "TitlePanel", "requestErrorAlert");
+        // 纯状态 setter：单机时强制方向为「本地装玩」，见 native 的 EG_TARGET_LPLAY
+        add(b, "TitlePanel", "set_disableLocalPlay");
+        add(b, "TitlePanel", "set_isAccountInput");
+        add(b, "TitlePanel", "set_isEmytyLocalAccount");
         return b.toString();
     }
 
