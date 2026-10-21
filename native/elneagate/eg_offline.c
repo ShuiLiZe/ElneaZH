@@ -851,7 +851,8 @@ static const char *eg_inline_unsafe(void *fn_raw) {
     size_t l = strlen(info.dli_fname);
     if (l < 12 || strcmp(info.dli_fname + l - 12, "libil2cpp.so") != 0) return "not-in-libil2cpp";
     uintptr_t base = (uintptr_t) info.dli_fbase;
-    if (fn == base + EG_ENC_OFFSET) return "is-EncryptRJ256(name-gate-owned)";
+    if (fn == base + EG_ENC_OFFSET || (eg_name_gate_target() && fn == (uintptr_t) eg_name_gate_target()))
+        return "is-EncryptRJ256(name-gate-owned)";
     if (!eg_mem_ok(fn, 512)) return "unreadable";
     const uint32_t *ins = (const uint32_t *) fn;
     for (int k = 0; k < EG_STUB_LEN / 4; k++) {
@@ -879,26 +880,9 @@ static const char *eg_inline_unsafe(void *fn_raw) {
 // 不依赖 il2cpp 按名解析 —— 即使 HttpSystem 的方法名对不上，请求体也出不了手机。
 static int eg_install_enc_fallback(void) {
     if (g_enc_hooked) return 1;
-    void *base = eg_find_base();
-    if (!base) {
-        // 库还没映射：**绝不能**拿 0 去算 base+offset（真机 SIGSEGV 就是这么来的）
-        EG_I("fallback: libil2cpp not mapped yet, skip (will retry)");
-        return -1;
-    }
-    void *target = (void *) ((uintptr_t) base + EG_ENC_OFFSET);
-    if (!eg_mem_ok((uintptr_t) target, 16)) {
-        EG_I("fallback: target %p outside any readable mapping, skip", target);
-        return -1;
-    }
-    int ok = eg_verify_enc(target);
-    if (ok <= 0) {
-        // 具体字节：真机上才能判断是「基址变了」还是「这版序言不一样」
-        const unsigned char *cur = (const unsigned char *) target;
-        LOGW("encrypt prologue mismatch at %p+0x%x: head=%02x%02x%02x%02x%02x%02x%02x%02x "
-             "(fallback skipped)",
-             base, EG_ENC_OFFSET, cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7]);
-        return -3;
-    }
+    // 兜底闸不再自己按固定偏移校验：名字闸门已经按名字（il2cpp API）找到 EncryptRJ256 并挂好，
+    // 兜底只看它。旧的 40B 序言表有一处是手抄错的（真机 19:43：@0x10 实际 0xb4 / 表里 0xf4），
+    // 导致两道闸门都没挂上。
 #if defined(__aarch64__)
     // 2026-10-21 真机：旧版在这里对「代码地址」做指针槽替换 —— mprotect 把整页改成 RW（去掉了 X），
     // 再把一个 8 字节指针写进 EncryptRJ256 的指令流，任何线程跑到这一页 / 游戏一发请求就崩
@@ -1147,4 +1131,17 @@ int eg_of_hook_report(char *buf, int cap) {
         used += n;
     }
     return used;
+}
+
+
+// 名字闸门用：按名字解析 Cipher::EncryptRJ256 之类的方法入口（剥 PAC）。
+// 运行时没初始化完返回 NULL（调用方稍后重试）；*not_found 置 1 表示运行时就绪但确实找不到。
+void *eg_of_method_ptr(const char *klass, const char *method, int argc, int *not_found) {
+    if (not_found) *not_found = 0;
+    if (!klass || !method) return NULL;
+    if (!eg_api_load() || !eg_runtime_ready()) return NULL;
+    Il2CppClass *c = eg_find_class("*", klass);
+    void *p = c ? eg_resolve(c, method, argc) : NULL;
+    if (!p && not_found) *not_found = 1;
+    return eg_strip_pac(p);
 }

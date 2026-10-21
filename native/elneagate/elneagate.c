@@ -43,6 +43,7 @@
 // ---- 目标：Cipher::EncryptRJ256(string)，base 2.10.7 (base.apk sha 5117bbaa...) ----
 #define ENC_OFFSET      0x18ad7e4u
 #define ENC_PROLOGUE_LEN 40
+#define ENC_VERIFY_LEN 12
 static const unsigned char ENC_PROLOGUE[ENC_PROLOGUE_LEN] = {
     // 0x18ad7e4
     0xfe, 0x0f, 0x1d, 0xf8,   // str  x30, [sp, #-0x30]!
@@ -62,6 +63,7 @@ typedef void *(*enc_fn_t)(void *il2cpp_string);
 static enc_fn_t g_orig_enc;
 static void *g_base;
 static int g_hooked;
+static void *g_enc_target;   // 实际挂上的 EncryptRJ256（按名字解析）
 // nativeInstall 会被 Java 侧每 500ms 轮询调进来：失败日志按次数说话，不刷屏
 #define EG_INSTALL_GIVEUP_TICKS 40
 static int g_install_fail_ticks;
@@ -336,7 +338,9 @@ static int eg_verify(void *addr) {
     memcpy(cur, addr, sizeof cur);
     // 逐字节比：失败时记下第一个不同的位置和「实际/期望」两个字节，真机上直接能对
     g_diag_mismatch = 0;
-    for (size_t i = 0; i < ENC_PROLOGUE_LEN; i++) {
+    // 只比前 12 字节（str x30 / stp / stp 建栈帧）：函数身份已经由按名字解析保证，
+    // 这里只防「入口不是普通建栈帧、inline 搬指令不安全」。后面的 adrp 立即数随构建变化，不比。
+    for (size_t i = 0; i < ENC_VERIFY_LEN; i++) {
         if (cur[i] != ENC_PROLOGUE[i]) {
             g_diag_mismatch = (int) i;
             g_diag_actual = cur[i];
@@ -344,7 +348,7 @@ static int eg_verify(void *addr) {
             break;
         }
     }
-    if (memcmp(cur, ENC_PROLOGUE, sizeof cur) != 0) return 0;
+    if (memcmp(cur, ENC_PROLOGUE, ENC_VERIFY_LEN) != 0) return 0;
     return 1;
 }
 
@@ -476,18 +480,31 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeInstall(JNIEnv *env, jclass cls) {
         return -1;
     }
     g_base = base;
-    void *target = (void *) ((uintptr_t) base + ENC_OFFSET);
-    EG_I("name gate: base=%p target=%p verify... (%lldms)", base, target, eg_now_ms() - t0);
+    // 按名字找 Cipher::EncryptRJ256（il2cpp 运行时 API），不再信固定偏移 + 手抄的 40B 序言表：
+    // 真机 19:43 表里 @0x10 的 adrp 字节是错的（实际 0xb4 / 表 0xf4），闸门从没挂上过。
+    int nf = 0;
+    void *target = eg_of_method_ptr("Cipher", "EncryptRJ256", 1, &nf);
+    if (!target) {
+        g_diag_detail = nf ? 5 : 6;
+        if (nf) {
+            g_diag_code = 2;
+            LOGW("name gate: Cipher::EncryptRJ256 not found by name (runtime ready); not hooking");
+            return -2;
+        }
+        return -1;   // 运行时还没初始化完，稍后再来
+    }
+    void *fixed = (void *) ((uintptr_t) base + ENC_OFFSET);
+    EG_I("name gate: EncryptRJ256 by name @ %p (base+0x%lx; fixed offset %s) (%lldms)", target,
+         (unsigned long) ((uintptr_t) target - (uintptr_t) base),
+         target == fixed ? "matches" : "DIFFERS", eg_now_ms() - t0);
     if (!eg_verify(target)) {
-        // 把具体字节打出来：真机上才能判断是「基址变了」还是「这版序言不一样」
         const unsigned char *cur = (const unsigned char *) target;
         g_diag_code = 2;
         g_diag_verify = 0;
         g_diag_detail = 3;
-        LOGW("verify failed at %p+0x%x: first mismatch @%d actual=0x%02x expect=0x%02x "
+        LOGW("verify failed at %p: first mismatch @%d actual=0x%02x expect=0x%02x "
              "head=%02x%02x%02x%02x%02x%02x%02x%02x %02x%02x%02x%02x%02x%02x%02x%02x (not hooking)",
-             base, ENC_OFFSET, g_diag_mismatch, (unsigned) g_diag_actual,
-             (unsigned) g_diag_expect,
+             target, g_diag_mismatch, (unsigned) g_diag_actual, (unsigned) g_diag_expect,
              cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
              cur[8], cur[9], cur[10], cur[11], cur[12], cur[13], cur[14], cur[15]);
         return -2;
@@ -510,6 +527,7 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeInstall(JNIEnv *env, jclass cls) {
         LOGW("hook engine returned no trampoline at %p+0x%x", base, ENC_OFFSET);
         return -3;
     }
+    g_enc_target = target;
     g_hooked = 1;
     g_diag_code = 0;
     EG_I("name gate: hooked EncryptRJ256 @ %p+0x%x (base %p, trampoline %p, %lldms)",
@@ -595,6 +613,7 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeHooked(JNIEnv *env, jclass cls) {
 // 两个闸门是同一份 .so 里的两个 .c，靠这个函数协调：谁先挂谁负责，另一个不再动那 40 字节。
 int eg_name_gate_hooked(void);
 
+void *eg_name_gate_target(void) { return g_hooked ? g_enc_target : NULL; }
 int eg_name_gate_hooked(void) {
     return g_hooked ? 1 : 0;
 }

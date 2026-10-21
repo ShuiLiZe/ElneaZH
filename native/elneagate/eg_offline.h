@@ -86,6 +86,10 @@ int eg_of_hook_report(char *buf, int cap);
 // 名字闸门（elneagate.c）是否已经把固定偏移上的 EncryptRJ256 挂上。
 // 两个闸门共享同一个入口偏移：谁先挂谁负责，另一个不再动那段指令。
 int eg_name_gate_hooked(void);
+// 名字闸门实际挂的 EncryptRJ256 地址（按名字解析得来；没挂返回 NULL）
+void *eg_name_gate_target(void);
+// 按名字解析方法入口（剥 PAC）；运行时未就绪返回 NULL 且 *not_found=0
+void *eg_of_method_ptr(const char *klass, const char *method, int argc, int *not_found);
 
 #ifdef __cplusplus
 }
