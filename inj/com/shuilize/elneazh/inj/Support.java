@@ -169,29 +169,21 @@ final class Support {
         }));
         smallLine(a, d, card, "启动时也会自动备份，卸载游戏也不丢。备份成功后可以「分享到…」发给别人。");
 
-        // 剩下的只有「导入存档」（导出分享已并入立即备份）
+        // 存档管理：列出全部备份，每份都有「读取 / 删除」，底下还有「从文件导入」。
         LinearLayout.LayoutParams impLp = new LinearLayout.LayoutParams(-1, (int) (46 * d));
         impLp.topMargin = (int) (10 * d);
-        TextView imp = button(a, d, "导入存档", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
+        TextView imp = button(a, d, "存档管理（读取 / 删除 / 导入）", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
             @Override public void onClick(View v) {
                 try {
-                    // 走已有的 restore 流程：选 zip → 二次确认 → 先自动备份当前存档再覆盖
-                    if (a instanceof SupportActivity) {
-                        Backup.pick(a);
-                    } else {
-                        Intent i = new Intent(a, SupportActivity.class);
-                        i.putExtra("restore", true);
-                        a.startActivity(i);
-                    }
+                    Backup.manage(a);
                 } catch (Throwable t) {
-                    Log.w(TAG, "import save", t);
-                    Toast.makeText(a, "导入出错：" + t, Toast.LENGTH_LONG).show();
+                    Log.w(TAG, "save manager", t);
+                    Toast.makeText(a, "打开存档管理出错：" + t, Toast.LENGTH_LONG).show();
                 }
             }
         });
         card.addView(imp, impLp);
-        // 单机说明写在导入下面：选择「只恢复存档」的原因主要就是单机
-        smallLine(a, d, card, "导入时可只恢复存档、保留当前身份；单机模式请选这一项。");
+        smallLine(a, d, card, "联网和单机共用同一套备份。读取时可只恢复存档、保留当前身份；单机模式请选这一项。");
 
         // 小文字链接：导出名字对照表
         TextView names = link(a, d, "导出名字对照表（NPC 中文名 ↔ 上传用英文）");
