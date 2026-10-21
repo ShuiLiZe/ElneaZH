@@ -544,11 +544,45 @@ final class Backup {
     }
 
     private static boolean isLoginPrefKey(String k) {
+        return isLoginPrefKey(k, false);
+    }
+
+    /**
+     * 登录键判定。{@code wide} 打开时按「宽匹配」再判一次 —— 上一个版本只认 14 个固定键名，
+     * 真机上仍然换不掉身份，说明服务器认的字段不止这些（见 HANDOFF 2026-10-21 12:10）：
+     *  - 键名里带 uuid / ulid / udid / login / uniq / token / session / account / migrant /
+     *    transfer / device / user_id … 任一段；
+     *  - Unity Analytics 的 {@code unity.cloud_userid} 是设备级匿名 id，服务器拿它当换身份指纹；
+     *  - 明确属于「资源版本 / 设置 / 我们自己的」键一律不删（KEEP_KEY_PARTS）。
+     */
+    static boolean isLoginPrefKey(String k, boolean wide) {
         if (k == null) return false;
         String s = k.toLowerCase(Locale.US).trim();
         if (s.startsWith("elneazh_")) return false;          // 我们自己的键永远不动
-        return LOGIN_PREF_KEYS.contains(s);
+        if (LOGIN_PREF_KEYS.contains(s)) return true;
+        if (!wide) return false;
+        for (String keep : KEEP_KEY_PARTS) if (s.contains(keep)) return false;
+        if (s.equals("unity.cloud_userid")) return true;
+        for (String hit : WIDE_KEY_PARTS) if (s.contains(hit)) return true;
+        return false;
     }
+
+    /** 宽匹配时命中即删的键名片段（小写）。 */
+    private static final String[] WIDE_KEY_PARTS = {
+            "uuid", "ulid", "udid", "login", "uniq", "token", "session", "account",
+            "migrant", "migrate", "transfer", "first_launch", "firstlaunch",
+            "device", "user_id", "user_uniq", "user_pass", "user_name"};
+    /** 宽匹配时命中即保留的键名片段 —— 资源版本、画面/音量设置、我们自己的表。
+     *  注意：app 自己的「客户端版本/渠道」也带 version/chnl，但那是游戏写的，删了只会重算，
+     *  所以只按整个键名保留 Unity 的 assetbundle_version，不用 'version' 这种大词兜。 */
+    private static final String[] KEEP_KEY_PARTS = {
+            "elneazh_", "assetbundle_version", "ab_version", "volume", "sound",
+            "bgm", "se_", "quality", "resolution", "language", "lang",
+            "brightness", "frame", "graphics", "shadow", "vsync", "fullscreen",
+            "notify", "save_path", "autosave", "font", "scale", "user_dict",
+            "user_skill", "user_item", "user_weapon", "user_mailbox", "user_sale",
+            "user_right", "user_group", "user_locale", "userdata",
+            "player_session"};
 
     /**
      * 换身份：只删「明确属于登录凭证 / 旧存档」的东西，数据包与汉化表一概不碰。
@@ -571,6 +605,43 @@ final class Backup {
             del += deleteSaveFiles(root, 0);
         }
 
+        // 1b) 存档的兄弟文件：version 文本、orgFile 备份、写了一半的 tmp、旧存档目录
+        //     （取证依据：global-metadata 里 SaveData 的 WriteVersionText / ReadVersionText /
+        //      orgFileKey / isBrokenSave / tmpSaveFolder / saveFolder / contentsFolder 字段）
+        for (File root : new File[]{ctx.getFilesDir(), ext}) {
+            if (root == null) continue;
+            for (String sub : new String[]{"zh", "Contents", "save", "saves"}) {
+                File d = new File(root, sub);
+                if (!d.isDirectory()) continue;
+                File[] ls = d.listFiles();
+                if (ls == null) continue;
+                for (File f : ls) {
+                    String nm = f.getName();
+                    if (f.isFile() && (nm.endsWith(".txt") || nm.endsWith(".tmp")
+                            || nm.endsWith(".bak") || nm.endsWith(".org"))) {
+                        try { if (f.delete()) del++; } catch (Throwable ignored) {}
+                    }
+                }
+            }
+        }
+
+        // 1c) 登录目录：SaveData.GetLoginDirectory() 建的那一层（取证：'_loginDirectory'
+        //     'GetLoginDirectory' 'saveFolder' 'contentsFolder'）—— 服务器认旧身份时读的就是它，
+        //     只要它还在，删掉若干 PlayerPrefs 键也照样「already login!」。整层删掉，重开自动重建。
+        for (File root : new File[]{ctx.getFilesDir(), ext}) {
+            if (root == null || !root.isDirectory()) continue;
+            File[] ls = root.listFiles();
+            if (ls == null) continue;
+            for (File d : ls) {
+                if (!d.isDirectory()) continue;
+                String nm = d.getName().toLowerCase(Locale.US);
+                if (nm.contains("login") || nm.contains("account") || nm.equals("uuid")) {
+                    del += deleteTree(d);
+                    Log.i(TAG, "identity: removed login dir " + d);
+                }
+            }
+        }
+
         // 2) files/ 与 ext files 根下的登录凭证文件（althi_uniq 之类，没有扩展名）
         for (File root : new File[]{ctx.getFilesDir(), ext, new File(data, "no_backup")}) {
             if (root == null || !root.isDirectory()) continue;
@@ -579,7 +650,8 @@ final class Backup {
             for (File f : ls) {
                 if (!f.isFile()) continue;
                 String nm = f.getName().toLowerCase(Locale.US);
-                if (isLoginPrefFile(nm) || nm.equals("althi_uniq") || nm.startsWith("althi_uniq")) {
+                if (isLoginPrefFile(nm) || nm.startsWith("althi_uniq") || nm.contains("login")
+                        || nm.contains("uuid") || nm.contains("token") || nm.contains("account")) {
                     try { if (f.delete()) { del++; Log.i(TAG, "identity: removed " + f); } } catch (Throwable ignored) {}
                 }
             }
@@ -590,15 +662,15 @@ final class Backup {
         File[] sps = sp.listFiles();
         if (sps != null) for (File f : sps) {
             if (!f.isFile()) continue;
-            if (isLoginPrefFile(f.getName())) {
+            String nm = f.getName().toLowerCase(Locale.US);
+            if (nm.startsWith("elneazh_") || nm.startsWith("com.shuilize")) continue;   // 我们自己的
+            if (isLoginPrefFile(nm)) {
                 try { if (f.delete()) { del++; Log.i(TAG, "identity: removed " + f); } } catch (Throwable ignored) {}
             }
         }
 
-        // 4) 主 PlayerPrefs：只 remove 登录键，其它（资源版本、设置、音量…）一个不动
-        del += clearLoginPrefs(ctx, prefsName(ctx));
-        del += clearLoginPrefs(ctx, "althi_uniq");
-        del += clearLoginPrefs(ctx, "login_key");
+        // 4) 所有 prefs 文件：宽匹配逐键 remove（登录键），资源版本/设置键原样保留
+        del += clearAllPrefs(ctx, data);
 
         // 5) databases/ 里的账号库
         File db = new File(data, "databases");
@@ -607,13 +679,58 @@ final class Backup {
             if (!f.isFile()) continue;
             String nm = f.getName().toLowerCase(Locale.US);
             boolean hit = false;
-            for (String k : new String[]{"login", "account", "token", "user", "session", "althi"})
+            for (String k : new String[]{"login", "account", "token", "user", "session", "althi", "uuid"})
                 if (nm.contains(k)) { hit = true; break; }
             if (!hit) continue;
             try { if (f.delete()) { del++; Log.i(TAG, "identity: removed " + f); } } catch (Throwable ignored) {}
         }
 
-        Log.i(TAG, "identity wipe (minimal): deleted " + del + "; UnityCache/tables/resource prefs kept");
+        // 6) Unity 的「上次存档摘要」类文件：不清的话重开仍会拿旧摘要去问服务器
+        for (File f : new File[]{new File(data, "shared_prefs"), ctx.getFilesDir()}) {
+            File[] ls = f.listFiles();
+            if (ls == null) continue;
+            for (File x : ls) {
+                String nm = x.getName().toLowerCase(Locale.US);
+                if (x.isFile() && (nm.contains("lastsave") || nm.contains("last_save")
+                        || nm.contains("savetime") || nm.contains("saveinfo"))) {
+                    try { if (x.delete()) del++; } catch (Throwable ignored) {}
+                }
+            }
+        }
+
+        Log.i(TAG, "identity wipe (wide): deleted " + del + "; UnityCache/tables/resource prefs kept");
+    }
+
+    /** 递归删一整棵目录（只用于登录目录这种明确目标）。 */
+    private static int deleteTree(File f) {
+        int n = 0;
+        if (f == null) return 0;
+        File[] ls = f.listFiles();
+        if (ls != null) for (File c : ls) n += c.isDirectory() ? deleteTree(c) : (c.delete() ? 1 : 0);
+        if (f.delete()) n++;
+        return n;
+    }
+
+    /**
+     * 遍历 /data/data/<pkg>/shared_prefs 下每一个 xml，宽匹配删登录键。
+     * 直接读文件而不走 {@code getSharedPreferences}：有些机型上游戏的 prefs 在
+     * /data/user_de/<n>/ 下，getSharedPreferences 拿到的是另一份，删了不生效。
+     */
+    private static int clearAllPrefs(Context ctx, File data) {
+        int n = 0;
+        File sp = new File(data, "shared_prefs");
+        File[] ls = sp.listFiles();
+        if (ls != null) for (File f : ls) {
+            if (!f.isFile() || !f.getName().endsWith(".xml")) continue;
+            String base = f.getName().substring(0, f.getName().length() - 4);
+            if (base.startsWith("elneazh_")) continue;                     // 我们自己的设置
+            n += clearLoginPrefs(ctx, base);
+        }
+        // 游戏用的那份 PlayerPrefs 名字固定（libunity.so 里 '.v2.playerprefs'），保险再来一次
+        n += clearLoginPrefs(ctx, prefsName(ctx));
+        n += clearLoginPrefs(ctx, "althi_uniq");
+        n += clearLoginPrefs(ctx, "login_key");
+        return n;
     }
 
     /** 删 root 下（递归 8 层）所有 sv1_* 存档与临时文件，返回删除数。不进 UnityCache/il2cpp。 */
@@ -641,20 +758,28 @@ final class Backup {
         return n;
     }
 
-    /** 只删登录键；返回删掉的键数。commit 失败也不抛。 */
+    /** 只删登录键（宽匹配）；返回删掉的键数。commit 失败也不抛。 */
     private static int clearLoginPrefs(Context ctx, String name) {
         try {
             SharedPreferences sp = ctx.getSharedPreferences(name, Context.MODE_PRIVATE);
             Map<String, ?> all = sp.getAll();
+            if (all.isEmpty()) return 0;
             SharedPreferences.Editor e = sp.edit();
             int n = 0;
+            StringBuilder hit = new StringBuilder();
+            boolean whole = isLoginPrefFile(name);
             for (String k : all.keySet()) {
                 String kd = android.net.Uri.decode(k);
-                if (isLoginPrefKey(k) || isLoginPrefKey(kd) || isLoginPrefFile(name)) { e.remove(k); n++; }
+                if (whole || isLoginPrefKey(k, true) || isLoginPrefKey(kd, true)) {
+                    e.remove(k);
+                    if (hit.length() < 200) hit.append(k).append(' ');
+                    n++;
+                }
             }
             if (n > 0) {
                 boolean ok = e.commit();
-                Log.i(TAG, "identity: cleared " + n + " login key(s) from " + name + " ok=" + ok);
+                Log.i(TAG, "identity: cleared " + n + " login key(s) from " + name + " ok=" + ok
+                        + " [" + hit.toString().trim() + "]");
             }
             return n;
         } catch (Throwable t) { Log.w(TAG, "clearLoginPrefs " + name, t); return 0; }
