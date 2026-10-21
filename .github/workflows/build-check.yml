@@ -34,6 +34,7 @@ jobs:
             inj/com/shuilize/elneazh/inj/Offline.java \
             inj/com/shuilize/elneazh/inj/Pinyin.java \
             inj/com/shuilize/elneazh/inj/NameFix.java \
+            inj/com/shuilize/elneazh/inj/UploadNames.java \
             inj/com/shuilize/elneazh/inj/OfflineGate.java
           java -cp build/offtest com.shuilize.elneazh.inj.OfflineTest
       - name: Verify base data.unity3d
