@@ -6,8 +6,10 @@
 //           明文回包，rp_learn 把「刚才那条请求 → 这条回包」配对存进重放库 files/elneazh_replay.json）。
 //   单机时（一个字节都不发）：
 //     1) 接管 HttpSystem::connectWWW：照游戏自己「没网」分支的样子（condition=1 → Parse(request,null)
-//        → 返回 null），不建 UnityWebRequest、不加密。不碰 get_IsReachable（TitlePanel.disableLocalPlay
-//        和 GameSystem.Update 都读它，按成 false 会卡标题页）。
+//        → 返回 null），不建 UnityWebRequest、不加密。
+//     1b) get_IsReachable 单机时按成 **true**：TitlePanel.ScreenButtonClick 先调 disableLocalPlay()，
+//        它返回 !IsReachable —— 手机断网时点标题页没反应。按成 true 后游戏照常发起登录，
+//        而真正的发送口 connectWWW 已被上面接管，所以仍然一个字节都不出去。
 //     2) HttpRequest::Parse(this, null) 被接管：用 get_Param + Json.Serialize 得到这次请求的参数，
 //        算签名去重放库查回包，查到就照 Parse 成功分支的样子填 errorMessage / resultCode /
 //        serverVersion / serviceMode / condition，再虚调 HttpNotify(result)（子类各自处理回包，
@@ -364,6 +366,8 @@ static fn_getp g_getp;
 static fn_iserr g_iserr;
 static fn_parse g_parse_orig;
 static fn_conn g_conn_orig;
+typedef int (*fn_reach)(void *);
+static fn_reach g_reach_orig;
 static fn_vget g_vget;
 static fn_wb g_wb;
 static fn_s1 g_snew;
@@ -444,8 +448,15 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
     free(made);
     free(tx);
 }
+static int rp_reach_hook(void *mi) {
+    if (eg_of_is_off() && g_rp_ready) return 1;
+    return g_reach_orig ? g_reach_orig(mi) : 0;
+}
+
 static void *rp_conn_hook(void *self, void *req, void *mi) {
     if (!eg_of_is_off() || !g_rp_ready || !req) return g_conn_orig(self, req, mi);
+    static int n;
+    if (n++ < 50) RPI("connectWWW 接管 #%d", n);
     *(int32_t *) ((char *) req + 0x10) = 1;   // 与原生没网分支一致：先置「请求中」
     rp_parse_hook(req, NULL, NULL);             // 重放（未命中则原始 Parse 报没网）
     return NULL;                                // 协程见 null 直接结束，不 yield、不 finishWWW
@@ -482,7 +493,9 @@ void eg_rp_install(void) {
     }
     A64HookFunction(parse, (void *) rp_parse_hook, (void **) &g_parse_orig);
     A64HookFunction(conn, (void *) rp_conn_hook, (void **) &g_conn_orig);
+    void *reach = eg_of_method_ptr("HttpSystem", "get_IsReachable", 0, &nf);
+    if (reach) A64HookFunction(reach, (void *) rp_reach_hook, (void **) &g_reach_orig);
     if (g_parse_orig && g_conn_orig) g_rp_ready = 1;
-    RPI("单机重放已挂 ready=%d (wb=%p vget=%p)", g_rp_ready, (void *) g_wb, (void *) g_vget);
+    RPI("单机重放已挂 ready=%d reach=%p (wb=%p vget=%p)", g_rp_ready, (void *) g_reach_orig, (void *) g_wb, (void *) g_vget);
 #endif
 }
