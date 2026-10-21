@@ -683,6 +683,10 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
             hit = rp_get_cls(cls);
             pthread_mutex_unlock(&g_map_lock);
         }
+        if (!hit && strcmp(cls, "UserWorldRecovRequest") != 0) {
+            made = strdup("{\"info\":{\"$_sys_result_$\":\"Done.\"},\"result\":\"empty data\n\"}");
+            hit = made;
+        }
         if (!hit) { RPW("单机未命中，按没网处理: %s#?", cls); g_parse_orig(self, www, mi); return; }
         snprintf(sign, sizeof sign, "%s#(类名)", cls);
         tx = strdup("{}");
@@ -735,6 +739,13 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
     }
     if (!hit && strstr(tx, "\"table_name\"")) {
         // 主数据表：本地已有缓存，回「没有更新」（与服务器对未更新表的应答一致）
+        made = strdup("{\"info\":{\"$_sys_result_$\":\"Done.\"},\"result\":\"empty data\n\"}");
+        hit = made;
+    }
+    if (!hit && strcmp(cls, "UserWorldRecovRequest") != 0) {
+        // 一步到位（10-22 01:17 用户要求）：没录到的请求不再当没网（会卡页面/通讯异常），
+        // 一律回「成功、没有更新」。只有存档恢复例外：回空会被当成空存档。
+        RPW("单机未录到 %s %s，回通用成功", cls, sign);
         made = strdup("{\"info\":{\"$_sys_result_$\":\"Done.\"},\"result\":\"empty data\n\"}");
         hit = made;
     }
