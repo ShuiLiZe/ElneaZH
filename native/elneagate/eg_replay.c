@@ -407,6 +407,15 @@ static int rp_emulate(void *self, const char *json) {
     return 1;
 }
 
+// il2cpp 对象的类名（Il2CppClass: image, gc_desc, name, namespaze, ...）
+static const char *rp_cls(void *obj) {
+    if (!obj) return "?";
+    void *k = *(void **) obj;
+    if (!k) return "?";
+    const char *n = *(const char **) ((char *) k + 0x10);
+    return n ? n : "?";
+}
+
 #if defined(__aarch64__)
 static void rp_parse_hook(void *self, void *www, void *mi) {
     if (www || !eg_of_is_off() || !g_rp_ready || !self) { g_parse_orig(self, www, mi); return; }
@@ -429,9 +438,16 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
         free(uid);
         hit = made;
     } else if (rp_sign(tx, tl, sign, sizeof sign)) {
+        // 真机 23:33：登录后本地没存档 → UserWorldRecovRequest（只带 user_id/crypt_key，签名也是 "|"）
+        // 撞上了开场版本检查的回包。按类名区分：先查 "类名#签名"；恢复存档请求没有专门录到就按没网处理。
+        const char *cls = rp_cls(self);
+        char csign[600];
+        snprintf(csign, sizeof csign, "%s#%s", cls, sign);
+        RPI("请求 %s 签名 %s", cls, sign);
         pthread_mutex_lock(&g_map_lock);
-        hit = rp_get(sign);
-        if (!hit) { hit = rp_get_fuzzy(sign); if (hit) RPI("近似命中: %s", sign); }
+        hit = rp_get(csign);
+        if (!hit && strcmp(cls, "UserWorldRecovRequest") != 0) hit = rp_get(sign);
+        if (!hit && strcmp(cls, "UserWorldRecovRequest") != 0) { hit = rp_get_fuzzy(sign); if (hit) RPI("近似命中: %s", sign); }
         pthread_mutex_unlock(&g_map_lock);
     }
     if (!hit && strstr(tx, "\"table_name\"")) {
