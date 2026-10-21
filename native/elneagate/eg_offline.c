@@ -53,9 +53,9 @@
 #include "vendor/And64InlineHook.hpp"
 
 #define TAG "ElneaOffline"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define LOGI(...) eg_plog(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGW(...) eg_plog(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
+#define LOGE(...) eg_plog(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 #define EG_MAX 112  // 钩子上限（含新增的本地装玩族）
 
@@ -150,11 +150,10 @@ static int eg_api_load(void) {
 
 static void *eg_find_base(void) {
     uintptr_t cached = eg_lib_base_cached();
-    if (cached) return (void *) (cached & ~(uintptr_t) (EG_PAGE_16K - 1));
+    if (cached) return (void *) cached;
     uintptr_t b = eg_lib_base("libil2cpp.so");   // phdr 优先；拿不到才退回 maps
     if (!b) return NULL;
-    // 按 16KB 硬页对齐：Android 16 / arm64 常见 16KB 页，避免 +0x18ad7e4 落到非页边界被读错
-    b &= ~(uintptr_t) (EG_PAGE_16K - 1);
+    // dlpi_addr 就是加载偏移，原样用。不要再按 16KB 掩码：4KB 页的机器上会把基址拨偏。
     EG_I("offline: libil2cpp base=%p", (void *) b);
     return (void *) b;
 }
@@ -294,6 +293,7 @@ typedef struct {
     void *hook;          // 装到槽里的我们的函数
     int target_kind;     // EG_TARGET_*（见 eg_offline.h）
     int installed;
+    int way;             // 1 = inline（入口跳转桩，拦得住直接调用）；2 = slot（只改 MethodInfo 指针）
 } eg_hook_entry;
 
 static eg_hook_entry g_hooks[EG_MAX];
@@ -760,6 +760,96 @@ static int eg_slot_restore(void *slot, void *orig) {
     return 1;
 }
 
+
+// ---------------------------------------------------------------- inline 挂钩的安全检查
+//
+// 为什么回到 inline：il2cpp 生成的 C++ 里，非虚调用是直接 bl 到函数地址，根本不读
+// MethodInfo->methodPointer。只改槽 = 只拦得住反射 / UnityEvent 那一小部分调用，
+// TitlePanel 内部自己调 openAccountPanel 完全拦不住（真机：单机仍弹账号输入）。
+//
+// 15:55 那次 SIGBUS（pc=x17=0xd61f022058000051）的真正原因：And64InlineHook 的桩是 16 字节
+// （ldr x17,#8; br x17; .quad addr）。被挂的属性 setter / getter 往往只有 8 字节（str; ret），
+// 桩写穿到下一个函数；下一个函数也被挂时，它的桩把前一个桩的 .quad 改成了指令字节
+// —— 前一个函数执行 ldr x17,#8 读到的就是 58000051 d61f0220。所以规则：
+//   1. 入口 16 字节（4 条指令）内出现 ret / b / br / brk -> 函数太短，不 inline；
+//   2. 与已挂的任一 inline 目标相距 < 16 字节 -> 不 inline；
+//   3. 函数体（到第一个 ret，最多 128 条）里有分支跳进 [入口+1, 入口+16) -> 不 inline；
+//   4. 目标必须落在 libil2cpp.so 里，且不是 EncryptRJ256（那是名字闸门的）。
+// 不满足就退回 slot（只改 MethodInfo 指针，拦一部分调用，至少不崩）。
+#define EG_STUB_LEN 16
+
+static int eg_insn_is_terminal(uint32_t i) {
+    if ((i & 0xfffffc1fu) == 0xd65f0000u) return 1;    // ret Xn
+    if (i == 0xd65f0bffu || i == 0xd65f0fffu) return 1; // retaa / retab
+    if ((i & 0xfc000000u) == 0x14000000u) return 1;    // b imm26
+    if ((i & 0xfffffc1fu) == 0xd61f0000u) return 1;    // br Xn
+    if ((i & 0xfffff800u) == 0xd61f0800u) return 1;    // braa/brab 系
+    if ((i & 0xffe0001fu) == 0xd4200000u) return 1;    // brk
+    return 0;
+}
+
+// 分支目标相对本条指令的字节偏移；不是（直接）分支则 *ok = 0
+static long eg_branch_off(uint32_t i, int *ok) {
+    *ok = 1;
+    if ((i & 0x7c000000u) == 0x14000000u) {             // b / bl imm26
+        long imm = (long) (i & 0x03ffffffu);
+        if (imm & 0x02000000) imm -= 0x04000000;
+        return imm * 4;
+    }
+    if ((i & 0xff000010u) == 0x54000000u) {             // b.cond imm19
+        long imm = (long) ((i >> 5) & 0x7ffffu);
+        if (imm & 0x40000) imm -= 0x80000;
+        return imm * 4;
+    }
+    if ((i & 0x7e000000u) == 0x34000000u) {             // cbz / cbnz imm19
+        long imm = (long) ((i >> 5) & 0x7ffffu);
+        if (imm & 0x40000) imm -= 0x80000;
+        return imm * 4;
+    }
+    if ((i & 0x7e000000u) == 0x36000000u) {             // tbz / tbnz imm14
+        long imm = (long) ((i >> 5) & 0x3fffu);
+        if (imm & 0x2000) imm -= 0x4000;
+        return imm * 4;
+    }
+    *ok = 0;
+    return 0;
+}
+
+static void *eg_strip_pac(void *p);
+
+// NULL = 可以 inline；否则返回原因
+static const char *eg_inline_unsafe(void *fn_raw) {
+    uintptr_t fn = (uintptr_t) eg_strip_pac(fn_raw);
+    if (!fn || (fn & 3)) return "bad-address";
+    Dl_info info;
+    if (!dladdr((void *) fn, &info) || !info.dli_fname) return "not-in-any-module";
+    size_t l = strlen(info.dli_fname);
+    if (l < 12 || strcmp(info.dli_fname + l - 12, "libil2cpp.so") != 0) return "not-in-libil2cpp";
+    uintptr_t base = (uintptr_t) info.dli_fbase;
+    if (fn == base + EG_ENC_OFFSET) return "is-EncryptRJ256(name-gate-owned)";
+    if (!eg_mem_ok(fn, 512)) return "unreadable";
+    const uint32_t *ins = (const uint32_t *) fn;
+    for (int k = 0; k < EG_STUB_LEN / 4; k++) {
+        if (eg_insn_is_terminal(ins[k])) return "too-short(ret/b within 16B)";
+    }
+    for (int k = 0; k < 128; k++) {
+        int ok;
+        long off = eg_branch_off(ins[k], &ok);
+        if (ok && (ins[k] & 0xfc000000u) != 0x94000000u) {   // bl 不算（调用别处）
+            long dst = (long) k * 4 + off;
+            if (dst > 0 && dst < EG_STUB_LEN) return "branch-into-stub";
+        }
+        if (k >= EG_STUB_LEN / 4 && (ins[k] & 0xfffffc1fu) == 0xd65f0000u) break;
+    }
+    for (int i = 0; i < g_hook_count; i++) {
+        if (g_hooks[i].way != 1) continue;
+        uintptr_t o = (uintptr_t) eg_strip_pac(g_hooks[i].target);
+        uintptr_t d = o > fn ? o - fn : fn - o;
+        if (d < EG_STUB_LEN) return d == 0 ? "same-address-already-hooked" : "overlaps-other-hook";
+    }
+    return NULL;
+}
+
 // 兜底闸：把 Cipher::EncryptRJ256 挂上（与名字闸门同一个偏移，各自独立一份 trampoline）。
 // 不依赖 il2cpp 按名解析 —— 即使 HttpSystem 的方法名对不上，请求体也出不了手机。
 static int eg_install_enc_fallback(void) {
@@ -785,19 +875,16 @@ static int eg_install_enc_fallback(void) {
         return -3;
     }
 #if defined(__aarch64__)
-    // 单机六族一律「改 MethodInfo->methodPointer」；EncryptRJ256 是两个闸门共用的固定偏移入口，
-    // 没有可在运行时解析的 MethodInfo 槽（名字闸门先挂，这里只在它没挂上时补位）。
+    // 2026-10-21 真机：旧版在这里对「代码地址」做指针槽替换 —— mprotect 把整页改成 RW（去掉了 X），
+    // 再把一个 8 字节指针写进 EncryptRJ256 的指令流，任何线程跑到这一页 / 游戏一发请求就崩
+    // （「有时候一打开就闪退」）。现在这里绝不写代码：EncryptRJ256 只由名字闸门 inline 挂一次，
+    // 它的 hook（elneagate.c eg_hook）开头就判 eg_of_is_off()，单机时返回 NULL、不加密不发送。
+    (void) eg_enc_hook;
     if (eg_name_gate_hooked()) {
-        LOGI("gate: EncryptRJ256 offset hook already owned by name gate; offline fallback skipped");
+        g_enc_hooked = 1;
         return 1;
     }
-    if (!eg_slot_replace(target, (void *) eg_enc_hook, (void **) &g_enc_orig)) {
-        LOGW("fallback slot replace failed at %p+0x%x; nothing hooked", base, EG_ENC_OFFSET);
-        return -2;
-    }
-    g_enc_hooked = 1;
-    LOGI("fallback hooked EncryptRJ256 @ %p+0x%x (pointer slot replaced)", base, EG_ENC_OFFSET);
-    return 1;
+    return -2;   // 名字闸门还没挂上（它在自己的后台线程里等 libil2cpp），稍后再来
 #else
     return -4;
 #endif
@@ -818,7 +905,7 @@ int eg_of_install(int target, const char *names) {
     // 白花几十次 il2cpp 解析（真机上就是这一串把启动拖住的）。Java 侧也会跳过，
     // 这里是第二道保险（防止别处误调）。
     if (!eg_is_off()) {
-        int enc_off = eg_install_enc_fallback();
+        int enc_off = eg_name_gate_hooked() ? 1 : 0;   // 关单机：什么都不写
         EG_I("offline: off -> skip target=%d hooks (fallback=%d, %lldms)",
              target, enc_off, eg_now_ms() - t0);
         return 0;
@@ -866,7 +953,29 @@ int eg_of_install(int target, const char *names) {
                     EG_I("slot write: [%d] %s::%s slot=%p -> hook=%p (before)", idx, slot->klass,
                          slot->method, slot->slot, slot->hook);
                     long long w0 = eg_now_ms();
-                    if (EG_HOOK_FNS[idx] && eg_slot_replace(slot->slot, slot->hook, &slot->orig)) {
+                    int done = 0;
+                    const char *unsafe = EG_HOOK_FNS[idx] ? eg_inline_unsafe(slot->target) : "no-hook-fn";
+                    if (!unsafe) {
+                        void *tramp = NULL;
+#if defined(__aarch64__)
+                        A64HookFunction(eg_strip_pac(slot->target), slot->hook, &tramp);
+#endif
+                        if (tramp) {
+                            slot->orig = tramp;
+                            slot->way = 1;
+                            done = 1;
+                            EG_I("inline: [%d] %s::%s @%p ok", idx, slot->klass, slot->method, slot->target);
+                        } else {
+                            EG_I("inline: [%d] %s::%s no trampoline", idx, slot->klass, slot->method);
+                        }
+                    } else {
+                        EG_I("inline: [%d] %s::%s skipped (%s) -> slot", idx, slot->klass, slot->method, unsafe);
+                    }
+                    if (!done && EG_HOOK_FNS[idx] && eg_slot_replace(slot->slot, slot->hook, &slot->orig)) {
+                        slot->way = 2;
+                        done = 1;
+                    }
+                    if (done) {
                         slot->installed = 1;
                         g_hook_count++;          // 提交：从现在起回调读得到这一项
                         g_stats_resolve++;
@@ -900,9 +1009,9 @@ int eg_of_install(int target, const char *names) {
     LOGI("install: target=%d hooked %d, skipped %d (total hooked %d, fallback=%d, off=%d, %lldms)",
          target, added, skipped, g_hook_count, enc, eg_is_off(), eg_now_ms() - t0);
     for (int i = before; i < g_hook_count; i++) {
-        LOGI("  hooked[%d] kind=%d %s::%s fn=%p slot=%p orig=%p via=slot-replace", i,
+        LOGI("  hooked[%d] kind=%d %s::%s fn=%p slot=%p orig=%p via=%s", i,
              g_hooks[i].target_kind, g_hooks[i].klass, g_hooks[i].method, g_hooks[i].target,
-             g_hooks[i].slot, g_hooks[i].orig);
+             g_hooks[i].slot, g_hooks[i].orig, g_hooks[i].way == 1 ? "inline" : "slot");
     }
     return added;
 }
@@ -910,16 +1019,11 @@ int eg_of_install(int target, const char *names) {
 int eg_of_uninstall(void) {
     pthread_mutex_lock(&g_install_lock);
     int n = 0;
-    if (g_enc_hooked && g_enc_orig) {
-        // 没基址就根本没挂过（也绝不拿 0 去算地址）
-        void *b = eg_find_base();
-        if (b) eg_slot_restore((void *) ((uintptr_t) b + EG_ENC_OFFSET), (void *) g_enc_orig);
-        g_enc_hooked = 0;
-        n++;
-    }
+    // EncryptRJ256 归名字闸门所有，这里不动它。
 #if defined(__aarch64__)
     for (int i = 0; i < g_hook_count; i++) {
-        if (g_hooks[i].installed && g_hooks[i].slot) {
+        // inline 桩不拆（拆要处理正在执行的线程）；关单机时 eg_dispatch 原样转发，等于没挂。
+        if (g_hooks[i].installed && g_hooks[i].way == 2 && g_hooks[i].slot) {
             eg_slot_restore(g_hooks[i].slot, g_hooks[i].orig);
             g_hooks[i].installed = 0;
             n++;
@@ -993,9 +1097,9 @@ int eg_of_hook_report(char *buf, int cap) {
         const eg_hook_entry *h = &g_hooks[i];
         const char *ns = (h->ns[0] && !(h->ns[0] == '*' && !h->ns[1])) ? h->ns : "";
         int n = snprintf(buf + used, (size_t) (cap - used),
-                         "  ok[%d] %s%s%s::%s kind=%d addr=%p slot=%p way=slot-replace orig=%p\n",
+                         "  ok[%d] %s%s%s::%s kind=%d addr=%p slot=%p way=%s orig=%p\n",
                          i, ns, ns[0] ? "::" : "", h->klass, h->method, h->target_kind,
-                         h->target, h->slot, h->orig);
+                         h->target, h->slot, h->way == 1 ? "inline" : "slot-only(partial)", h->orig);
         if (n < 0 || used + n >= cap) {
             buf[used] = 0;
             return used;

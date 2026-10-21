@@ -36,9 +36,9 @@
 #include "vendor/And64InlineHook.hpp"
 
 #define TAG "ElneaGate"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define LOGI(...) eg_plog(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGW(...) eg_plog(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
+#define LOGE(...) eg_plog(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 // ---- 目标：Cipher::EncryptRJ256(string)，base 2.10.7 (base.apk sha 5117bbaa...) ----
 #define ENC_OFFSET      0x18ad7e4u
@@ -151,6 +151,9 @@ static char *eg_string_to_utf8(void *s, size_t *out_len) {
 #if defined(__aarch64__)
 static void *eg_hook(void *plain_str) {
     g_stats_calls++;
+    // 单机：每个请求体的唯一出口在这里断掉 —— 不加密、不发送、不伪造回包（返回 NULL，
+    // 调用方走它自己的发送失败分支）。offline 的兜底闸不再另挂这个入口。
+    if (eg_of_is_off()) return NULL;
     if (g_depth > 0 || !g_orig_enc || !g_string_new) return g_orig_enc ? g_orig_enc(plain_str) : NULL;
     if (plain_str == NULL) return g_orig_enc(plain_str);
 

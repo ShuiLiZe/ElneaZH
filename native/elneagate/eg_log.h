@@ -27,6 +27,12 @@
 
 #define EG_LOG_TAG "ElneaGate"
 
+// 同时写 logcat 和 files/elneazh_native.log（真机 logcat 被系统日志刷掉，游戏进程那几十秒常常抓不到；
+// 文件日志一定在）。实现在 eg_boot.c；文件 512KB 封顶，JNI_OnLoad 时清空。
+void eg_flog(int prio, const char *tag, const char *msg);
+__attribute__((format(printf, 3, 4)))
+void eg_plog(int prio, const char *tag, const char *fmt, ...);
+
 // 单调时钟毫秒（不受系统时间调整影响）
 static inline long long eg_now_ms(void) {
     struct timespec ts;
@@ -69,7 +75,10 @@ static inline int eg_ilog(const char *fmt, ...) {
     vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
     // 阶段号、线程名/tid、单调毫秒，外加消息本身 —— 一行就够定位「卡在哪」。
-    __android_log_print(ANDROID_LOG_INFO, EG_LOG_TAG, "#%d [%s t=%lldms] %s", step, tb, now, msg);
+    char line[900];
+    snprintf(line, sizeof line, "#%d [%s t=%lldms] %s", step, tb, now, msg);
+    __android_log_print(ANDROID_LOG_INFO, EG_LOG_TAG, "%s", line);
+    eg_flog(ANDROID_LOG_INFO, EG_LOG_TAG, line);
     return step;
 }
 
@@ -90,7 +99,7 @@ static inline int eg_ilog_t(const char *thread, const char *fmt, ...) {
 
 #define EG_W(fmt, ...) do { \
     char _tb[48]; eg_thread_desc(_tb, sizeof _tb); \
-    __android_log_print(ANDROID_LOG_WARN, EG_LOG_TAG, "[%s t=%lldms] " fmt, _tb, eg_now_ms(), ##__VA_ARGS__); \
+    eg_plog(ANDROID_LOG_WARN, EG_LOG_TAG, "[%s t=%lldms] " fmt, _tb, eg_now_ms(), ##__VA_ARGS__); \
 } while (0)
 
 #define EG_I(fmt, ...) eg_ilog(fmt, ##__VA_ARGS__)

@@ -606,11 +606,20 @@ final class OfflineGate {
         boolean api = false;
         while (System.currentTimeMillis() < deadline && !api) {
             api = probe() >= 5;
-            if (!api) sleep(500);
+            if (!api) sleep(100);
             // 等待期间用户可能关掉单机 / crash guard 生效：立刻停手
             if (!Offline.isOn(ctxRef) || !NativeGuard.allowed()) break;
         }
         Log.i(TAG, "il2cpp api probe=" + probe() + "/5 after wait");
+        // libil2cpp 映射了、导出可见了，不代表 il2cpp_init 已跑完：那之前 class_from_name 一律找不到，
+        // 每族都会「0 个解析到」然后当终态放弃（真机 18:58：api 5/5 但 hooks 0/0）。
+        // 所以再等到 TitlePanel 这个类真的出现（每 100ms 看一次），再装 —— 越早装越好，
+        // 必须赶在标题画面跑登录检查之前。
+        while (System.currentTimeMillis() < deadline && api && !classPresent("TitlePanel")) {
+            if (!Offline.isOn(ctxRef) || !NativeGuard.allowed()) break;
+            sleep(100);
+        }
+        Log.i(TAG, "TitlePanel present=" + classPresent("TitlePanel") + " -> installing families");
         for (int i = 0; i < gs.length; i++) {
             if (!Offline.isOn(ctxRef)) {
                 Log.i(TAG, "install aborted mid-way: offline turned off");

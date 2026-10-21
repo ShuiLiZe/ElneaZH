@@ -77,7 +77,9 @@ final class Support {
         // ---------------- 顶行：QQ 群（一行文字 + 群号，点了就复制/打开） ----------------
         TextView qq = new TextView(a);
         qq.setText("汉化交流 QQ 群：" + QQ + "（点这里加入）");
-        qq.setTextColor(BROWN_TEXT);
+        // 用户 2026-10-21：QQ 群这行要和其它说明文字区分开 —— 用链接蓝 + 下划线（与名字对照表链接同色）
+        qq.setTextColor(Color.rgb(0x2F, 0x5D, 0x8A));
+        qq.setPaintFlags(qq.getPaintFlags() | Paint.UNDERLINE_TEXT_FLAG);
         qq.setTextSize(13);
         qq.setGravity(Gravity.CENTER);
         qq.setSingleLine(true);
