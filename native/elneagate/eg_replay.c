@@ -845,7 +845,49 @@ typedef void *(*fn_uwr_send)(void *, void *);
 typedef void *(*fn_uwr_url)(void *, void *);
 static fn_uwr_send g_uwr_orig;
 static fn_uwr_url g_uwr_url;
+typedef void (*fn_uwr_seturl)(void *, void *, void *);
+static fn_uwr_seturl g_uwr_seturl;
+// 真机 10-22 01:40（test-9）根因：资源清单 AssetBundle/…/Android/Android 每次启动都联网拉（不进缓存），
+// 单机拉不到 → AssetBundleManager.downloadAndCache 永远等清单 →「正在切换区域」卡死。
+// 资源包本身按清单里的 hash 存在 Unity 缓存里，有清单就能离线读缓存。
+// 单机时把清单 URL 换成本地：先外部目录 files/elneazh_ab/Android（可手动更新），否则 APK 内置 assets/elneazh/ab/Android。
+static char g_manifest_local[600];
+static const char *rp_manifest_local(void) {
+    if (g_manifest_local[0]) return g_manifest_local;
+    const char *ext = "/sdcard/Android/data/jp.co.althi.elnea.en/files/elneazh_ab/Android";
+    if (access(ext, R_OK) == 0) {
+        snprintf(g_manifest_local, sizeof g_manifest_local, "file://%s", ext);
+        return g_manifest_local;
+    }
+    FILE *m = fopen("/proc/self/maps", "r");
+    if (!m) return NULL;
+    char line[1024];
+    while (fgets(line, sizeof line, m)) {
+        char *p = strchr(line, '/');
+        if (!p || !strstr(p, "base.apk")) continue;
+        char *nl = strchr(p, '\n'); if (nl) *nl = 0;
+        if (!strstr(p, "jp.co.althi.elnea.en")) continue;
+        snprintf(g_manifest_local, sizeof g_manifest_local, "jar:file://%s!/assets/elneazh/ab/Android", p);
+        break;
+    }
+    fclose(m);
+    return g_manifest_local[0] ? g_manifest_local : NULL;
+}
 static void *rp_uwr_hook(void *self, void *mi) {
+    if (self && g_uwr_url && g_uwr_seturl && eg_of_is_off()) {
+        size_t l = 0;
+        void *u = g_uwr_url(self, NULL);
+        char *t = u ? eg_rec_str(u, &l) : NULL;
+        if (t && l > 16 && strstr(t, "/AssetBundle/") && strcmp(t + strlen(t) - 16, "/Android/Android") == 0) {
+            const char *loc = rp_manifest_local();
+            if (loc) {
+                g_uwr_seturl(self, g_snew(loc), NULL);
+                static int k;
+                if (k++ < 3) RPI("单机：资源清单改读本地 %s", loc);
+            } else RPW("单机：找不到本地资源清单");
+        }
+        free(t);
+    }
     static int n;
     if (n < 200 && self && g_uwr_url) {
         n++;
@@ -888,6 +930,7 @@ static void rp_dlog_install(void) {
     RPI("网络状态接管 inet=%p", inet);
     g_uwr_url = (fn_uwr_url) eg_of_method_ptr("UnityEngine.Networking.UnityWebRequest", "get_url", 0, &nf);
     void *uwr = eg_of_method_ptr("UnityEngine.Networking.UnityWebRequest", "SendWebRequest", 0, &nf);
+    g_uwr_seturl = (fn_uwr_seturl) eg_of_method_ptr("UnityEngine.Networking.UnityWebRequest", "set_url", 1, &nf);
     if (uwr && g_uwr_url) A64HookFunction(uwr, (void *) rp_uwr_hook, (void **) &g_uwr_orig);
     RPI("UnityWebRequest 记录 send=%p url=%p", uwr, (void *) g_uwr_url);
     RPI("Unity 日志接管 err=%p warn=%p exc=%p msg=%p", le, lw, lx, (void *) g_ex_msg);
