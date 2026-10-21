@@ -693,7 +693,13 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
         tl = 2;
     }
     rp_note_appver(tx);
-    if (rp_is_write(tx)) {
+    if (!strstr(tx, "\"savedata\"") && strstr(tx, "\"action\":\"")) {
+        // 打点（KpiRequest action=Start 等）：真机 10-22 01:15 给了存档式回包后游戏停住不再发请求。
+        // 打点服务端不回业务数据，按「成功、无内容」应答。
+        RPI("打点 %s 回通用成功", cls);
+        made = strdup("{\"info\":{\"$_sys_result_$\":\"Done.\"},\"result\":\"empty data\n\"}");
+        hit = made;
+    } else if (rp_is_write(tx)) {
         // 写存档：有录到的同类写入回包就用它（带 crypt_key 等游戏要的字段），否则自造一份。
         // 真机 10-22 01:10：自造 ack 只有 save_count/user_id，游戏收到后退回标题画面。
         char csign[600];
