@@ -604,6 +604,19 @@ static int rp_emulate(void *self, const char *json) {
     return 1;
 }
 
+// 按类名取录制回包："类名#..." 的键，只有一条时返回它（多条取最长的那条，通常是完整回包）。调用方持锁。
+static const char *rp_get_cls(const char *cls) {
+    size_t n = strlen(cls);
+    const char *best = NULL; size_t bl = 0;
+    for (int b = 0; b < RP_BUCKETS; b++)
+        for (rp_e *e = g_map[b]; e; e = e->next)
+            if (strncmp(e->key, cls, n) == 0 && e->key[n] == '#') {
+                size_t l = strlen(e->val);
+                if (l > bl) { best = e->val; bl = l; }
+            }
+    return best;
+}
+
 // il2cpp 对象的类名（Il2CppClass: image, gc_desc, name, namespaze, ...）
 static const char *rp_cls(void *obj) {
     if (!obj) return "?";
@@ -645,29 +658,68 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
         }
         return;
     }
+    const char *cls = rp_cls(self);
     void *param = g_getp(self, NULL);
     void *js = param ? g_ser(param, NULL) : NULL;
     size_t tl = 0;
     char *tx = js ? eg_rec_str(js, &tl) : NULL;
-    if (!tx) { g_parse_orig(self, www, mi); return; }
+    if (!tx && param) {   // 真机 10-22 01:10：偶发 get_Param 序列化取不到 → 原逻辑当没网，登录重试 10 次后「通讯异常」。再取一次。
+        js = g_ser(param, NULL);
+        tx = js ? eg_rec_str(js, &tl) : NULL;
+    }
     rp_load();
-    rp_note_appver(tx);
     const char *hit = NULL;
     char *made = NULL;
     char sign[512];
     sign[0] = 0;
+    if (!tx) {
+        // 拿不到请求明文：按类名找唯一的录制回包（LoginRequest、User*Request 都只有一条）
+        RPW("单机：%s 取不到请求参数（param=%s js=%s），按类名重放", cls, param ? "有" : "空", js ? "有" : "空");
+        if (strcmp(cls, "MasterRequest") == 0) {   // 主数据表很多张，类名分不出是哪张：回「没有更新」
+            made = strdup("{\"info\":{\"$_sys_result_$\":\"Done.\"},\"result\":\"empty data\n\"}");
+            hit = made;
+        } else {
+            pthread_mutex_lock(&g_map_lock);
+            hit = rp_get_cls(cls);
+            pthread_mutex_unlock(&g_map_lock);
+        }
+        if (!hit) { RPW("单机未命中，按没网处理: %s#?", cls); g_parse_orig(self, www, mi); return; }
+        snprintf(sign, sizeof sign, "%s#(类名)", cls);
+        tx = strdup("{}");
+        tl = 2;
+    }
+    rp_note_appver(tx);
     if (rp_is_write(tx)) {
-        char *uid = rp_json_str(tx, "user_id");
-        made = (char *) malloc(512);
-        if (made) snprintf(made, 512, "{\"info\":{\"$_sys_result_$\":\"Done.\"},\"result\":"
-                                      "{\"save_count\":\"1\",\"user_id\":\"%s\",\"disable_gem\":\"0\"}}",
-                           uid ? uid : "0");
-        free(uid);
-        hit = made;
-    } else if (rp_sign(tx, tl, sign, sizeof sign)) {
-        // 真机 23:33：登录后本地没存档 → UserWorldRecovRequest（只带 user_id/crypt_key，签名也是 "|"）
-        // 撞上了开场版本检查的回包。按类名区分：先查 "类名#签名"；恢复存档请求没有专门录到就按没网处理。
-        const char *cls = rp_cls(self);
+        // 写存档：有录到的同类写入回包就用它（带 crypt_key 等游戏要的字段），否则自造一份。
+        // 真机 10-22 01:10：自造 ack 只有 save_count/user_id，游戏收到后退回标题画面。
+        char csign[600];
+        if (rp_sign(tx, tl, sign, sizeof sign)) {
+            snprintf(csign, sizeof csign, "%s#%s", cls, sign);
+            pthread_mutex_lock(&g_map_lock);
+            hit = rp_get(csign);
+            if (!hit) hit = rp_get(sign);
+            pthread_mutex_unlock(&g_map_lock);
+        }
+        RPI("写存档 %s 签名 %s %s", cls, sign, hit ? "用录制回包" : "自造回包");
+        if (!hit) {
+            char *uid = rp_json_str(tx, "user_id");
+            char *ck = NULL;
+            pthread_mutex_lock(&g_map_lock);
+            for (int b = 0; b < RP_BUCKETS && !ck; b++)
+                for (rp_e *e = g_map[b]; e && !ck; e = e->next) {
+                    if (!strstr(e->val, "crypt_key")) continue;
+                    ck = rp_json_str(e->val, "crypt_key");
+                    if (!uid) uid = rp_json_str(e->val, "user_id");
+                }
+            pthread_mutex_unlock(&g_map_lock);
+            made = (char *) malloc(768);
+            if (made) snprintf(made, 768, "{\"info\":{\"$_sys_result_$\":\"Done.\"},\"result\":"
+                                          "{\"save_count\":\"1\",\"user_id\":\"%s\",\"crypt_key\":\"%s\",\"disable_gem\":\"0\"}}",
+                               uid ? uid : "0", ck ? ck : "");
+            free(uid); free(ck);
+            hit = made;
+        }
+    } else if (!hit && rp_sign(tx, tl, sign, sizeof sign)) {
         char csign[600];
         snprintf(csign, sizeof csign, "%s#%s", cls, sign);
         RPI("请求 %s 签名 %s", cls, sign);
@@ -701,6 +753,7 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
         pthread_mutex_unlock(&g_map_lock);
     }
     RPI("单机重放: %s", made ? (rp_is_write(tx) ? "write-ack" : "empty-data") : sign);
+    (void) cls;
     if (!rp_emulate(self, hit)) g_parse_orig(self, www, mi);
     free(made);
     free(tx);
