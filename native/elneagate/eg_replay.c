@@ -431,7 +431,20 @@ static const char *rp_cls(void *obj) {
 
 #if defined(__aarch64__)
 static void rp_parse_hook(void *self, void *www, void *mi) {
-    if (www || !eg_of_is_off() || !g_rp_ready || !self) { g_parse_orig(self, www, mi); return; }
+    if (www || !eg_of_is_off() || !g_rp_ready || !self) {
+        g_parse_orig(self, www, mi);
+        // 联网出错时把游戏自己记下的错误写进 native.log（www.error 或服务端 "." 开头的明文错误）
+        if (self && !eg_of_is_off() && *(int32_t *) ((char *) self + 0x10) == 3) {
+            size_t a = 0, b = 0;
+            char *em = eg_rec_str(*(void **) ((char *) self + 0x20), &a);
+            char *rc = eg_rec_str(*(void **) ((char *) self + 0x30), &b);
+            if (em && a > 600) em[600] = 0;
+            RPW("联网请求出错 %s www=%s err=[%s] code=[%s]", rp_cls(self), www ? "有" : "空",
+                 em ? em : "", rc ? rc : "");
+            free(em); free(rc);
+        }
+        return;
+    }
     void *param = g_getp(self, NULL);
     void *js = param ? g_ser(param, NULL) : NULL;
     size_t tl = 0;
