@@ -153,6 +153,10 @@ final class Backup {
         if (SKIP_DIRS.contains(nm)) return 0;
         if (tables.contains(nm) && (path.endsWith("/zh/" + nm) || path.endsWith("/Contents/" + nm))) return 0;
         if (path.startsWith("shared_prefs/elneazh_backup")) return 0;
+        // 单机开关（elneazh_settings/offline）是我们自己的运行设置，不属于存档：
+        // 备份里带上它，恢复别人的存档就会把「单机开/关」一起换掉，用户会莫名其妙断网/联网。
+        // 换身份同样不动它（wipe 跳过 elneazh_* 前缀），恢复时保留当前值。
+        if (path.startsWith("shared_prefs/elneazh_settings")) return 0;
         lst.append(path).append('\t').append(f.length()).append('\n');
         z.putNextEntry(new ZipEntry(path));
         try (InputStream in = new FileInputStream(f)) { pipe(in, z); }
@@ -681,8 +685,16 @@ final class Backup {
         }
 
         del += wipeWebStorage(ctx);
+
+        // 7) 设备码 / 账号块在游戏私有目录**之外**的副本 —— 真机「换了身份还是旧账号」的头号原因。
+        //    取证：getExternalFilesDir(null)/althi_uniq 里有一份 41 字符的设备码（/sdcard/Android/data/
+        //    <pkg>/files/althi_uniq），删了 files/ 与 prefs 里的键它还在，重开又被读回来；
+        //    /sdcard 根、Documents、游戏目录的其它子目录也可能有同名副本。
+        del += wipeIdentityCopies(ctx);
+
         Log.i(TAG, "identity wipe (wide): deleted " + del + "; UnityCache/tables/resource prefs kept");
-        Log.i(TAG, "identity wipe summary: prefs keys + save files + login dirs/files + databases + web storage");
+        Log.i(TAG, "identity wipe summary: prefs keys + save files + login dirs/files + databases"
+                + " + web storage + 外部设备码/账号副本");
     }
 
     /** 递归删一整棵目录（只用于登录目录这种明确目标）。 */
@@ -724,6 +736,103 @@ final class Backup {
             Log.i(TAG, "identity: removed Local Storage");
         }
         Log.i(TAG, "identity: web storage cleared (" + n + " entries)");
+        return n;
+    }
+
+    // ---------------- 换身份：游戏目录之外的身份副本 ----------------
+
+    /**
+     * 扫描根：游戏自己的私有目录、外置目录、以及容易被人手动拷一份的地方。
+     * 全是<b>该扫描的浅层</b>，不递归 /sdcard 全盘（那要几分钟）。
+     */
+    static java.util.List<File> identityCopyRoots(Context ctx) {
+        java.util.List<File> out = new java.util.ArrayList<>();
+        try { out.add(ctx.getFilesDir()); } catch (Throwable ignored) {}
+        try { out.add(ctx.getExternalFilesDir(null)); } catch (Throwable ignored) {}
+        try {
+            File data = ctx.getFilesDir() == null ? null : ctx.getFilesDir().getParentFile();
+            if (data != null) out.add(new File(data, "no_backup"));
+        } catch (Throwable ignored) {}
+        File sdcard = null;
+        try { sdcard = Environment.getExternalStorageDirectory(); } catch (Throwable ignored) {}
+        if (sdcard != null) {
+            out.add(sdcard);
+            out.add(new File(sdcard, Environment.DIRECTORY_DOCUMENTS));
+            out.add(new File(sdcard, Environment.DIRECTORY_DOWNLOADS));
+        }
+        try {
+            File[] exts = ctx.getExternalFilesDirs(null);
+            if (exts != null) for (File f : exts) if (f != null) out.add(f);
+        } catch (Throwable ignored) {}
+        java.util.List<File> clean = new java.util.ArrayList<>();
+        for (File f : out) if (f != null && !clean.contains(f)) clean.add(f);
+        return clean;
+    }
+
+    /**
+     * 「只恢复存档」时，备份里的这一条是不是身份副本（按备份里的相对路径判）。
+     * 口径在 {@link IdentityFiles}（纯 JDK，有单测）。
+     */
+    static boolean isRestoreIdentityCopy(String path) {
+        return IdentityFiles.isRestoreIdentityCopy(path);
+    }
+
+    /** 这个名字是不是「换身份要删的身份副本」。口径在 {@link IdentityFiles}（纯 JDK，有单测）。 */
+    static boolean isIdentityCopy(String name) {
+        return IdentityFiles.isIdentityCopy(name);
+    }
+
+    /**
+     * 删游戏目录之外的身份副本（外置 files/althi_uniq、/sdcard 根、Documents、Downloads…）。
+     *
+     * <p>只要没有「所有文件访问」权限，/sdcard 那些公共目录就写不动（Android 11+ 只允许经
+     * MediaStore 操作媒体文件），这里**静默跳过**并记一行日志，不影响私有目录那一半照删。
+     *
+     * @return 删掉的条目数
+     */
+    static int wipeIdentityCopies(Context ctx) {
+        int n = 0;
+        StringBuilder seen = new StringBuilder();
+        for (File root : identityCopyRoots(ctx)) {
+            if (!root.isDirectory()) continue;
+            // 只扫浅层（根、以及根下一层的登录目录），不递归整张卡
+            n += wipeIdentityCopiesIn(root, 0, seen);
+            File[] ls = root.listFiles();
+            if (ls == null) continue;
+            for (File d : ls) {
+                if (!d.isDirectory()) continue;
+                String nm = d.getName().toLowerCase(Locale.US);
+                if (nm.contains("login") || nm.contains("account") || nm.equals("uuid")
+                        || nm.equals("althi") || nm.equals("elneazh_keep")) {
+                    n += wipeIdentityCopiesIn(d, 1, seen);
+                }
+            }
+        }
+        if (n > 0) {
+            Log.i(TAG, "identity: removed " + n + " 身份副本: " + seen);
+        } else {
+            Log.i(TAG, "identity: no 外部身份副本 found (或无权访问 /sdcard 公共目录)");
+        }
+        return n;
+    }
+
+    private static int wipeIdentityCopiesIn(File dir, int depth, StringBuilder seen) {
+        if (dir == null || !dir.isDirectory() || depth > 1) return 0;
+        File[] ls = dir.listFiles();
+        if (ls == null) return 0;
+        int n = 0;
+        for (File f : ls) {
+            if (f.isDirectory()) continue;
+            if (!isIdentityCopy(f.getName())) continue;
+            try {
+                if (f.delete()) {
+                    n++;
+                    if (seen.length() < 400) seen.append(seen.length() > 0 ? "; " : "").append(f.getAbsolutePath());
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "identity: can not remove " + f + ": " + t);
+            }
+        }
         return n;
     }
 
@@ -1218,6 +1327,13 @@ final class Backup {
                                 && isIdentityPrefFile(p.substring("shared_prefs/".length()))) {
                             skipped++;
                             Log.i(TAG, "restore: skipped identity prefs " + p);
+                            continue;
+                        }
+                        // 「只恢复存档」：备份里散落的身份副本（files/althi_uniq、ext/ws_account…）同样不许写回 ——
+                        // 它们不是存档，写回去等于把旧设备码又装了一份。只认身份文件名，不误伤存档与汉化表。
+                        if (!withIdentity && isRestoreIdentityCopy(p)) {
+                            skipped++;
+                            Log.i(TAG, "restore: skipped identity copy " + p);
                             continue;
                         }
                         File t;

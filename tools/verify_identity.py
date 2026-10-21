@@ -251,6 +251,35 @@ def main():
     check('identity-key', 'has' if pp.exists() else 'missing', 'has',
           'PlayerPrefsTest 纯 JDK 单测存在（CI 必跑）')
 
+    # ---------------------------------------------------------------- 外部身份副本
+    # 真机事故 2：清了 files/ 与 prefs 键，getExternalFilesDir(null)/althi_uniq 里那份
+    # 41 字符设备码还在，重开游戏又把旧身份读了回来 —— 用户「卡在上个账号」的直接原因。
+    print('--- 换身份：游戏目录之外的身份副本 ---')
+    idf = ROOT / 'inj/com/shuilize/elneazh/inj/IdentityFiles.java'
+    check('id-copy', 'has' if idf.exists() else 'missing', 'has',
+          'IdentityFiles（纯 JDK 口径）存在')
+    idt = idf.read_text(encoding='utf-8') if idf.exists() else ''
+    for n in ('althi_uniq', 'ws_account', 'login_key', 'unity.cloud_userid'):
+        check('id-copy', 'has' if f'"{n}"' in idt else 'missing', 'has',
+              f'IdentityFiles 认 {n} 是身份副本')
+    check('id-copy', 'has' if 'isRestoreIdentityCopy' in idt else 'missing', 'has',
+          'IdentityFiles.isRestoreIdentityCopy 供「只恢复存档」复用')
+    check('id-copy', 'has' if 'wipeIdentityCopies' in bj else 'missing', 'has',
+          'wipeForIdentity 调 wipeIdentityCopies 删外部副本')
+    check('id-copy', 'has' if 'getExternalFilesDir(null)' in bj else 'missing', 'has',
+          '扫描 getExternalFilesDir(null)（外置 files/althi_uniq 就在这里）')
+    check('id-copy', 'has' if 'getExternalFilesDirs' in bj else 'missing', 'has',
+          '扫描 getExternalFilesDirs（第二张卡/多用户）')
+    check('id-copy', 'has' if 'DIRECTORY_DOCUMENTS' in bj and 'DIRECTORY_DOWNLOADS' in bj
+          else 'missing', 'has', '扫描 /sdcard/Documents 与 Downloads 的副本')
+    check('id-copy', 'has' if 'isRestoreIdentityCopy(p)' in bj else 'missing', 'has',
+          '只恢复存档时跳过备份里的身份副本')
+    check('id-copy', 'has' if 'shared_prefs/elneazh_settings' in bj else 'missing', 'has',
+          '单机开关不进备份（恢复不覆盖当前单机设置）')
+    iw = ROOT / 'tools/offline_test/com/shuilize/elneazh/inj/IdentityWipeTest.java'
+    check('id-copy', 'has' if iw.exists() else 'missing', 'has',
+          'IdentityWipeTest 纯 JDK 单测存在（CI 必跑）')
+
     print('identity wipe OK' if bad == 0 else f'identity wipe WRONG ({bad})')
     return 0 if bad == 0 else 1
 

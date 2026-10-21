@@ -36,9 +36,11 @@ jobs:
             inj/com/shuilize/elneazh/inj/NameFix.java \
             inj/com/shuilize/elneazh/inj/UploadNames.java \
             inj/com/shuilize/elneazh/inj/OfflineGate.java \
-            inj/com/shuilize/elneazh/inj/IdentityKeys.java
+            inj/com/shuilize/elneazh/inj/IdentityKeys.java \
+            inj/com/shuilize/elneazh/inj/IdentityFiles.java
           java -cp build/offtest com.shuilize.elneazh.inj.OfflineTest
           java -cp build/offtest com.shuilize.elneazh.inj.PlayerPrefsTest
+          java -cp build/offtest com.shuilize.elneazh.inj.IdentityWipeTest
       - name: Verify base data.unity3d
         run: |
           echo "dc1796ffac62ea29796772f320c4218a922216aa417c4689abaeb6c0e917a155  base/data.unity3d" | sha256sum -c -
