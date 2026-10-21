@@ -490,6 +490,8 @@ static void *eg_dispatch(eg_hook_entry *e, void *a0, void *a1, void *a2, void *a
             break;
 
         case EG_TARGET_HTTP:
+            // 方案 B：重放已就绪时请求照常排队（connectWWW 自己走「没网」分支，Parse 由重放接管）
+            if (off && eg_replay_active()) break;
             if (off) {
                 g_stats_http++;
                 LOGI("offline: drop request %s::%s (report comm failure)", e->klass, e->method);
@@ -553,6 +555,8 @@ static void *eg_dispatch(eg_hook_entry *e, void *a0, void *a1, void *a2, void *a
             break;
 
         case EG_TARGET_LPLAY:
+            // 方案 B：重放时走正常登录流程（登录回包来自重放库），不再按成本地装玩
+            if (off && eg_replay_active()) break;
             // 本地装玩。分两种成员：
             //   * 纯副作用入口（openAccountPanel / AccountInputButtonClick / requestErrorAlert）
             //     —— 返回值没人用，单机时直接不执行，账号框和通信错误框都不会出现；
@@ -1136,6 +1140,17 @@ int eg_of_hook_report(char *buf, int cap) {
 
 // 名字闸门用：按名字解析 Cipher::EncryptRJ256 之类的方法入口（剥 PAC）。
 // 运行时没初始化完返回 NULL（调用方稍后重试）；*not_found 置 1 表示运行时就绪但确实找不到。
+// 按名字取 MethodInfo 本身（虚调用 / il2cpp_object_get_virtual_method 要用）
+const void *eg_of_method_info(const char *klass, const char *method, int argc) {
+    if (!klass || !method) return NULL;
+    if (!eg_api_load() || !eg_runtime_ready()) return NULL;
+    Il2CppClass *c = eg_find_class("*", klass);
+    if (!c) return NULL;
+    void *slot = NULL;
+    void *p = eg_resolve_slot(c, method, argc, &slot);
+    return p ? (const void *) slot : NULL;   // slot = &mi->methodPointer = mi
+}
+
 void *eg_of_method_ptr(const char *klass, const char *method, int argc, int *not_found) {
     if (not_found) *not_found = 0;
     if (!klass || !method) return NULL;

@@ -1,0 +1,485 @@
+// ElneaZH · 方案 B 单机重放（实现）
+//
+// 思路（全部用游戏自己的方法，不伪造网络层）：
+//   联网时：connectWWW 把参数 Json.Serialize 成明文 → EncryptRJ256（名字闸门 eg_hook 在这里
+//           拿到明文，rp_set_last_tx 记下）→ 发出 → 回包 DecryptRJ256（rec_dec_hook 在这里拿到
+//           明文回包，rp_learn 把「刚才那条请求 → 这条回包」配对存进重放库 files/elneazh_replay.json）。
+//   单机时（一个字节都不发）：
+//     1) HttpSystem::get_IsReachable 按成 false —— connectWWW 走游戏自己的「没网」分支：
+//        不建 UnityWebRequest、不加密，直接 Parse(request, null) 后返回 null。
+//     2) HttpRequest::Parse(this, null) 被接管：用 get_Param + Json.Serialize 得到这次请求的参数，
+//        算签名去重放库查回包，查到就照 Parse 成功分支的样子填 errorMessage / resultCode /
+//        serverVersion / serviceMode / condition，再虚调 HttpNotify(result)（子类各自处理回包，
+//        和联网成功时完全同一条路）。写接口（savedata / action 打点）直接造「Done」应答。
+//        查不到的读接口：退回原始 Parse（照常报「没网」），不比现在更糟。
+//
+// 重放库：files/elneazh_replay.json。首次启动若不存在，就用录制版留下的 files/elneazh_netrec.log
+// 配对生成；之后每次联网用自己的号录到的回包会就地覆盖，保持新鲜。不随包分发（含账号信息）。
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+#include "eg_log.h"
+#include "eg_offline.h"
+#include "eg_sym.h"
+#include "vendor/And64InlineHook.hpp"
+
+#ifndef FILES
+#define FILES "/data/data/jp.co.althi.elnea.en/files/"
+#endif
+#define REPLAY_PATH FILES "elneazh_replay.json"
+#define TAG "ElneaReplay"
+#define RPI(...) eg_plog(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define RPW(...) eg_plog(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
+
+// ---- il2cpp 外部（名字闸门里已解析过 string_new；这里只取函数指针）
+typedef void *(*fn_s1)(const char *);
+extern void *eg_name_gate_string_new(void);   // elneagate.c 暴露 g_string_new
+
+// ---- 重放库：请求签名 -> 回包明文 JSON（整条 {"info":..,"result":..}）
+typedef struct rp_e { char *key; char *val; struct rp_e *next; } rp_e;
+#define RP_BUCKETS 256
+static rp_e *g_map[RP_BUCKETS];
+static pthread_mutex_t g_map_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_loaded;
+
+static unsigned rp_hash(const char *s) {
+    unsigned h = 2166136261u;
+    for (; *s; s++) { h ^= (unsigned char) *s; h *= 16777619u; }
+    return h & (RP_BUCKETS - 1);
+}
+static const char *rp_get(const char *key) {
+    unsigned b = rp_hash(key);
+    for (rp_e *e = g_map[b]; e; e = e->next) if (strcmp(e->key, key) == 0) return e->val;
+    return NULL;
+}
+static void rp_put(const char *key, const char *val) {
+    unsigned b = rp_hash(key);
+    for (rp_e *e = g_map[b]; e; e = e->next)
+        if (strcmp(e->key, key) == 0) { free(e->val); e->val = strdup(val); return; }
+    rp_e *e = (rp_e *) malloc(sizeof *e);
+    if (!e) return;
+    e->key = strdup(key);
+    e->val = strdup(val);
+    e->next = g_map[b];
+    g_map[b] = e;
+}
+
+// ---------------------------------------------------------- 请求签名
+// 与 tools 里的 Python 保持一致：取路由键的值 + 其余顶层键名（排序），忽略易变键。
+// 这里只做「够区分同一次会话内不同请求」即可，不追求完全等价。
+static int rp_is_volatile(const char *k, size_t n) {
+    // 只丢 connectWWW / addUniqArg 自动补的键（get_Param 里没有，加密明文里有）
+    static const char *v[] = {"crypt_key", "user_id", "$_sys_ver_$", "user_uniq", NULL};
+    for (int i = 0; v[i]; i++) if (strlen(v[i]) == n && strncmp(v[i], k, n) == 0) return 1;
+    return 0;
+}
+static int rp_is_route(const char *k, size_t n) {
+    static const char *v[] = {"table_name", "target", "mail_cmd", "gift_mode", "cmd", "action", NULL};
+    for (int i = 0; v[i]; i++) if (strlen(v[i]) == n && strncmp(v[i], k, n) == 0) return 1;
+    return 0;
+}
+// 极简顶层 JSON 扫描：只认 {"key":"value"...} 顶层键和字符串值；嵌套对象的键跳过。
+// out 写 "route1=val1;route2=val2|key_a,key_b,key_c"（键名排序）。返回 1 成功。
+static int rp_sign(const char *j, size_t n, char *out, size_t cap) {
+    const char *p = j, *end = j + n;
+    char route[256]; size_t ro = 0; route[0] = 0;
+    char keys[64][48]; int nk = 0;
+    int depth = 0;
+    while (p < end) {
+        char c = *p;
+        if (c == '{' || c == '[') { depth++; p++; continue; }
+        if (c == '}' || c == ']') { depth--; p++; continue; }
+        if (c == '"' && depth == 1) {
+            const char *ks = ++p;
+            while (p < end && *p != '"') { if (*p == '\\') p++; p++; }
+            size_t kl = (size_t) (p - ks);
+            p++;
+            while (p < end && (*p == ' ' || *p == ':')) p++;
+            // 值
+            const char *vs = NULL; size_t vl = 0; int vstr = 0;
+            if (p < end && *p == '"') {
+                vstr = 1; vs = ++p;
+                while (p < end && *p != '"') { if (*p == '\\') p++; p++; }
+                vl = (size_t) (p - vs); p++;
+            } else {
+                vs = p;
+                while (p < end && *p != ',' && *p != '}' && *p != ']') p++;
+                vl = (size_t) (p - vs);
+            }
+            if (rp_is_volatile(ks, kl)) continue;
+            if (rp_is_route(ks, kl) && vstr) {
+                int w = snprintf(route + ro, sizeof route - ro, "%.*s=%.*s;",
+                                 (int) kl, ks, (int) vl, vs);
+                if (w > 0 && (size_t) w < sizeof route - ro) ro += (size_t) w;
+            } else if (nk < 64 && kl < 48 && !(kl > 0 && ks[0] >= '0' && ks[0] <= '9')) {
+                memcpy(keys[nk], ks, kl); keys[nk][kl] = 0; nk++;
+            }
+        } else p++;
+    }
+    // 键名排序（小数组插入排序）
+    for (int i = 1; i < nk; i++) {
+        char t[48]; strcpy(t, keys[i]); int k2 = i - 1;
+        while (k2 >= 0 && strcmp(keys[k2], t) > 0) { strcpy(keys[k2 + 1], keys[k2]); k2--; }
+        strcpy(keys[k2 + 1], t);
+    }
+    size_t o = 0;
+    o += (size_t) snprintf(out + o, cap - o, "%s|", route);
+    for (int i = 0; i < nk && o < cap; i++)
+        o += (size_t) snprintf(out + o, cap - o, "%s,", keys[i]);
+    return 1;
+}
+
+// 写请求（存档 / 打点）：直接本地成功，不查库
+static int rp_is_write(const char *j) {
+    return strstr(j, "\"savedata\"") != NULL || strstr(j, "\"action\":\"") != NULL;
+}
+
+// 精确签名没中时的近似匹配：路由部分（'|' 之前）必须一致，键名重合最多者胜。
+// 用于 get_Param 与加密明文之间差一两个自动补的键（如 local_gem）的情况。
+static const char *rp_get_fuzzy(const char *sign) {
+    const char *bar = strchr(sign, '|');
+    if (!bar) return NULL;
+    size_t rl = (size_t) (bar - sign);
+    const char *best = NULL; int bestn = -1;
+    for (int b = 0; b < RP_BUCKETS; b++)
+        for (rp_e *e = g_map[b]; e; e = e->next) {
+            const char *eb = strchr(e->key, '|');
+            if (!eb || (size_t) (eb - e->key) != rl || strncmp(e->key, sign, rl) != 0) continue;
+            int n = 0;
+            const char *k = bar + 1;
+            while (*k) {
+                const char *c = strchr(k, ',');
+                if (!c) break;
+                char one[64]; size_t l = (size_t) (c - k);
+                if (l + 2 < sizeof one) {
+                    one[0] = (k == bar + 1) ? '|' : ','; memcpy(one + 1, k, l); one[l + 1] = ',';
+                    one[l + 2] = 0;
+                    if (strstr(eb, one) || (one[0] = (one[0] == '|') ? ',' : '|', strstr(eb, one))) n++;
+                }
+                k = c + 1;
+            }
+            if (n > bestn) { bestn = n; best = e->val; }
+        }
+    // 有路由值时路由一致就够；没有路由值时至少要重合一个键名，免得乱配
+    if (rl == 0 && bestn <= 0) return NULL;
+    return best;
+}
+
+// ---------------------------------------------------------- 最近一条请求明文
+static __thread char *g_last_tx;
+void rp_set_last_tx(char *s) {   // 接管 s 的所有权
+    free(g_last_tx);
+    g_last_tx = s;
+}
+
+// ---------------------------------------------------------- 载入 / 学习 重放库
+// replay_seed.json 是 { "<sign>": "<responseJson>", ... }。这里做极简解析：顶层对象，
+// 键和值都是字符串（值里的引号用 \" 转义）。
+static char *rp_unescape(const char *s, size_t n) {
+    char *o = (char *) malloc(n + 1); if (!o) return NULL;
+    size_t j = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\\' && i + 1 < n) {
+            char c = s[++i];
+            o[j++] = (c == 'n') ? '\n' : (c == 't') ? '\t' : c;
+        } else o[j++] = s[i];
+    }
+    o[j] = 0; return o;
+}
+static void rp_load(void) {
+    if (g_loaded) return;
+    g_loaded = 1;
+    FILE *f = fopen(REPLAY_PATH, "r");
+    if (!f) { RPW("replay库不存在: %s", REPLAY_PATH); return; }
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz <= 2 || sz > (8 << 20)) { fclose(f); return; }
+    char *buf = (char *) malloc((size_t) sz + 1);
+    if (!buf) { fclose(f); return; }
+    size_t rd = fread(buf, 1, (size_t) sz, f); buf[rd] = 0; fclose(f);
+    const char *p = buf, *end = buf + rd;
+    int n = 0;
+    pthread_mutex_lock(&g_map_lock);
+    while (p < end) {
+        while (p < end && *p != '"') p++;
+        if (p >= end) break;
+        const char *ks = ++p;
+        while (p < end && *p != '"') { if (*p == '\\') p++; p++; }
+        char *key = rp_unescape(ks, (size_t) (p - ks)); p++;
+        while (p < end && (*p == ' ' || *p == ':')) p++;
+        if (p >= end || *p != '"') { free(key); continue; }
+        const char *vs = ++p;
+        while (p < end && *p != '"') { if (*p == '\\') p++; p++; }
+        char *val = rp_unescape(vs, (size_t) (p - vs)); p++;
+        if (key && val) { rp_put(key, val); n++; }
+        free(key); free(val);
+    }
+    pthread_mutex_unlock(&g_map_lock);
+    free(buf);
+    RPI("replay库载入 %d 条", n);
+}
+
+// JSON 字符串转义写文件
+static void rp_fput_escaped(FILE *f, const char *s) {
+    for (; *s; s++) {
+        if (*s == '"' || *s == '\\') { fputc('\\', f); fputc(*s, f); }
+        else if (*s == '\n') { fputc('\\', f); fputc('n', f); }
+        else if (*s == '\t') { fputc('\\', f); fputc('t', f); }
+        else if ((unsigned char) *s >= 0x20) fputc(*s, f);
+    }
+}
+static void rp_persist(void) {
+    FILE *f = fopen(REPLAY_PATH, "w");
+    if (!f) return;
+    fputc('{', f);
+    int first = 1;
+    pthread_mutex_lock(&g_map_lock);
+    for (int b = 0; b < RP_BUCKETS; b++)
+        for (rp_e *e = g_map[b]; e; e = e->next) {
+            if (!first) fputc(',', f);
+            first = 0;
+            fputc('"', f); rp_fput_escaped(f, e->key); fputc('"', f);
+            fputc(':', f);
+            fputc('"', f); rp_fput_escaped(f, e->val); fputc('"', f);
+        }
+    pthread_mutex_unlock(&g_map_lock);
+    fputc('}', f);
+    fclose(f);
+}
+
+// 联网时：rec_dec_hook 拿到一条回包明文 rx，与 rp_set_last_tx 记的请求配对后存库
+void rp_learn(const char *rx, size_t n) {
+    if (!g_last_tx || !rx || n < 32) return;
+    if (!strstr(rx, "\"$_sys_result_$\":\"Done.")) return;   // 只学成功回包
+    char sign[512];
+    if (!rp_sign(g_last_tx, strlen(g_last_tx), sign, sizeof sign)) return;
+    rp_load();
+    pthread_mutex_lock(&g_map_lock);
+    const char *body = strstr(rx, "response[JSON]=");
+    rp_put(sign, body ? body + 15 : rx);
+    pthread_mutex_unlock(&g_map_lock);
+    rp_persist();
+}
+
+
+// ---------------------------------------------------------- 首次：从录制日志生成重放库
+static void rp_seed_from_netrec(void) {
+    struct stat st;
+    if (stat(REPLAY_PATH, &st) == 0 && st.st_size > 64) return;
+    FILE *f = fopen(FILES "elneazh_netrec.log", "r");
+    if (!f) return;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > (64L << 20)) { fclose(f); return; }
+    char *buf = (char *) malloc((size_t) sz + 1);
+    if (!buf) { fclose(f); return; }
+    size_t rd = fread(buf, 1, (size_t) sz, f); buf[rd] = 0; fclose(f);
+    for (size_t i = 0; i < rd; i++) if (buf[i] == 0) buf[i] = ' ';   // 回包尾部的 \0 填充
+    char *tx = NULL; int n = 0;
+    char *p = buf;
+    while ((p = strstr(p, "=== #")) != NULL) {
+        char *eol = strchr(p, '\n'); if (!eol) break;
+        int is_tx = strstr(p, " TX ") && strstr(p, " TX ") < eol;
+        int is_rx = strstr(p, " RX ") && strstr(p, " RX ") < eol;
+        char *body = eol + 1;
+        char *next = strstr(body, "\n=== #");
+        size_t bl = next ? (size_t) (next - body) : strlen(body);
+        char save = body[bl]; body[bl] = 0;
+        if (is_tx) { free(tx); tx = bl ? strdup(body) : NULL; }
+        else if (is_rx && tx && bl > 32 && !strstr(body, "...[cut") &&
+                 strstr(body, "\"$_sys_result_$\":\"Done.")) {
+            char sign[512];
+            if (rp_sign(tx, strlen(tx), sign, sizeof sign)) {
+                const char *b = strstr(body, "response[JSON]=");
+                // 去掉尾部填充（空格 / \0 / 换行）
+                char *v = strdup(b ? b + 15 : body);
+                if (v) {
+                    size_t vl = strlen(v);
+                    while (vl && (v[vl - 1] == ' ' || v[vl - 1] == '\n' || v[vl - 1] == '\r')) v[--vl] = 0;
+                    pthread_mutex_lock(&g_map_lock); rp_put(sign, v); pthread_mutex_unlock(&g_map_lock);
+                    free(v); n++;
+                }
+            }
+            free(tx); tx = NULL;
+        }
+        body[bl] = save;
+        p = next ? next + 1 : body + bl;
+    }
+    free(tx);
+    free(buf);
+    g_loaded = 1;
+    rp_persist();
+    RPI("从录制日志生成重放库：%d 条", n);
+}
+
+// ---------------------------------------------------------- 回包字段提取（只认扁平字符串）
+static char *rp_json_str(const char *j, const char *key) {
+    char pat[64]; snprintf(pat, sizeof pat, "\"%s\":\"", key);
+    const char *p = strstr(j, pat); if (!p) return NULL;
+    p += strlen(pat);
+    const char *q = p;
+    while (*q && *q != '"') { if (*q == '\\' && q[1]) q++; q++; }
+    return rp_unescape(p, (size_t) (q - p));
+}
+// "result": 后面的值：对象则返回整个 {...} 子串，字符串则 *is_str=1 返回内容
+static char *rp_result(const char *j, int *is_str) {
+    *is_str = 0;
+    const char *p = strstr(j, "\"result\":"); if (!p) return NULL;
+    p += 9;
+    while (*p == ' ') p++;
+    if (*p == '"') {
+        const char *q = ++p;
+        while (*q && *q != '"') { if (*q == '\\' && q[1]) q++; q++; }
+        *is_str = 1; return rp_unescape(p, (size_t) (q - p));
+    }
+    if (*p != '{') return NULL;
+    int d = 0; const char *q = p; int instr = 0;
+    for (; *q; q++) {
+        if (instr) { if (*q == '\\' && q[1]) q++; else if (*q == '"') instr = 0; continue; }
+        if (*q == '"') instr = 1;
+        else if (*q == '{') d++;
+        else if (*q == '}') { if (--d == 0) { q++; break; } }
+    }
+    char *o = (char *) malloc((size_t) (q - p) + 1); if (!o) return NULL;
+    memcpy(o, p, (size_t) (q - p)); o[q - p] = 0; return o;
+}
+
+// ---------------------------------------------------------- hook：Parse / IsReachable
+typedef void *(*fn_ser)(void *, void *);        // Json.Serialize(object, mi)
+typedef void *(*fn_deser)(void *, void *);      // Json.Deserialize(string, mi)
+typedef void *(*fn_getp)(void *, void *);       // HttpRequest::get_Param(this, mi)
+typedef int  (*fn_iserr)(void *, void *);       // HttpRequest::get_IsError(this, mi)
+typedef void (*fn_parse)(void *, void *, void *);   // Parse(this, www, mi)
+typedef int  (*fn_reach)(void *);               // HttpSystem::get_IsReachable(mi)（static 属性）
+typedef void *(*fn_vget)(void *, const void *); // il2cpp_object_get_virtual_method
+typedef void (*fn_wb)(void *, void **, void *); // il2cpp_gc_wbarrier_set_field
+typedef void (*fn_notify)(void *, void *, const void *);
+
+static fn_ser g_ser;
+static fn_deser g_deser;
+static fn_getp g_getp;
+static fn_iserr g_iserr;
+static fn_parse g_parse_orig;
+static fn_reach g_reach_orig;
+static fn_vget g_vget;
+static fn_wb g_wb;
+static fn_s1 g_snew;
+static const void *g_notify_mi;   // HttpRequest::HttpNotify 的 MethodInfo（虚方法基）
+static volatile int g_rp_installed;
+static volatile int g_rp_ready;
+
+int eg_replay_active(void) { return g_rp_ready; }
+
+extern char *eg_rec_str(void *s, size_t *out_len);   // eg_rec.c
+
+static void rp_setf(void *obj, int off, void *val) {
+    void **slot = (void **) ((char *) obj + off);
+    if (g_wb) g_wb(obj, slot, val); else *slot = val;
+}
+
+static int rp_emulate(void *self, const char *json) {
+    int is_str = 0;
+    char *res = rp_result(json, &is_str);
+    char *ver = rp_json_str(json, "$_sys_ver_$");
+    char *rc = rp_json_str(json, "$_sys_result_$");
+    char *svc = rp_json_str(json, "$_sys_service_$");
+    void *resobj = NULL;
+    if (res && !is_str) resobj = g_deser(g_snew(res), NULL);
+    rp_setf(self, 0x20, (res && is_str) ? g_snew(res) : NULL);       // errorMessage
+    rp_setf(self, 0x38, ver ? g_snew(ver) : NULL);                    // serverVersion
+    rp_setf(self, 0x30, g_snew(rc ? rc : "Done."));                   // resultCode
+    rp_setf(self, 0x40, svc ? g_snew(svc) : NULL);                    // serviceMode
+    *(int32_t *) ((char *) self + 0x10) = 2;                          // condition：完成
+    if (g_iserr && g_iserr(self, NULL)) *(int32_t *) ((char *) self + 0x10) = 3;
+    free(res); free(ver); free(rc); free(svc);
+    // 虚调 HttpNotify(result)：子类（LoginRequest 等）各自的回包处理
+    const void *mi = g_vget ? g_vget(self, g_notify_mi) : g_notify_mi;
+    if (!mi) return 0;
+    fn_notify fn = (fn_notify) (((uintptr_t) *(void *const *) mi) & 0x0000FFFFFFFFFFFFULL);
+    fn(self, resobj, mi);
+    return 1;
+}
+
+#if defined(__aarch64__)
+static void rp_parse_hook(void *self, void *www, void *mi) {
+    if (www || !eg_of_is_off() || !g_rp_ready || !self) { g_parse_orig(self, www, mi); return; }
+    void *param = g_getp(self, NULL);
+    void *js = param ? g_ser(param, NULL) : NULL;
+    size_t tl = 0;
+    char *tx = js ? eg_rec_str(js, &tl) : NULL;
+    if (!tx) { g_parse_orig(self, www, mi); return; }
+    rp_load();
+    const char *hit = NULL;
+    char *made = NULL;
+    char sign[512];
+    sign[0] = 0;
+    if (rp_is_write(tx)) {
+        char *uid = rp_json_str(tx, "user_id");
+        made = (char *) malloc(512);
+        if (made) snprintf(made, 512, "{\"info\":{\"$_sys_result_$\":\"Done.\"},\"result\":"
+                                      "{\"save_count\":\"1\",\"user_id\":\"%s\",\"disable_gem\":\"0\"}}",
+                           uid ? uid : "0");
+        free(uid);
+        hit = made;
+    } else if (rp_sign(tx, tl, sign, sizeof sign)) {
+        pthread_mutex_lock(&g_map_lock);
+        hit = rp_get(sign);
+        if (!hit) { hit = rp_get_fuzzy(sign); if (hit) RPI("近似命中: %s", sign); }
+        pthread_mutex_unlock(&g_map_lock);
+    }
+    if (!hit && strstr(tx, "\"table_name\"")) {
+        // 主数据表：本地已有缓存，回「没有更新」（与服务器对未更新表的应答一致）
+        made = strdup("{\"info\":{\"$_sys_result_$\":\"Done.\"},\"result\":\"empty data\n\"}");
+        hit = made;
+    }
+    if (!hit) {
+        RPW("单机未命中，按没网处理: %s", sign);
+        free(tx); g_parse_orig(self, www, mi); return;
+    }
+    RPI("单机重放: %s", made ? "write-ack" : sign);
+    if (!rp_emulate(self, hit)) g_parse_orig(self, www, mi);
+    free(made);
+    free(tx);
+}
+static int rp_reach_hook(void *mi) {
+    if (eg_of_is_off() && g_rp_ready) return 0;   // 单机：走游戏自己的「没网」分支，不建请求
+    return g_reach_orig ? g_reach_orig(mi) : 0;
+}
+#endif
+
+static void *rp_seed_thread(void *a) {
+    (void) a;
+    rp_seed_from_netrec();
+    return NULL;
+}
+
+void eg_rp_install(void) {
+    if (g_rp_installed) return;
+    g_rp_installed = 1;
+    g_snew = (fn_s1) eg_name_gate_string_new();
+    g_vget = (fn_vget) eg_sym_find("il2cpp_object_get_virtual_method");
+    g_wb = (fn_wb) eg_sym_find("il2cpp_gc_wbarrier_set_field");
+    pthread_t t;
+    if (pthread_create(&t, NULL, rp_seed_thread, NULL) == 0) pthread_detach(t);
+#if defined(__aarch64__)
+    int nf = 0;
+    void *parse = eg_of_method_ptr("HttpRequest", "Parse", 1, &nf);
+    void *reach = eg_of_method_ptr("HttpSystem", "get_IsReachable", 0, &nf);
+    g_ser = (fn_ser) eg_of_method_ptr("Json", "Serialize", 1, &nf);
+    g_deser = (fn_deser) eg_of_method_ptr("Json", "Deserialize", 1, &nf);
+    g_getp = (fn_getp) eg_of_method_ptr("HttpRequest", "get_Param", 0, &nf);
+    g_iserr = (fn_iserr) eg_of_method_ptr("HttpRequest", "get_IsError", 0, &nf);
+    g_notify_mi = eg_of_method_info("HttpRequest", "HttpNotify", 1);
+    if (!parse || !reach || !g_ser || !g_deser || !g_getp || !g_notify_mi || !g_snew) {
+        RPW("重放未挂: parse=%p reach=%p ser=%p deser=%p getp=%p notify=%p snew=%p", parse, reach,
+            (void *) g_ser, (void *) g_deser, (void *) g_getp, g_notify_mi, (void *) g_snew);
+        return;
+    }
+    A64HookFunction(parse, (void *) rp_parse_hook, (void **) &g_parse_orig);
+    A64HookFunction(reach, (void *) rp_reach_hook, (void **) &g_reach_orig);
+    if (g_parse_orig && g_reach_orig) g_rp_ready = 1;
+    RPI("单机重放已挂 ready=%d (wb=%p vget=%p)", g_rp_ready, (void *) g_wb, (void *) g_vget);
+#endif
+}

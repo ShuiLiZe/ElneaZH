@@ -106,7 +106,7 @@ def main():
 
     # 2) 没有构造函数
     for name in ("eg_boot.c", "eg_guard.c", "elneagate.c", "eg_offline.c", "eg_sym.c",
-                 "eg_names.c", "eg_rec.c"):
+                 "eg_names.c", "eg_rec.c", "eg_replay.c"):
         p = os.path.join(NAT, name)
         src = strip_comments(read(p))
         check("__attribute__((constructor" not in src.replace(" ", ""),

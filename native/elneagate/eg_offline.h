@@ -93,6 +93,9 @@ void *eg_of_method_ptr(const char *klass, const char *method, int argc, int *not
 
 // 方案 B 录制（eg_rec.c）：联网时录请求/回包明文 + 进程内方法表 dump
 void eg_rec_install(void);
+void eg_rp_install(void);     // 单机重放（eg_replay.c）
+int eg_replay_active(void);   // 单机重放是否就绪（HTTP / LPLAY 族据此放行）
+const void *eg_of_method_info(const char *klass, const char *method, int argc);
 void eg_rec_req(void *plain_str, void *fp);
 
 #ifdef __cplusplus

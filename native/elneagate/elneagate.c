@@ -532,6 +532,7 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeInstall(JNIEnv *env, jclass cls) {
     g_hooked = 1;
     g_diag_code = 0;
     eg_rec_install();   // 方案 B 录制：只在单机关时录，只读不改
+    eg_rp_install();    // 方案 B 单机重放
     EG_I("name gate: hooked EncryptRJ256 @ %p+0x%x (base %p, trampoline %p, %lldms)",
          target, ENC_OFFSET, base, (void *) g_orig_enc, eg_now_ms() - t0);
     return 0;
@@ -614,6 +615,8 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeHooked(JNIEnv *env, jclass cls) {
 // 给单机闸门用：这个固定偏移上的 EncryptRJ256 是否已经由名字闸门挂上。
 // 两个闸门是同一份 .so 里的两个 .c，靠这个函数协调：谁先挂谁负责，另一个不再动那 40 字节。
 int eg_name_gate_hooked(void);
+
+void *eg_name_gate_string_new(void) { return (void *) g_string_new; }
 
 void *eg_name_gate_target(void) { return g_hooked ? g_enc_target : NULL; }
 int eg_name_gate_hooked(void) {
