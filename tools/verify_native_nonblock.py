@@ -69,6 +69,7 @@ def func_body(src, signature_regex):
 
 def main():
     verbose = "--verbose" in sys.argv
+    check(True, "--verbose 开关生效（%s）" % ("on" if verbose else "off"))
 
     boot_path = os.path.join(NAT, "eg_boot.c")
     check(os.path.isfile(boot_path), "存在 eg_boot.c（JNI_OnLoad 单独成文件）")
@@ -173,6 +174,48 @@ def main():
     bg = read(os.path.join(ROOT, "tools", "build_gate.py"))
     for f in ("eg_boot.c", "eg_guard.c"):
         check(f in bg, "build_gate.py 编译了 %s" % f)
+
+    # 8) 「关单机」= native 只做拼音闸门，六族（UI/Http）一个都不装；且不许拿 base=0 解引用
+    #    真机 pid 8974：ElneaOffline-in 线程 SIGSEGV SEGV_MAPERR，x0=0、x25=base+0x18ad7e4，
+    #    就是 base 为 0 还去算地址。这一节把「先判库在不在、再算地址」刻成硬断言。
+    if of_install:
+        head = of_install.split("pthread_mutex_lock")[0]
+        check("eg_lib_present()" in head,
+              "eg_of_install 进函数先判 libil2cpp 是否已映射（eg_lib_present），不在就返回")
+        check("return -1" in head, "eg_of_install 库不在时返回 -1（不是继续往下算偏移）")
+    enc = func_body(eg_off, r"static\s+int\s+eg_install_enc_fallback\s*\(\s*void\s*\)")
+    check(enc is not None, "eg_install_enc_fallback 存在")
+    if enc:
+        enc_head = enc.split("EG_ENC_OFFSET")[0]
+        check("eg_find_base()" in enc_head and "return -1" in enc_head,
+              "enc fallback 算 base+offset 之前先判库存在（base==0 直接 return -1）")
+        check("eg_mem_ok(" in enc, "enc fallback 写前校验目标在本进程可读映射内（eg_mem_ok）")
+    # 基址只解析一份：离线侧不再自己读 maps
+    check("g_maps_base" not in eg_off and "eg_maps_base" not in eg_off,
+          "eg_offline.c 不再自己解析 maps 拿基址（共享 eg_sym 的缓存）")
+    sym = strip_comments(read(os.path.join(NAT, "eg_sym.c")))
+    check("dl_iterate_phdr" in sym, "基址首选 dl_iterate_phdr（不受命名空间限制）")
+    check(re.search(r"libil2cpp\s*\.so", sym) is not None, "按 libil2cpp.so 名找模块")
+    # 主线程不许睡：能碰主线程的方法体里出现 Thread.sleep 就算失败
+    main_paths = {
+        "NameGate.java": [r"static\s+int\s+install\s*\(", r"static\s+void\s+install", r"static\s+boolean\s+ensure"],
+        "OfflineGate.java": [r"static\s+int\s+install\s*\("],
+        "NativeLoad.java": [r"static\s+boolean\s+tryLoad\s*\(", r"static\s+int\s+load\s*\("],
+    }
+    for tgt, pats in main_paths.items():
+        src = strip_comments(read(os.path.join(INJ, tgt)))
+        for pat in pats:
+            body = func_body(src, pat)
+            if not body:
+                continue
+            name = re.sub(r"\s+", " ", pat).strip()
+            check("Thread.sleep(" not in body and "sleepQuiet(" not in body
+                  and ".await(" not in body and ".join(" not in body,
+                  "%s 的 %s 在调用线程上不睡不 join（只起后台线程）" % (tgt, name))
+    ng_src = strip_comments(read(os.path.join(INJ, "NameGate.java")))
+    check("WAIT_IL2CPP_MS" in ng_src, "等 libil2cpp 有总时长上限（WAIT_IL2CPP_MS）")
+    check(re.search(r"WAIT_IL2CPP_MS\s*=\s*120_000L", ng_src) is not None,
+          "等 libil2cpp 上限 120s（不是 40 次就放弃）")
 
     if verbose:
         for o in oks:

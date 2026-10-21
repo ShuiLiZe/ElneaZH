@@ -150,8 +150,16 @@ final class OfflineGate {
         };
     }
 
-    /** 按 target 取名单。参数 {@code target} 必须是上面那些常量之一。 */
+    /**
+     * 按 target 取名单。参数 {@code target} 必须是上面那些常量之一。
+     *
+     * <p><b>单机关着时一律返回空串</b>：这时候 native 侧只该做拼音闸门与兜底闸
+     * （{@code EncryptRJ256}），UI 隐藏 / 请求拦截 / 遮罩 / 本地游玩这些表一个字节都不该递过去。
+     * 这条不是「顺手优化」——真机上六族全装要几十次 {@code il2cpp} 按名解析加写槽，
+     * 它在 Unity 主线程跑起来的那几秒里做，就是黑屏的一条来路。
+     */
     static String table(int target) {
+        if (ctxRef != null && !Offline.isOn(ctxRef)) return "";
         switch (target) {
             case TARGET_BUTTON: return buttonTable();
             case TARGET_GATE: return gateTable();
@@ -764,6 +772,27 @@ final class OfflineGate {
         int n = 0;
         for (int r : lastResults) n += Math.max(0, r);
         return n;
+    }
+
+    /**
+     * 本进程的 native 是否「只做拼音闸门 / 兜底闸」——即单机关着时的那条路。
+     *
+     * <p>判据同时看两边：单机开关是关的，且六族一张表都没有可递的名字。
+     * 自检与测试都用它来确认「关单机不装 UI/Http」这件事没有被改回去。
+     */
+    static boolean encGateOnly() {
+        if (ctxRef != null && Offline.isOn(ctxRef)) return false;
+        for (int kind : new int[]{TARGET_BUTTON, TARGET_GATE, TARGET_HIDE, TARGET_PANEL,
+                TARGET_HTTP, TARGET_MASKS, TARGET_LPLAY}) {
+            String t;
+            try {
+                t = table(kind);
+            } catch (Throwable e) {
+                return false;
+            }
+            if (t != null && !t.trim().isEmpty()) return false;
+        }
+        return true;
     }
 
     /**

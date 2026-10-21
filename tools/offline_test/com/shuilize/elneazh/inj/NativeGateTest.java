@@ -77,6 +77,26 @@ public final class NativeGateTest {
         boolean allZero = res.length == 0;
         for (int v : res) if (v != 0) allZero = false;
         check(allZero, "单机关着时每族结果都是 0");
+        // 关单机时连「表」都不该递出去：UI 隐藏 / 请求拦截 / 遮罩 / 本地游玩 四张表全是空串，
+        // 也就是 native 侧拿不到任何 UI/Http hook 的名字 —— 这条把「只做拼音闸门」钉死。
+        for (int kind : new int[]{0, 1, 2, 3}) {
+            String tbl = OfflineGate.table(kind);
+            check(tbl != null && tbl.trim().isEmpty(),
+                    "单机关着时 table(" + kind + ") 为空（native 拿不到 UI/Http hook 名单）");
+        }
+        check(OfflineGate.encGateOnly(), "单机关着时 native 只做拼音/兜底闸（encGateOnly=true）");
+        // 打开单机：六族的表立刻有内容（证明上面那条空串是「按单机开关过滤」，不是表本来为空）
+        Offline.set(ctx, true);
+        check(Offline.isOn(ctx), "临时打开单机用于对照");
+        int nonEmpty = 0;
+        for (int kind : new int[]{0, 1, 2, 3}) {
+            String tbl = OfflineGate.table(kind);
+            if (tbl != null && !tbl.trim().isEmpty()) nonEmpty++;
+        }
+        check(nonEmpty >= 3, "单机开着时 table 有内容（" + nonEmpty + "/4 非空）");
+        check(!OfflineGate.encGateOnly(), "单机开着时 encGateOnly=false");
+        Offline.set(ctx, false);
+        check(!Offline.isOn(ctx), "对照完再关掉单机");
 
         // ---------------- 5) crash guard：连击 2 → 第三次启动不加载
         File marker = new File(ctx.getFilesDir(), NativeGuard.MARKER);
