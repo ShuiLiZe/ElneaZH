@@ -146,7 +146,41 @@ if m_nt:
     check("TreeMap" in nb, "对照表按顺序输出（TreeMap 排序）")
     check("\\t" in nb or "\\u0009" in nb, "对照表是 TAB 分隔（粘进表格不乱）")
     check("共 " in nb, "对照表末尾带条数统计")
-    check("中文" in nb and "拼音" in nb, "对照表带表头说明")
+    check("中文" in nb and "上传用" in nb, "对照表带表头说明")
+
+# 真机「没有能接收文件的应用」：这条链路逐环钉住（少一环就会退到 Toast 失败）
+check("setClipData" in sh, "发送前 setClipData（7.0+ 的 uri 授权跟着 ClipData 走）")
+check("grantUriPermission" in sh, "逐个目标 App 显式授权（部分 ROM 不看 ClipData）")
+check("queryIntentActivities" in sh, "先问系统谁能接，再按顺序降级")
+check("ACTION_SAVE_AS" in sh, "有「存到文件」接管页（分享面板没目标时用）")
+check("saveToFolder" in sh, "全都失败时有落盘兜底")
+check("MediaScanner" in sh, "落盘后通知媒体库（文件管理器立刻看得到）")
+check("FileUriExposedException" in sh or "绝不回退 file://" in sh, "不再退 file://（7.0+ 必炸）")
+check("Uri.fromFile" not in sh, "contentUri 不再拼接 file:// uri")
+m_send = re.search(r"static\s+boolean\s+send\s*\(.*?\)\s*\{(.*?)\n    \}", sh, re.S)
+check(m_send is not None, "Share.send 存在")
+if m_send:
+    sb = m_send.group(1)
+    check(sb.index("startSaveAs") < sb.index("ACTION_SEND"),
+          "send 先试「存到文件」，再走系统分享面板")
+    check("setClipData" in sb, "send 里设了 ClipData")
+    check("GRANT_READ" in sb, "send 里给了读权限 flag")
+    check("createChooser" in sb, "send 里包了 createChooser")
+
+sa = read("SaveAsActivity.java")
+check("ACTION_CREATE_DOCUMENT" in sa, "保存页用系统保存器（ACTION_CREATE_DOCUMENT）")
+check("openOutputStream" in sa, "保存页真的把字节写进选定文件")
+check("getContentResolver().openInputStream" in sa, "保存页从 content:// 读源文件")
+check("saveToFolder" in sa, "保存页失败也有落盘兜底")
+
+man2 = open(os.path.join(ROOT, "tools", "manifest_zh.py"), encoding="utf-8").read()
+check("SaveAsActivity" in man2, "manifest_zh.py 注册了 SaveAsActivity")
+check("'exported', 'false'" in man2.replace('A + ', ''), "SaveAsActivity exported=false（外部调不到）")
+
+bp = read("Backup.java")
+check("ACTION_OPEN_DOCUMENT" in bp, "导入用 ACTION_OPEN_DOCUMENT")
+check('"application/zip"' in bp and '"application/octet-stream"' in bp,
+      "导入 MIME = application/zip + application/octet-stream")
 
 # ---------------------------------------------------------------- 扩展包 / 资源下载
 

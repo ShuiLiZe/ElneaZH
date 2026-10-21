@@ -284,6 +284,11 @@ final class NameFix {
         synchronized (NameFix.class) { return new LinkedHashMap<>(ALIAS_ZH2ASCII); }
     }
 
+    /** names.tsv 里「中文译名 -> 英文原名」的快照（导出名字对照表用，只读）。 */
+    static Map<String, String> npcSnapshot() {
+        synchronized (NameFix.class) { return new LinkedHashMap<>(ZH2EN); }
+    }
+
     static byte[] read(InputStream in) throws Exception {
         try (InputStream i = in) {
             ByteArrayOutputStream bo = new ByteArrayOutputStream();

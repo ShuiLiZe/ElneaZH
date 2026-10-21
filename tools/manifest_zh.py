@@ -41,6 +41,18 @@ md.set(A + 'name', 'android.support.FILE_PROVIDER_PATHS')
 # 也就是说分享文件必须放在 filesDir/image_provider/ 下才能出 uri（见 Share.outDir）。
 md.set(A + 'resource', '@7f100002')
 app.set(A + 'requestLegacyExternalStorage', 'true')
+
+# 「导出到文件」：分享面板一个目标都没有时的接管页（系统保存器 ACTION_CREATE_DOCUMENT）。
+# 只给自己进程起（ACTION_SAVE_AS 用 setClass 走显式 Intent），所以 exported=false ——
+# 外部 App 调不到它，也就不算给游戏多开一个入口。
+sa = etree.SubElement(app, 'activity')
+sa.set(A + 'name', 'com.shuilize.elneazh.inj.SaveAsActivity')
+sa.set(A + 'exported', 'false')
+sa.set(A + 'theme', '@1030010')
+sa.set(A + 'noHistory', 'true')
+sa.set(A + 'excludeFromRecents', 'true')
+sa.set(A + 'configChanges', '0x40003fff')
+sa.set(A + 'screenOrientation', '1')
 f = etree.SubElement(act, 'intent-filter')
 for tag, val in (('action', 'android.intent.action.VIEW'), ('category', 'android.intent.category.DEFAULT'),
                  ('category', 'android.intent.category.BROWSABLE')):
@@ -53,5 +65,6 @@ _t = etree.tostring(chk.to_xml())
 assert b'MANAGE_EXTERNAL_STORAGE' in _t and b'zhinit' in _t and b'SupportActivity' in _t and b'elneazh' in _t
 assert b'FileProvider' in _t and b'zhfiles' in _t and b'FILE_PROVIDER_PATHS' in _t, 'share provider missing'
 assert b'requestLegacyExternalStorage' in _t, 'legacy storage flag missing'
+assert b'SaveAsActivity' in _t, 'save-as activity missing'
 open(sys.argv[2], 'wb').write(out)
 print('manifest ok', len(out))
