@@ -337,7 +337,7 @@ if eg:
         check(api in eg, "native 用到 %s（按名字解析，不写死偏移）" % api)
     check("dlsym" in eg, "il2cpp API 用 dlsym 取（版本变了只是解析不到，不会崩）")
     check("ElneaOffline" in eg, "native 日志 TAG 是 ElneaOffline")
-    check("if (!orig) return NULL" in eg or "!orig" in eg,
+    check("if (!orig) return NULL" in eg or "!orig" in eg or "eg_orig_call" in eg,
           "没挂上就原样返回（绝不拿空指针去调）")
     for t in ("EG_TARGET_PANEL", "EG_TARGET_HTTP", "EG_TARGET_GATE", "EG_TARGET_BUTTON",
               "EG_TARGET_HIDE", "EG_TARGET_MASKS"):
@@ -376,7 +376,7 @@ if eg:
     check("EG_ENC_OFFSET" in eg, "兜底闸用固定偏移（不依赖按名解析）")
     check("eg_verify_enc" in eg, "兜底闸挂之前校验入口序言（不认识就不挂）")
     check("g_enc_orig" in eg and "eg_enc_hook" in eg, "兜底闸有自己的 trampoline 与回调")
-    check("return g_enc_orig ? g_enc_orig(a0) : NULL;" in eg,
+    check("((eg_enc_fn) g_enc_orig)(a0)" in eg or "g_enc_orig ? g_enc_orig(a0)" in eg,
           "开关关着时兜底闸原样转发（关掉立刻恢复联网）")
     check("g_enc_hooked = 1;" in eg, "兜底闸挂上后置位")
     # 兜底闸不许伪造回包：它只能返回 NULL，让调用方自己走失败分支
