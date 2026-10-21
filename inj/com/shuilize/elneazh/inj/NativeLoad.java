@@ -50,6 +50,19 @@ final class NativeLoad {
     private NativeLoad() {}
 
     /**
+     * 只回答「.so 已经在进程里了吗」，**绝不加载**（不解包、不 System.load）——
+     * 别处（日志、守卫判定）只能问这个，避免顺手把加载拖到主线程上。
+     */
+    static synchronized boolean ready() {
+        return loaded;
+    }
+
+    /** native 崩溃保护的 JNI 入口（eg_guard.c）：把这一轮的允许标记与安装窗口推给 native。 */
+    static native int nativeGuard(int allowed, int windowMs);
+
+    static native String nativeBootReport();
+
+    /**
      * 同步加载；已加载直接 true。失败会返回 false，但**下一次调用还会再试**
      * （这就是「后台重试真的跑」的落点：{@link NameGate#install} / {@link OfflineGate#installAll} 每轮都调它）。
      */
@@ -57,6 +70,13 @@ final class NativeLoad {
         if (loaded) return true;
         if (ctx == null) {
             lastErr = "no Context";
+            return false;
+        }
+        // crash guard / 用户关掉「原生加速」时：一次也不 load。
+        // 这里必须在加载**之前**问，因为 .so 一旦进进程就收不回来。
+        if (!NativeGuard.allowed()) {
+            lastErr = NativeGuard.reason();
+            Log.i(TAG, "load skipped: " + lastErr);
             return false;
         }
         long now = System.currentTimeMillis();
@@ -92,6 +112,11 @@ final class NativeLoad {
         return loaded;
     }
 
+    /** 加载失败的原因之一：被 crash guard / 「原生加速」开关拦下来了。 */
+    static synchronized boolean blockedByGuard() {
+        return !loaded && !NativeGuard.allowed();
+    }
+
     /** 最后一次失败的完整错误串（成功则为空串）。selfcheck 原样写出来。 */
     static synchronized String err() {
         return lastErr;
@@ -114,6 +139,10 @@ final class NativeLoad {
         if (loaded) {
             return "loaded=true path=" + lastPath + " size=" + new File(lastPath).length()
                     + " abi=" + abi() + " attempt=" + okAttempt + "/" + attempts;
+        }
+        if (!NativeGuard.allowed()) {
+            // crash guard / 开关关掉时，这一行要自己说明白，别让人以为是加载失败
+            return "loaded=false (native disabled by crash guard: " + NativeGuard.reason() + ")";
         }
         return "loaded=false attempts=" + attempts + " abi=" + abi()
                 + " dir=" + "files/lib" + " err=" + (lastErr.isEmpty() ? "(not tried yet)" : lastErr);

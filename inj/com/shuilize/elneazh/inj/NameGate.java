@@ -7,8 +7,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 上传前名字闸门的 Java 侧外壳。
@@ -143,41 +141,105 @@ final class NameGate {
 
     // ---------------- 挂载 ----------------
 
+    /** 后台轮询上限：40 × 500ms = 20s。到点就放弃，游戏照常跑（Java 层兜底仍在）。 */
+    private static final int MAX_TRIES = 40;
+    private static final long RETRY_MS = 500;
+
+    /** 安装线程是否在跑；在跑时再调 {@link #install} 只做一次幂等 push，不重复起线程。 */
+    private static volatile Thread worker;
+
     /**
-     * 依次尝试挂载，最多 {@code tries} 次（每次间隔 500ms）。进程里可以多次调用，成功后不再重试。
+     * **立刻返回**，真正的挂载在后台线程 {@code ElneaGate-install} 里做。
      *
-     * @return 0 = 已挂上；其它 = 失败原因码（见 nativeInstall）
+     * <p>真机黑屏事故的直接来源就是旧版这里：它起完后台线程后 `done.await()` **同步等**，
+     * 最长 20s；而它的调用方是 {@code ZhInit.onCreate}（ContentProvider，进程一启动就跑在
+     * 主线程上的那个线程）。libil2cpp 那时还没 dlopen，于是整个启动被按住 20 秒，
+     * 用户看到的就是「黑屏，一会儿后进程退出」（Unity 看门狗 / ANR），
+     * 而且 logcat 里连一条闸门日志都没有 —— 因为进程在打日志之前就被掐了。
+     *
+     * <p>现在的约定（主线程只做 O(1)）：
+     * <ul>
+     *   <li>本方法在调用线程上只做「起线程」这一件事，绝不 sleep / 绝不 await / 绝不 join；</li>
+     *   <li>加载 .so、灌名字表、解析 il2cpp、写 hook 全在后台线程里，重试用
+     *       {@link #MAX_TRIES} 限次、{@link #RETRY_MS} 间隔，到点放弃；</li>
+     *   <li>返回值只代表「上次已知结果」，调用方不得据此等待。</li>
+     * </ul>
+     *
+     * @return 上次已知的结果码（后台还在装时可能是 {@link Integer#MIN_VALUE}）
      */
     static int install(final Context ctx, int tries) {
-        if (!load(ctx)) return -100;
-        pushNames(ctx);
-        final AtomicInteger last = new AtomicInteger(Integer.MIN_VALUE);
-        final CountDownLatch done = new CountDownLatch(1);
-        Thread t = new Thread(new Runnable() {
+        if (!NativeLoad.ready()) {
+            // 加载本身也可能慢（解包 + System.load）；同样挪到后台，主线程不等。
+            startWorker(ctx);
+            return -100;
+        }
+        startWorker(ctx);
+        return installResult;
+    }
+
+    /** 起（或复用）后台安装线程。本方法不做任何阻塞操作。 */
+    private static void startWorker(final Context ctx) {
+        Thread cur = worker;
+        if (cur != null && cur.isAlive()) {
+            // 已经在装：只补一次幂等的名字表推送，不重复起线程、不等待
+            try { pushNames(ctx); } catch (Throwable ignored) {}
+            return;
+        }
+        final Thread t = new Thread(new Runnable() {
             @Override public void run() {
+                long t0 = System.currentTimeMillis();
+                Log.i(TAG, "installer thread started (" + Thread.currentThread().getName()
+                        + "/" + android.os.Process.myTid() + ")");
+                int last = Integer.MIN_VALUE;
                 try {
-                    for (int i = 0; i < 40; i++) {
-                        int r = nativeInstall();
-                        last.set(r);
-                        if (r == 0) break;
-                        Thread.sleep(500);
+                    Log.i(TAG, "installer: loading .so (background)");
+                    if (!load(ctx)) {
+                        installResult = last = -100;
+                        Log.w(TAG, "installer: .so not loaded: " + NativeLoad.describe());
+                    } else {
+                        Log.i(TAG, "installer: pushing names table");
+                        pushNames(ctx);
+                        for (int i = 0; i < MAX_TRIES; i++) {
+                            long s0 = System.currentTimeMillis();
+                            int r = nativeInstall();
+                            last = r;
+                            Log.i(TAG, "installer: nativeInstall try " + (i + 1) + "/" + MAX_TRIES
+                                    + " -> " + r + " (" + (System.currentTimeMillis() - s0) + "ms)");
+                            if (r == 0) break;
+                            try {
+                                Thread.sleep(RETRY_MS);
+                            } catch (InterruptedException ie) {
+                                Thread.currentThread().interrupt();
+                                break;
+                            }
+                        }
                     }
                 } catch (Throwable e) {
-                    Log.w(TAG, "install failed", e);
+                    Log.w(TAG, "installer failed", e);
                 } finally {
-                    done.countDown();
+                    installResult = last;
+                    worker = null;
+                    long ms = System.currentTimeMillis() - t0;
+                    Log.i(TAG, "installer thread exit: result=" + installResult + " in " + ms + "ms");
+                    if (installResult != 0) {
+                        Log.w(TAG, "not hooked (code " + installResult + "): " + diag()
+                                + "; game runs unchanged");
+                    }
                 }
             }
         }, "ElneaGate-install");
         t.setDaemon(true);
+        worker = t;
         t.start();
+    }
+
+    /** 等安装结束**只给自检/测试用**：绝不在主线程或 Unity 线程上调。 */
+    static int awaitInstall(long timeoutMs) {
+        Thread t = worker;
+        if (t == null) return installResult;
         try {
-            done.await();
+            t.join(timeoutMs);
         } catch (InterruptedException ignored) {
-        }
-        installResult = last.get();
-        if (installResult != 0) {
-            Log.w(TAG, "not hooked (code " + installResult + "): " + diag() + "; game runs unchanged");
         }
         return installResult;
     }

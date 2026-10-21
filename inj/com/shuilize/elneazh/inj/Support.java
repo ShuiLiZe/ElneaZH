@@ -214,6 +214,13 @@ final class Support {
             Log.w(TAG, "offline section", t);   // 这一段画不出来也不影响其它按钮
         }
 
+        // ---------------- 原生加速（实验） ----------------
+        try {
+            addNativeSection(a, d, card);
+        } catch (Throwable t) {
+            Log.w(TAG, "native section", t);
+        }
+
         // ---------------- 账号 ----------------
         addSep(a, d, card, 12);
         caption(a, d, card, "账号");
@@ -381,6 +388,74 @@ final class Support {
 
     private static String toggleLabel(boolean on) {
         return on ? "单机模式：已开启（点击关闭）" : "单机模式：已关闭（点击开启）";
+    }
+
+    /**
+     * 原生加速（实验）：默认开。关掉 = 永不加载 libelneagate.so（拼音闸门与单机 native 闸门全跳过，
+     * Java 层兜底照旧）。给「这台机器上 native 就是黑屏/卡死」的用户一个硬开关。
+     *
+     * <p>为什么要给这个开关：真机事故（单机开/关都黑屏、几十秒后进程退出、无 tombstone、
+     * 闸门日志一条都没有）说明 native 这条链在个别 ROM 上能把主线程拖死。
+     * {@link NativeGuard} 会自动停用（连续 2 轮启动没活下来），但自动判断可能误伤，
+     * 用户要能自己关、自己能开回来。
+     */
+    private static void addNativeSection(final Activity a, final float d, LinearLayout card) {
+        final boolean[] on = {NativeGuard.boostEnabled(a)};
+
+        addSep(a, d, card, 12);
+        caption(a, d, card, "原生加速（实验）");
+
+        final TextView toggle = button(a, d, nativeLabel(on[0]),
+                on[0] ? ORANGE : CREAM_DARK, on[0] ? ORANGE_DARK : BROWN, on[0] ? Color.WHITE : BROWN, null);
+        final TextView state = smallLine1(a, nativeText(a, on[0]));
+        card.addView(toggle);
+        LinearLayout.LayoutParams stp = new LinearLayout.LayoutParams(-1, -2);
+        stp.topMargin = (int) (4 * d);
+        card.addView(state, stp);
+
+        toggle.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                try {
+                    boolean next = !on[0];
+                    if (!NativeGuard.setBoost(a, next)) {
+                        Toast.makeText(a, "设置没存上，原生加速未改变", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    on[0] = next;
+                    toggle.setText(nativeLabel(next));
+                    toggle.setTextColor(next ? Color.WHITE : BROWN);
+                    toggle.setBackground(round(next ? ORANGE : CREAM_DARK, next ? ORANGE_DARK : BROWN, 2.5f * d, 10 * d));
+                    state.setText(nativeText(a, next));
+                    Toast.makeText(a, next ? "已开启原生加速：重开游戏后生效"
+                                    : "已关闭原生加速：重开游戏后完全不加载 native",
+                            Toast.LENGTH_LONG).show();
+                } catch (Throwable t) {
+                    Log.w(TAG, "native boost toggle", t);
+                    Toast.makeText(a, "切换原生加速出错：" + t, Toast.LENGTH_LONG).show();
+                }
+            }
+        });
+    }
+
+    private static String nativeLabel(boolean on) {
+        return on ? "原生加速：已开启（点击关闭）" : "原生加速：已关闭（点击开启）";
+    }
+
+    /** 开关下面那一行：现状 + 为什么可能要关。 */
+    private static String nativeText(Activity a, boolean want) {
+        String now;
+        try {
+            now = NativeLoad.ready() ? "本轮已加载" : "本轮未加载";
+        } catch (Throwable t) {
+            now = "状态未知";
+        }
+        if (!want) {
+            return "关：完全不加载 native（拼音闸门与单机原生闸门跳过），Java 层拦截照旧。";
+        }
+        if (!NativeGuard.allowed()) {
+            return "已开但本轮被崩溃保护跳过（" + now + "），重开游戏再试。";
+        }
+        return "开：拼音闸门 + 单机原生闸门（" + now + "）。黑屏/卡死时请关掉它。";
     }
 
     /** 开关下面那一行：必须一行说清「开了会怎样、要不要重启」。 */

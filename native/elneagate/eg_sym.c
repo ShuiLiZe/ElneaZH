@@ -12,17 +12,23 @@
 //   3) dlopen("<maps 里的绝对路径>", RTLD_NOW|NOLOAD)   —— 命名空间按路径建句柄兜底
 //   4) /proc/self/maps 找基址 + 读 ELF .dynsym 自己查 —— 只读内存，不加载任何东西
 //
-// 第 4 级是真兜底：只用到 PT_LOAD / PT_DYNAMIC，不依赖动态链接器，也不写任何内存。
+// ⚠ 主线程阻塞事故的直接原因之一就出在这里：旧版每一次 mem_ok()（第四级里被调用几十次）
+// 都 fopen("/proc/self/maps") 并整文件扫一遍，eg_lib_base / eg_dlopen_from_maps 也各扫一遍，
+// 解析一个方法就是 O(n²) 的文件读取。现在改成「一次读取 → 解析成区间表 → 后续全查内存表」，
+// 并且表带 200ms 缓存（libil2cpp 刚 dlopen 时才需要刷新，不会每 500ms 重读整张 maps）。
 #include "eg_sym.h"
 
 #include <android/log.h>
 #include <dlfcn.h>
 #include <elf.h>
 #include <link.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "eg_log.h"
 
 #define TAG "ElneaSym"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -34,6 +40,102 @@ static void *g_handle;
 static uintptr_t g_lib_base;
 static char g_lib_path[256];
 
+// ---------------------------------------------------------------- maps 快照（一次读取，查内存表）
+
+#define EG_MAX_MAPS 2048
+#define EG_MAPS_TTL_MS 200
+
+typedef struct {
+    uintptr_t lo, hi, off;
+    int has_path;
+} eg_map_range;
+
+static eg_map_range g_maps[EG_MAX_MAPS];
+static int g_maps_count;
+static long long g_maps_at;
+static pthread_mutex_t g_maps_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// 读一次 /proc/self/maps，解析成区间表（带路径的行把路径拼到 paths 里）。返回读到的段数。
+// 只在 maps 锁里调用；调用方负责决定是否要刷新。
+static int eg_maps_reload(void) {
+    long long t0 = eg_now_ms();
+    FILE *f = fopen("/proc/self/maps", "re");
+    if (!f) { g_maps_count = 0; g_maps_at = eg_now_ms(); return 0; }
+    int n = 0;
+    char line[512];
+    while (n < EG_MAX_MAPS && fgets(line, sizeof line, f)) {
+        unsigned long long lo = 0, hi = 0, off = 0;
+        if (sscanf(line, "%llx-%llx %*s %llx", &lo, &hi, &off) != 3) continue;
+        g_maps[n].lo = (uintptr_t) lo;
+        g_maps[n].hi = (uintptr_t) hi;
+        g_maps[n].off = (uintptr_t) off;
+        g_maps[n].has_path = strchr(line, '/') != NULL;
+        n++;
+    }
+    fclose(f);
+    g_maps_count = n;
+    g_maps_at = eg_now_ms();
+    eg_ilog("maps: loaded %d ranges in %lldms", n, eg_now_ms() - t0);
+    return n;
+}
+
+// 拿一份不超过 TTL 的快照；force=1 时无条件重读（换 soname 找新库时用）。
+static void eg_maps_ensure(int force) {
+    pthread_mutex_lock(&g_maps_lock);
+    if (force || g_maps_count == 0 || eg_now_ms() - g_maps_at > EG_MAPS_TTL_MS) {
+        eg_maps_reload();
+    }
+    pthread_mutex_unlock(&g_maps_lock);
+}
+
+// 地址区间是否在某个映射里（真实 mprotect 前置检查；不碰文件）
+static int mem_in_map(uintptr_t a, size_t n) {
+    if (!a) return 0;
+    eg_maps_ensure(0);
+    int ok = 0;
+    pthread_mutex_lock(&g_maps_lock);
+    for (int i = 0; i < g_maps_count; i++) {
+        if (a >= g_maps[i].lo && a + n <= g_maps[i].hi) { ok = 1; break; }
+    }
+    pthread_mutex_unlock(&g_maps_lock);
+    return ok;
+}
+
+static int mem_ok(uintptr_t a, size_t n) { return mem_in_map(a, n); }
+
+// 旧名保留（eg_sym.h 里对外）：等价于 mem_in_map。
+int eg_mem_ok(uintptr_t a, size_t n) { return mem_in_map(a, n); }
+
+// 从快照里找 soname 对应的绝对路径（取文件偏移最小的那一段）。找到返回 1。
+// 单独 fopen 一次 maps（不常调：只在 handle 拿不到时），逐行按路径尾巴匹配。
+static int eg_maps_find_path(const char *soname, char *out, size_t cap) {
+    if (!soname || !soname[0] || !out || cap < 2) return 0;
+    size_t sl = strlen(soname);
+    long long t0 = eg_now_ms();
+    FILE *f = fopen("/proc/self/maps", "re");
+    if (!f) return 0;
+    int found = 0;
+    char line[512];
+    uintptr_t bestoff = (uintptr_t) -1;
+    while (fgets(line, sizeof line, f)) {
+        unsigned long long lo = 0, hi = 0, off = 0;
+        if (sscanf(line, "%llx-%llx %*s %llx", &lo, &hi, &off) != 3) continue;
+        char *p = strchr(line, '/');
+        if (!p) continue;
+        size_t l = strlen(p);
+        while (l && (p[l - 1] == '\n' || p[l - 1] == '\r')) p[--l] = 0;
+        if (l < sl || strcmp(p + l - sl, soname) != 0) continue;
+        if ((uintptr_t) off < bestoff) {
+            bestoff = (uintptr_t) off;
+            snprintf(out, cap, "%s", p);
+            found = 1;
+        }
+    }
+    fclose(f);
+    if (found) eg_ilog("maps: %s -> %s (%lldms)", soname, out, eg_now_ms() - t0);
+    return found;
+}
+
 void *eg_lib(const char *soname) {
     if (!soname || !soname[0]) return NULL;
     // 1) 已经在 RTLD_DEFAULT 里？dlsym 一个必然存在的符号来问
@@ -44,72 +146,69 @@ void *eg_lib(const char *soname) {
 }
 
 void *eg_dlopen_from_maps(const char *soname) {
-    FILE *f = fopen("/proc/self/maps", "re");
-    if (!f) return NULL;
-    char line[512];
     char path[256];
-    path[0] = 0;
-    size_t sl = strlen(soname);
-    while (fgets(line, sizeof line, f)) {
-        char *p = strchr(line, '/');
-        if (!p) continue;
-        size_t l = strlen(p);
-        while (l && (p[l - 1] == '\n' || p[l - 1] == '\r')) p[--l] = 0;
-        if (l < sl) continue;
-        if (strcmp(p + l - sl, soname) != 0) continue;
-        memset(path, 0, sizeof path);
-        strncpy(path, p, sizeof path - 1);
-        break;
-    }
-    fclose(f);
-    if (!path[0]) return NULL;
+    long long t0 = eg_now_ms();
+    if (!eg_maps_find_path(soname, path, sizeof path) || !path[0]) return NULL;
     void *h = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
-    if (h) LOGI("dlopen(%s, NOLOAD) ok from maps", path);
+    if (h) {
+        LOGI("dlopen(%s, NOLOAD) ok from maps (%lldms)", path, eg_now_ms() - t0);
+        snprintf(g_lib_path, sizeof g_lib_path, "%s", path);
+    }
     return h;
+}
+
+// soname 的加载基址（dlpi_addr）。先用 dl_iterate_phdr（O(模块数)，不读文件），
+// 再退回 /proc/self/maps 里文件偏移为 0 那一段的起点。
+static void *g_found_base;
+static const char *g_found_soname;
+
+static int eg_phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    (void) size;
+    (void) data;
+    if (!info->dlpi_name || !g_found_soname) return 0;
+    const char *n = info->dlpi_name;
+    size_t l = strlen(n), w = strlen(g_found_soname);
+    if (l < w || strcmp(n + l - w, g_found_soname) != 0) return 0;
+    g_found_base = (void *) (uintptr_t) info->dlpi_addr;
+    return 1;   // 停
 }
 
 uintptr_t eg_lib_base(const char *soname) {
     if (!soname || !soname[0]) return 0;
-    FILE *f = fopen("/proc/self/maps", "re");
-    if (!f) return 0;
-    char line[512];
-    size_t sl = strlen(soname);
-    uintptr_t best = 0;
-    uintptr_t bestoff = (uintptr_t) -1;
-    while (fgets(line, sizeof line, f)) {
-        unsigned long long lo = 0, hi = 0, off = 0;
-        if (sscanf(line, "%llx-%llx %*s %llx", &lo, &hi, &off) != 3) continue;
-        char *p = strchr(line, '/');
-        if (!p) continue;
-        size_t l = strlen(p);
-        while (l && (p[l - 1] == '\n' || p[l - 1] == '\r')) p[--l] = 0;
-        if (l < sl || strcmp(p + l - sl, soname) != 0) continue;
-        // 取文件偏移最小的一段：它就是 vaddr 0 的映射，base = 段起 - 偏移
-        if (off < bestoff) {
-            bestoff = off;
-            best = (uintptr_t) lo - (uintptr_t) off;
-        }
+    long long t0 = eg_now_ms();
+    g_found_soname = soname;
+    g_found_base = NULL;
+    dl_iterate_phdr(eg_phdr_cb, NULL);
+    if (g_found_base) {
+        eg_ilog("base %s = %p (phdr, %lldms)", soname, g_found_base, eg_now_ms() - t0);
+        return (uintptr_t) g_found_base;
     }
-    fclose(f);
+    // 退回 maps：文件偏移 0 那一段的 lo 就是基址
+    size_t sl = strlen(soname);
+    uintptr_t best = 0, bestoff = (uintptr_t) -1;
+    FILE *f = fopen("/proc/self/maps", "re");
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof line, f)) {
+            unsigned long long lo = 0, hi = 0, off = 0;
+            if (sscanf(line, "%llx-%llx %*s %llx", &lo, &hi, &off) != 3) continue;
+            char *p = strchr(line, '/');
+            if (!p) continue;
+            size_t l = strlen(p);
+            while (l && (p[l - 1] == '\n' || p[l - 1] == '\r')) p[--l] = 0;
+            if (l < sl || strcmp(p + l - sl, soname) != 0) continue;
+            if ((uintptr_t) off < bestoff) {
+                bestoff = (uintptr_t) off;
+                best = (uintptr_t) lo - (uintptr_t) off;
+            }
+        }
+        fclose(f);
+    }
+    eg_ilog("base %s = %p (maps, %lldms)", soname, (void *) best, eg_now_ms() - t0);
     return best;
 }
 
 // ---------------------------------------------------------------- ELF .dynsym 自查（第 4 级）
-
-static int mem_ok(uintptr_t a, size_t n) {
-    if (!a) return 0;
-    FILE *f = fopen("/proc/self/maps", "re");
-    if (!f) return 0;
-    char line[512];
-    int ok = 0;
-    while (fgets(line, sizeof line, f)) {
-        unsigned long long lo = 0, hi = 0;
-        if (sscanf(line, "%llx-%llx", &lo, &hi) != 2) continue;
-        if (a >= lo && a + n <= hi) { ok = 1; break; }
-    }
-    fclose(f);
-    return ok;
-}
 
 static void *dynsym_lookup(uintptr_t base, const char *name) {
     const ElfW(Ehdr) *eh = (const ElfW(Ehdr) *) base;
@@ -160,7 +259,7 @@ static void *dynsym_lookup(uintptr_t base, const char *name) {
         nsyms = h[1];
     } else if (gnuhash && mem_ok(gnuhash, 16)) {
         const uint32_t *g = (const uint32_t *) gnuhash;
-        uint32_t nbuckets = g[0], symbias = g[1], bloom = g[2], nbloom = g[3];
+        uint32_t nbuckets = g[0], symbias = g[1], nbloom = g[3];
         const uint32_t *buckets = g + 4 + (nbloom * sizeof(ElfW(Addr)) / 4);
         if (!mem_ok((uintptr_t) buckets, nbuckets * 4)) return NULL;
         uint32_t maxsym = 0;
@@ -178,6 +277,7 @@ static void *dynsym_lookup(uintptr_t base, const char *name) {
     } else {
         return NULL;
     }
+    // 一次性把整张符号表检查一遍，循环里不再逐条查 maps（旧版就是这样 O(n²) 的）
     if (!mem_ok(symtab, nsyms * symsz)) return NULL;
     if (!mem_ok(strtab, strsz)) return NULL;
 
@@ -198,10 +298,9 @@ static void *dynsym_lookup(uintptr_t base, const char *name) {
 
 // ---------------------------------------------------------------- 对外
 
-// 返回 1 已就绪（至少要能用：handle 或 base 之一）
+// 返回 1 已就绪（至少要能用：handle 或 base 之一）。
+// 只试一次：库还没 dlopen 时不要把「没有」记成永久失败，留给下一轮（有上限）。
 static int ensure_lib(void) {
-    if (g_stage == EG_SYM_STAGE_READY) return 1;
-    if (g_stage == EG_SYM_STAGE_FAILED) return 0;
     if (!g_handle) g_handle = dlopen("libil2cpp.so", RTLD_NOW | RTLD_NOLOAD);
     if (!g_handle) {
         void *h = eg_dlopen_from_maps("libil2cpp.so");
@@ -210,23 +309,34 @@ static int ensure_lib(void) {
     if (!g_lib_base) g_lib_base = eg_lib_base("libil2cpp.so");
     if (!g_handle && !g_lib_base) {
         g_stage = EG_SYM_STAGE_FAILED;
-        LOGW("libil2cpp.so not found (handle=0 base=0)");
         return 0;
     }
-    g_stage = EG_SYM_STAGE_READY;
+    if (g_stage == EG_SYM_STAGE_NONE || g_stage == EG_SYM_STAGE_FAILED)
+        g_stage = EG_SYM_STAGE_READY;
     return 1;
 }
 
 void *eg_sym_find(const char *name) {
     if (!name || !name[0]) return NULL;
+    long long t0 = eg_now_ms();
     // 1) RTLD_DEFAULT
     void *p = dlsym(RTLD_DEFAULT, name);
-    if (p) { g_stage = g_stage > EG_SYM_STAGE_DEFAULT ? g_stage : EG_SYM_STAGE_DEFAULT; return p; }
-    if (!ensure_lib()) return NULL;
+    if (p) {
+        if (g_stage < EG_SYM_STAGE_DEFAULT) g_stage = EG_SYM_STAGE_DEFAULT;
+        return p;
+    }
+    if (!ensure_lib()) {
+        // 每次逐符号打印会把日志刷爆：只打阶段变化（调用方自己按轮次限流）。
+        return NULL;
+    }
     // 2) 句柄
     if (g_handle) {
         p = dlsym(g_handle, name);
-        if (p) { g_stage = EG_SYM_STAGE_HANDLE; return p; }
+        if (p) {
+            g_stage = EG_SYM_STAGE_HANDLE;
+            eg_ilog("sym %s @ %p via handle (%lldms)", name, p, eg_now_ms() - t0);
+            return p;
+        }
     }
     // 3) maps 路径句柄
     if (!g_handle) {
@@ -234,15 +344,24 @@ void *eg_sym_find(const char *name) {
         if (h) {
             g_handle = h;
             p = dlsym(h, name);
-            if (p) { g_stage = EG_SYM_STAGE_MAPS; return p; }
+            if (p) {
+                g_stage = EG_SYM_STAGE_MAPS;
+                eg_ilog("sym %s @ %p via maps-path (%lldms)", name, p, eg_now_ms() - t0);
+                return p;
+            }
         }
     }
-    // 4) 读 .dynsym
+    // 4) 读 .dynsym（纯内存解析，maps 已快照）
     if (!g_lib_base) g_lib_base = eg_lib_base("libil2cpp.so");
     if (g_lib_base) {
         p = dynsym_lookup(g_lib_base, name);
-        if (p) { g_stage = EG_SYM_STAGE_DYNSYM; return p; }
+        if (p) {
+            g_stage = EG_SYM_STAGE_DYNSYM;
+            eg_ilog("sym %s @ %p via elf-dynsym (%lldms)", name, p, eg_now_ms() - t0);
+            return p;
+        }
     }
+    g_stage = EG_SYM_STAGE_FAILED;
     return NULL;
 }
 
@@ -272,4 +391,12 @@ const char *eg_sym_stage(void) {
         case EG_SYM_STAGE_FAILED: return "no-libil2cpp";
         default: return "none";
     }
+}
+
+// 一次 /proc/self/maps 读了多少段、多久：真机上「读 maps 太慢」这种事要能被一眼看出来。
+void eg_maps_stat(int *ranges, long long *age_ms) {
+    pthread_mutex_lock(&g_maps_lock);
+    if (ranges) *ranges = g_maps_count;
+    if (age_ms) *age_ms = g_maps_count ? eg_now_ms() - g_maps_at : -1;
+    pthread_mutex_unlock(&g_maps_lock);
 }

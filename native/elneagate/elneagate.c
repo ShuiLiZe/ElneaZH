@@ -27,9 +27,11 @@
 #include <pthread.h>
 #include <sys/mman.h>
 
+#include "eg_log.h"
 #include "eg_names.h"
 #include "eg_offline.h"
 #include "eg_sym.h"
+#include "elneagate_jni.h"
 
 #include "vendor/And64InlineHook.hpp"
 
@@ -248,7 +250,9 @@ static void eg_free_pairs(void) {
 JNIEXPORT jint JNICALL
 Java_com_shuilize_elneazh_inj_NameGate_nativeSetNames(JNIEnv *env, jclass cls, jstring table) {
     (void) cls;
-    if (!table) { eg_free_pairs(); return 0; }
+    long long t0 = eg_now_ms();
+    EG_I("names: setNames enter (thread on this call is the JVM caller)");
+    if (!table) { eg_free_pairs(); EG_I("names: cleared"); return 0; }
     const char *s = (*env)->GetStringUTFChars(env, table, NULL);
     if (!s) return -1;
     size_t n = strlen(s);
@@ -289,6 +293,7 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeSetNames(JNIEnv *env, jclass cls, j
     g_pair_count = cnt;
     pthread_mutex_unlock(&g_pair_lock);
     LOGI("names loaded: %d pair(s)", cnt);
+    EG_I("names: setNames done %d pair(s) in %lldms", cnt, eg_now_ms() - t0);
     return cnt;
 }
 
@@ -311,9 +316,11 @@ JNIEXPORT jint JNICALL
 Java_com_shuilize_elneazh_inj_NameGate_nativeInstall(JNIEnv *env, jclass cls) {
     (void) cls;
     if (g_hooked) return 0;
+    long long t0 = eg_now_ms();
 
     // dlsym(RTLD_DEFAULT) 在 Android 的链接器命名空间里经常看不到 Unity 自己 dlopen 的
     // libil2cpp.so：走 eg_sym 的四级兜底（默认作用域 → 句柄 → maps 路径句柄 → ELF .dynsym）。
+    // maps 现在是一次快照（200ms TTL），不再是每个符号读一遍整张 maps。
     g_string_new = (il2cpp_string_new_t) eg_sym_find("il2cpp_string_new");
     g_string_new_utf16 = (il2cpp_string_new_utf16_t) eg_sym_find("il2cpp_string_new_utf16");
     if (!g_string_new) {
@@ -327,7 +334,8 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeInstall(JNIEnv *env, jclass cls) {
         }
         return -1;
     }
-    LOGI("il2cpp_string_new @ %p via %s", (void *) g_string_new, eg_sym_stage());
+    EG_I("name gate: il2cpp_string_new @ %p via %s (%lldms)", (void *) g_string_new,
+         eg_sym_stage(), eg_now_ms() - t0);
     g_diag_code = 1;
     g_diag_detail = 1;   // 能拿到 string_new，说明命名空间解析通了
 
@@ -340,6 +348,7 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeInstall(JNIEnv *env, jclass cls) {
     }
     g_base = base;
     void *target = (void *) ((uintptr_t) base + ENC_OFFSET);
+    EG_I("name gate: base=%p target=%p verify... (%lldms)", base, target, eg_now_ms() - t0);
     if (!eg_verify(target)) {
         // 把具体字节打出来：真机上才能判断是「基址变了」还是「这版序言不一样」
         const unsigned char *cur = (const unsigned char *) target;
@@ -356,6 +365,7 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeInstall(JNIEnv *env, jclass cls) {
     }
     g_diag_verify = 1;
 #if defined(__aarch64__)
+    EG_I("name gate: prologue ok, writing hook slot (%lldms)", eg_now_ms() - t0);
     A64HookFunction(target, (void *) eg_hook, (void **) &g_orig_enc);
 #else
     g_diag_code = 4;
@@ -373,7 +383,8 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeInstall(JNIEnv *env, jclass cls) {
     }
     g_hooked = 1;
     g_diag_code = 0;
-    LOGI("hooked EncryptRJ256 @ %p+0x%x (base %p)", target, ENC_OFFSET, base);
+    EG_I("name gate: hooked EncryptRJ256 @ %p+0x%x (base %p, trampoline %p, %lldms)",
+         target, ENC_OFFSET, base, (void *) g_orig_enc, eg_now_ms() - t0);
     return 0;
 }
 

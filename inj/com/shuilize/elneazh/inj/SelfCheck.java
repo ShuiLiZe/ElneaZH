@@ -21,9 +21,18 @@ final class SelfCheck {
     /**
      * 后台重写一遍 selfcheck（native 加载完 / 挂完之后调）。同一秒内的重复请求会合并。
      * 绝不抛异常、绝不阻塞调用方（安装线程）。
+     *
+     * <p>真机黑屏事故之后加了「同一秒合并」：旧版每次调用都起一个新线程，启动路径上连着几个
+     * 调用点（ZhInit / NameGate / OfflineGate），而且 60s 内反复触发，会同时跑好几份自检
+     * （每份都要完整计算拼音与分类器）。现在只认一秒一次。
      */
+    private static volatile long lastRunAt;
+
     static void rewriteAsync(final Context context) {
         if (context == null) return;
+        long now = System.currentTimeMillis();
+        if (now - lastRunAt < 1000) return;
+        lastRunAt = now;
         try {
             Thread t = new Thread(new Runnable() {
                 @Override public void run() {
@@ -40,9 +49,27 @@ final class SelfCheck {
     }
 
     static void run(Context ctx) {
+        String text = render(ctx);
+        Log.i(TAG, "\n" + text);
+        try (FileOutputStream o = new FileOutputStream(new File(ctx.getFilesDir(), "elneazh_selfcheck.txt"))) {
+            o.write(text.getBytes("UTF-8"));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 只生成报告正文（不落盘、不打日志）：给纯 JDK 单测用。 */
+    static String render(Context ctx) {
         StringBuilder r = new StringBuilder();
         try {
             r.append("== native 加载（两个闸门共用 libelneagate.so） ==\n");
+            // 崩溃保护必须写在最前面：native 没加载时，这一行解释「为什么没加载」。
+            r.append("native guard: ").append(NativeGuard.describe()).append('\n');
+            if (!NativeGuard.allowed()) {
+                r.append("native disabled by crash guard: ").append(NativeGuard.reason()).append('\n');
+                r.append("native note: 拼音闸门与单机 native 闸门本轮全部跳过；Java 层拦截（NetGuard / "
+                        + "NetBlocker）照旧生效。自愈办法：进 Support 打开「原生加速（实验）」或清一次"
+                        + " files/elneazh_native_boot\n");
+            }
             r.append("native load: ").append(NativeLoad.describe()).append('\n');
             String e = NativeLoad.err();
             if (!NativeLoad.loaded() && !e.isEmpty()) {
@@ -167,6 +194,7 @@ final class SelfCheck {
         }
         // 汇总放在最后一行（前面是明细），用户 tail 一把也能看到关键三行。
         r.append('\n');
+        r.append("native guard: ").append(NativeGuard.describe()).append('\n');
         r.append("native load: ").append(NativeLoad.describe()).append('\n');
         if (!NativeLoad.loaded() && !NativeLoad.err().isEmpty()) {
             r.append("native load error: ").append(NativeLoad.err()).append('\n');
@@ -191,6 +219,7 @@ final class SelfCheck {
             o.write(text.getBytes("UTF-8"));
         } catch (Throwable ignored) {
         }
+        return text;
     }
 
     private SelfCheck() {}

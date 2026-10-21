@@ -24,7 +24,12 @@ ABIS = [
     ("aarch64-linux-android24", "arm64-v8a"),
     ("armv7a-linux-androideabi24", "armeabi-v7a"),
 ]
-SRC = ["native/elneagate/elneagate.c", "native/elneagate/eg_names.c",
+SRC = ["native/elneagate/elneagate.c",
+       # JNI_OnLoad（只做 O(1)：记 vm + 起后台线程）与阶段日志计数器
+       "native/elneagate/eg_boot.c",
+       # 崩溃保护：crash guard 允许标记 / 后台安装窗口上限
+       "native/elneagate/eg_guard.c",
+       "native/elneagate/eg_names.c",
        "native/elneagate/eg_sym.c",
        "native/elneagate/eg_offline.c",
        "native/elneagate/vendor/And64InlineHook.cpp"]

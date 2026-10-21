@@ -38,6 +38,7 @@
 
 #include <android/log.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -45,6 +46,9 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+#include "eg_log.h"
+#include "eg_sym.h"
 
 #include "vendor/And64InlineHook.hpp"
 
@@ -93,19 +97,18 @@ static struct {
     fn_object_get_class object_get_class;
     fn_thread_attach thread_attach;
     int ready;
+    int api_load_logged;
 } g_api;
 
 // dlsym(RTLD_DEFAULT, name)；libil2cpp 还没 dlopen 时补 dlopen(libil2cpp.so, NOLOAD)。
+// 全都交给 eg_sym 的四级解析（含 maps 快照与 ELF .dynsym 兜底），只在第一次解析时花时间。
 static void *eg_sym(const char *name) {
-    void *p = dlsym(RTLD_DEFAULT, name);
-    if (p) return p;
-    if (!g_api.handle) g_api.handle = dlopen("libil2cpp.so", RTLD_NOW | RTLD_NOLOAD);
-    if (g_api.handle) p = dlsym(g_api.handle, name);
-    return p;
+    return eg_sym_find(name);
 }
 
 static int eg_api_load(void) {
     if (g_api.ready) return 1;
+    long long t0 = eg_now_ms();
     g_api.domain_get = (fn_domain_get) eg_sym("il2cpp_domain_get");
     g_api.domain_get_assemblies = (fn_domain_get_assemblies) eg_sym("il2cpp_domain_get_assemblies");
     g_api.assembly_get_image = (fn_assembly_get_image) eg_sym("il2cpp_assembly_get_image");
@@ -119,17 +122,33 @@ static int eg_api_load(void) {
 
     if (!g_api.domain_get || !g_api.domain_get_assemblies || !g_api.assembly_get_image
         || !g_api.class_from_name || !g_api.class_get_method_from_name) {
+        // 只打一次（真机上 Java 侧每 500ms 会调进来，不能刷屏）
+        if (!g_api.api_load_logged) {
+            g_api.api_load_logged = 1;
+            LOGW("il2cpp api not ready yet (%lldms, stage=%s)", eg_now_ms() - t0, eg_sym_stage());
+        }
         return 0;
     }
     g_api.ready = 1;
+    LOGI("il2cpp api ready (%lldms, stage=%s)", eg_now_ms() - t0, eg_sym_stage());
     return 1;
 }
 
-// libil2cpp.so 的基址（dl_iterate_phdr；找不到返回 NULL）
+// libil2cpp.so 的加载基址。
+// 早先这里把 dlopen(NOLOAD) 返回的 **handle** 当基址用（再加固定偏移）—— 那是错的：
+// handle 是 solist 里的指针，不是映射起点。现在走 eg_sym 的 dl_iterate_phdr → maps，
+// 并按硬页（16KB，Android 16 / arm64 常见的 page size）对齐，避免个别 rom 上 +0x18ad7e4
+// 落到非页边界被读成错地址。
+#define EG_PAGE_16K 0x4000ULL
+static void *g_cached_base;
+
 static void *eg_find_base(void) {
-    void *base = dlopen("libil2cpp.so", RTLD_NOW | RTLD_NOLOAD);
-    if (base) return base;
-    return NULL;
+    if (g_cached_base) return g_cached_base;
+    uintptr_t b = eg_lib_base("libil2cpp.so");
+    if (!b) return NULL;
+    g_cached_base = (void *) (b & ~(uintptr_t) (EG_PAGE_16K - 1));
+    EG_I("offline: libil2cpp base=%p (raw=%p)", g_cached_base, (void *) b);
+    return g_cached_base;
 }
 
 // 校验 EncryptRJ256 入口的 8 字节序言。1 = 完全一致，0 = 不认识（不挂），
@@ -148,16 +167,18 @@ static int eg_verify_enc(void *addr) {
     return memcmp(addr, prologue, sizeof prologue) == 0 ? 1 : 0;
 }
 
-// 运行时探测：依赖的核心 API 里能取到几个（给 SelfCheck 用，期望 5）
+// 运行时探测：依赖的核心 API 里能取到几个（给 SelfCheck 用，期望 5）。
+// 现读 g_api：eg_api_load 成功过就是 5，否则按已解析到几个算 —— 旧版每次都重新 dlsym 一遍，
+// 自检线程和安装线程一起点时会在 dlopen 锁上互相等，没必要。
 int eg_of_api_probe(void) {
-    const char *names[] = {
-            "il2cpp_domain_get", "il2cpp_domain_get_assemblies", "il2cpp_assembly_get_image",
-            "il2cpp_class_from_name", "il2cpp_class_get_method_from_name",
-            };
+    eg_api_load();
+    if (g_api.ready) return 5;
     int n = 0;
-    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
-        if (eg_sym(names[i]) != NULL) n++;
-    }
+    if (g_api.domain_get) n++;
+    if (g_api.domain_get_assemblies) n++;
+    if (g_api.assembly_get_image) n++;
+    if (g_api.class_from_name) n++;
+    if (g_api.class_get_method_from_name) n++;
     return n;
 }
 
@@ -683,11 +704,14 @@ static int eg_page_writable(void *slot) {
     long ps = sysconf(_SC_PAGESIZE);
     if (ps <= 0) ps = 4096;
     uintptr_t start = (uintptr_t) slot & ~((uintptr_t) ps - 1);
-    uintptr_t end = ((uintptr_t) slot + sizeof(void *)) & ~((uintptr_t) ps - 1);
-    if (mprotect((void *) start, (size_t) (end - start) + (size_t) ps, PROT_READ | PROT_WRITE) != 0) {
+    // 只放开「覆盖这个指针对应的那一页」，不要再多放一页：多放的页把游戏自己映射的
+    // 只读段也改成可写，虽然通常无害，但减少了我们和游戏 own 的 mprotect 撞车的面。
+    size_t len = (size_t) ps;
+    if (mprotect((void *) start, len, PROT_READ | PROT_WRITE) != 0) {
+        EG_W("mprotect(%p, %zu, rw) failed: errno=%d", (void *) start, len, errno);
         return 0;
     }
-    __builtin___clear_cache((char *) start, (char *) (end + (uintptr_t) ps));
+    __builtin___clear_cache((char *) start, (char *) (start + len));
     return 1;
 }
 
@@ -695,6 +719,8 @@ static int eg_page_writable(void *slot) {
 // 失败返回 0，不改任何东西（真的什么都没写）。
 static int eg_slot_replace(void *slot, void *hook, void **orig) {
     if (!slot || !hook) return 0;
+    // 槽本身必须先在我们读到的映射里，否则写它只可能是脏数据（自检里 g_hooks 也会被拿来查）
+    if (!eg_mem_ok((uintptr_t) slot, sizeof(void *))) return 0;
     void **p = (void **) slot;
     void *cur = *p;
     void *real = eg_strip_pac(cur);
@@ -706,6 +732,7 @@ static int eg_slot_replace(void *slot, void *hook, void **orig) {
     *p = hook;
     __sync_synchronize();
     if (orig) *orig = real;
+    EG_I("slot write ok: slot=%p %p -> %p (orig=%p)", slot, cur, hook, real);
     return 1;
 }
 
@@ -755,12 +782,24 @@ static int eg_install_enc_fallback(void) {
 
 int eg_of_install(int target, const char *names) {
     if (target < EG_TARGET_MIN || target > EG_TARGET_MAX) return -5;
+    long long t0 = eg_now_ms();
+    // 单机模式**关着**时：除兜底闸（EncryptRJ256，两闸共用）外一个 hook 都不装。
+    // 关单机本来就不需要界面/请求那几族 —— 早先这里照样去解析并挂载，
+    // 白花几十次 il2cpp 解析（真机上就是这一串把启动拖住的）。Java 侧也会跳过，
+    // 这里是第二道保险（防止别处误调）。
+    if (!eg_is_off()) {
+        int enc_off = eg_install_enc_fallback();
+        EG_I("offline: off -> skip target=%d hooks (fallback=%d, %lldms)",
+             target, enc_off, eg_now_ms() - t0);
+        return 0;
+    }
     pthread_mutex_lock(&g_install_lock);
     // 兜底闸优先：只要 libil2cpp 在内存里就能挂，不等 il2cpp API。
     int enc = eg_install_enc_fallback();
     if (!eg_api_load()) {
         pthread_mutex_unlock(&g_install_lock);
-        LOGW("il2cpp API not visible yet (libil2cpp not loaded?); fallback=%d, will retry", enc);
+        EG_I("offline: target=%d deferred, il2cpp api not visible (fallback=%d, %lldms)",
+             target, enc, eg_now_ms() - t0);
         return -1;
     }
 #if !defined(__aarch64__)
@@ -823,8 +862,8 @@ int eg_of_install(int target, const char *names) {
     }
     int added = g_hook_count - before;
     pthread_mutex_unlock(&g_install_lock);
-    LOGI("install: target=%d hooked %d, skipped %d (total hooked %d, fallback=%d, off=%d)",
-         target, added, skipped, g_hook_count, enc, eg_is_off());
+    LOGI("install: target=%d hooked %d, skipped %d (total hooked %d, fallback=%d, off=%d, %lldms)",
+         target, added, skipped, g_hook_count, enc, eg_is_off(), eg_now_ms() - t0);
     for (int i = before; i < g_hook_count; i++) {
         LOGI("  hooked[%d] kind=%d %s::%s fn=%p slot=%p orig=%p via=slot-replace", i,
              g_hooks[i].target_kind, g_hooks[i].klass, g_hooks[i].method, g_hooks[i].target,

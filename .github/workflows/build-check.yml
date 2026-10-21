@@ -24,6 +24,11 @@ jobs:
         run: python -m py_compile tools/*.py && echo "python ok"
       - name: Offline rules (single-player gate + share/export)
         run: python tools/verify_offline.py
+      - name: Native must not block the main thread (static guards)
+        run: |
+          # 真机黑屏事故（单机开/关都黑屏 → 进程被看门狗杀掉）的结构性根因守在这里：
+          # JNI_OnLoad 只做 O(1)、没有 constructor、maps 只读一次、Java 侧不再 await 安装。
+          python tools/verify_native_nonblock.py --verbose
       - name: Offline unit test (real Java on plain JDK)
         run: |
           # 不需要手机的纯逻辑，直接拿 JDK 跑：单机判定 / 本机回包 / 开关 / 说明文案。
@@ -37,10 +42,14 @@ jobs:
             inj/com/shuilize/elneazh/inj/UploadNames.java \
             inj/com/shuilize/elneazh/inj/OfflineGate.java \
             inj/com/shuilize/elneazh/inj/IdentityKeys.java \
-            inj/com/shuilize/elneazh/inj/IdentityFiles.java
+            inj/com/shuilize/elneazh/inj/IdentityFiles.java \
+            inj/com/shuilize/elneazh/inj/NativeLoad.java \
+            inj/com/shuilize/elneazh/inj/NativeGuard.java
           java -cp build/offtest com.shuilize.elneazh.inj.OfflineTest
           java -cp build/offtest com.shuilize.elneazh.inj.PlayerPrefsTest
           java -cp build/offtest com.shuilize.elneazh.inj.IdentityWipeTest
+          # 主线程不阻塞 + 崩溃保护（真实 NativeGuard / NativeLoad / OfflineGate 跑在 JDK 上）
+          java -cp build/offtest com.shuilize.elneazh.inj.NativeGateTest
       - name: Verify base data.unity3d
         run: |
           echo "dc1796ffac62ea29796772f320c4218a922216aa417c4689abaeb6c0e917a155  base/data.unity3d" | sha256sum -c -

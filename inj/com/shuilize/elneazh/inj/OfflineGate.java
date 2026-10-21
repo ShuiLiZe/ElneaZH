@@ -63,8 +63,19 @@ final class OfflineGate {
     private static volatile int[] lastResults = new int[0];
     private static volatile boolean installedAny;
     private static volatile boolean workerRunning;
-    /** 后台安装窗口：从进程起来算，最多等这么久让 libil2cpp 出现。 */
-    private static final long INSTALL_WINDOW_MS = 90_000L;
+    /**
+     * 后台安装窗口：从进程起来算，最多等这么久让 libil2cpp 出现。
+     *
+     * <p>90s → 30s：真机事故里「黑屏 + 一会儿后退出」至少有一份就是这类长等待叠出来的。
+     * 30s 足够 Unity 起完 il2cpp（正常 3~8s），再长就是在赌；到点放弃，Java 层照旧兜底，
+     * selfcheck 里写「il2cpp 未就绪」，下一轮（回前台 / 切开关）还会补装。
+     */
+    static final long INSTALL_WINDOW_MS = 30_000L;
+
+    /** 给 crash guard 的 native 侧用：同一份窗口值（秒级精度够）。 */
+    static long windowMs() {
+        return INSTALL_WINDOW_MS;
+    }
 
     private OfflineGate() {}
 
@@ -556,6 +567,30 @@ final class OfflineGate {
 
     /** 逐个 target 装，每个都单独 try/catch：一族失败不影响其它族。 */
     private static void installAll() {
+        long t0 = System.currentTimeMillis();
+        if (!NativeGuard.allowed()) {
+            // crash guard 停用了 native（或用户在 Support 关了「原生加速」）：native 根本没加载，
+            // 这里什么都不该做，更不能去等 libil2cpp。
+            Log.i(TAG, "install skipped: " + NativeGuard.reason());
+            SelfCheck.rewriteAsync(ctxRef);
+            return;
+        }
+        if (!Offline.isOn(ctxRef)) {
+            // 单机关着：六族（界面隐藏 / 请求拦截 / 遮罩 …）一个都不需要。
+            // 只留 native 侧的兜底闸（EncryptRJ256），由 eg_of_install 自己处理。
+            // 早先这里照样把六族全装一遍 —— 几十次 il2cpp 按名解析 + 写槽，
+            // 真机上（尤其 Android 16 / 16KB 页）就是启动期卡顿与黑屏的一条来路。
+            try {
+                nativeInstall(0, "");   // target 0 非法，native 直接返回 -5；这里只是让日志有对账
+            } catch (Throwable ignored) {
+            }
+            lastResults = new int[groups().length];
+            installedAny = false;
+            Log.i(TAG, "install skipped: offline is OFF, no UI/Http hooks installed ("
+                    + (System.currentTimeMillis() - t0) + "ms)");
+            SelfCheck.rewriteAsync(ctxRef);
+            return;
+        }
         int[][] gs = groups();
         int[] results = new int[gs.length];
         // 第一轮：等 libil2cpp 出现（最长 INSTALL_WINDOW_MS）。只要有一族挂上就说明运行时起来了。
@@ -564,9 +599,15 @@ final class OfflineGate {
         while (System.currentTimeMillis() < deadline && !api) {
             api = probe() >= 5;
             if (!api) sleep(500);
+            // 等待期间用户可能关掉单机 / crash guard 生效：立刻停手
+            if (!Offline.isOn(ctxRef) || !NativeGuard.allowed()) break;
         }
         Log.i(TAG, "il2cpp api probe=" + probe() + "/5 after wait");
         for (int i = 0; i < gs.length; i++) {
+            if (!Offline.isOn(ctxRef)) {
+                Log.i(TAG, "install aborted mid-way: offline turned off");
+                break;
+            }
             int target = gs[i][0];
             try {
                 int n = installRetry(target, table(target));
@@ -580,7 +621,7 @@ final class OfflineGate {
         }
         lastResults = results;
         installedAny = total() > 0;
-        Log.i(TAG, "install done: " + describe());
+        Log.i(TAG, "install done in " + (System.currentTimeMillis() - t0) + "ms: " + describe());
         // 进程刚起来时 ZhInit 里的 selfcheck 记的是「还没加载 / 还没挂」的状态；挂完这一轮再把
         // 真实数字重写一遍，真机上 files/elneazh_selfcheck.txt 才是最终态。
         SelfCheck.rewriteAsync(ctxRef);

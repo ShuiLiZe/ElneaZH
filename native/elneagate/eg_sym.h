@@ -25,10 +25,20 @@ int eg_sym_bind(const char **names, void **out, int n, char *missing, size_t mis
 void *eg_lib(const char *soname);
 void *eg_dlopen_from_maps(const char *soname);
 
-// /proc/self/maps 里 soname 的加载基址（文件偏移 0 那段）；找不到返回 0
+// /proc/self/maps 里 soname 的加载基址（dlpi_addr）；先 dl_iterate_phdr 再退回 maps；找不到返回 0
 uintptr_t eg_lib_base(const char *soname);
+
+// 地址区间 [a, a+n) 是否在某个已映射区间里。
+//
+// ⚠ maps 只在**第一次 / 超过 200ms 的过期**时读一次，之后全是查内存里的区间表；
+// 旧版每次都 fopen + 全文件扫描，在 dynsym_lookup 里被调用几十次 —— 那是真机主线程被卡住
+// 的直接原因之一（见 eg_log.h 的头注释与 HANDOFF）。
+int eg_mem_ok(uintptr_t a, size_t n);
 
 // 最后一次成功的解析方式（给 selfcheck 写原因用）
 const char *eg_sym_stage(void);
+
+// maps 快照现状：段数 / 距上次读取的毫秒数（-1 = 还没读过）。日志与自检用。
+void eg_maps_stat(int *ranges, long long *age_ms);
 
 #endif  // EG_SYM_H

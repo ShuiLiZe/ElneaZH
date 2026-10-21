@@ -15,19 +15,30 @@ import java.io.InputStream;
 import java.io.OutputStream;
 
 /**
- * Injected into the localized game APK by 艾尔尼亚汉化器 (no root).
+ * Injected into the localized game APK by 爱尔斯亚汉化器 (no root).
  * Runs inside the game process before the game starts and copies the Chinese master tables and the
  * Chinese map bundle (shipped as assets/elneazh/...) into the game's own directories:
  *   files/zh/            <- libil2cpp is patched to read master tables from /data/data/<pkg>/files/zh/
  *   UnityCache/Shared/map_large_en.android/<hash>/   (external + internal)
  *   UnityCache/Shared/<bundle>/<hash>/__data          Chinese tutorial figures / banners (see Bundles)
  * Existing non-table files from files/Contents (account token etc.) are carried over once.
+ *
+ * <p><b>主线程纪律（真机黑屏事故之后定的，别破坏）</b>：本类的 {@link #onCreate()} 跑在进程启动时的
+ * 主线程上（ContentProvider），所以这里只允许做「本地小文件 + 纯内存」的活：
+ * 建目录、复制本地资产、装 Java 层闸门。
+ * <b>任何 native 加载 / il2cpp 解析 / 等待</b>一律交给后台线程（{@link NameGate#install}、
+ * {@link OfflineGate#install} 都已经改成「立刻返回 + 后台做事」），主线程一个 {@code sleep}、
+ * 一个 {@code await}、一个 {@code join} 都不许有。
  */
 public final class ZhInit extends ContentProvider {
     private static final String TAG = "ElneaZH";
     private static final String MAP_DIR = "UnityCache/Shared/map_large_en.android/9e41473f5b511831105ea0f1695a843f";
 
     @Override public boolean onCreate() {
+        long t0 = System.currentTimeMillis();
+        // ① 崩溃保护必须在最前面：它决定这一轮到底允不允许加载 native。
+        //    连击 2 次启动没活下来 → 之后自动不加载 native（Java 兜底照旧）。
+        try { NativeGuard.boot(getContext()); } catch (Throwable t) { Log.w(TAG, "boot guard failed", t); }
         Backup.setCtx(getContext());
         // 上传方向的中文名映射（中文名 -> 固定拼音）。只加载词表，不动存档。
         try { NameFix.load(getContext()); } catch (Throwable t) { Log.e(TAG, "names load failed", t); }
@@ -42,14 +53,12 @@ public final class ZhInit extends ContentProvider {
             if (!NetGuard.install(getContext())) Log.w(TAG, "NET gate: no Java-visible hook (see NetGuard)");
         } catch (Throwable t) { Log.w(TAG, "NET gate failed", t); }
         // 上传前名字闸门（native）：hook Cipher::EncryptRJ256，把明文里的中文名换成拼音。
-        // 最早期开始装（后台线程反复重试到 libil2cpp 加载完），失败只写日志，游戏照常跑。
+        // install() 现在**立刻返回**，加载/解析/写槽全在后台 ElneaGate-install 线程里。
         try { NameGate.install(getContext(), 1); } catch (Throwable t) { Log.w(TAG, "gate install failed", t); }
         // 单机模式的闸门：常驻安装（是否真拦由 Offline.isOn() 现读决定，切开关不用重进游戏）
         try { NetBlocker.install(getContext()); } catch (Throwable t) { Log.w(TAG, "offline gate failed", t); }
-        // 单机模式的 native 闸门（离线入口 + HTTP + 请求出口兜底）：
-        // 与名字闸门同一个 .so；入口/面板靠 il2cpp 按名解析后 inline hook，
-        // 请求出口（Cipher::EncryptRJ256）走固定偏移，不依赖解析 —— 单机时任何 sns04 请求都发不出去。
-        // 安装全程在后台线程里重试到 libil2cpp 出现（本调用立即返回，不拖启动）。
+        // 单机模式的 native 闸门（离线入口 + HTTP + 请求出口兜底），与名字闸门同一个 .so。
+        // 同样立刻返回；单机**关着**时它只留兜底闸，六族 hook 一个都不装（见 eg_of_install）。
         try { OfflineGate.install(getContext(), 0); } catch (Throwable t) { Log.w(TAG, "offline native gate failed", t); }
         // 开关状态与 native 侧对账：真机「单机开着仍联网」第一步就查这个。日志标签 ElneaOffline。
         try {
@@ -59,7 +68,10 @@ public final class ZhInit extends ContentProvider {
                     + " enc=" + OfflineGate.encHooked()
                     + " " + OfflineGate.describe());
         } catch (Throwable t) { Log.w(TAG, "offline state check failed", t); }
-        try { SelfCheck.run(getContext()); } catch (Throwable t) { Log.w(TAG, "selfcheck failed", t); }
+        // 自检报告挪到后台：它要算拼音、跑分类器、读 native 状态，几十毫秒到几百毫秒，
+        // 放在 onCreate 里就是白挨一发主线程阻塞（而且以前每次启动都跑一遍）。
+        try { SelfCheck.rewriteAsync(getContext()); } catch (Throwable t) { Log.w(TAG, "selfcheck failed", t); }
+        Log.i(TAG, "onCreate done in " + (System.currentTimeMillis() - t0) + "ms (all native work moved to background)");
         return true;
     }
 
