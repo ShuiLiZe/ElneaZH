@@ -29,7 +29,7 @@ jobs:
           # 不需要手机的纯逻辑，直接拿 JDK 跑：单机判定 / 本机回包 / 开关 / 说明文案。
           # android.* 由 tools/offline_test/stub 里的极小 stub 顶替。
           mkdir -p build/offtest
-          javac -encoding UTF-8 -nowarn -d build/offtest \
+          javac -encoding UTF-8 -nowarn -sourcepath inj -d build/offtest \
             $(find tools/offline_test -name '*.java') \
             inj/com/shuilize/elneazh/inj/Offline.java \
             inj/com/shuilize/elneazh/inj/Pinyin.java \

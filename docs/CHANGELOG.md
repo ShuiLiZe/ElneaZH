@@ -1,3 +1,19 @@
+## 2026-10-21 13:35 ci: 单机单测 javac 加 -sourcepath inj（从根上杜绝漏编译兄弟类）
+
+- 现象：build-check 的 Offline unit test 步骤在 5d5b1de / a22e762 / 7733c94 / 489427c / 0c81eb5 上红，
+  报 `NameFix.java:166: error: cannot find symbol / variable UploadNames`（#17 #18 #19 #20 #21）。
+- 0b77c16 已把 UploadNames.java 加进编译列表（#22 起该错误消失）；#22 的失败是另一原因
+  （"请求族只挂 HttpSystem" 白名单断言，LPLAY 族新增 LoginRequest / AccountInputPanel 后过期），
+  7f06f4b 补白名单后 #23 起转绿。
+- 根治：该步骤 javac 加 `-sourcepath inj`，以后 NameFix -> UploadNames 这类传递依赖由 javac 自行从源码路径解析，
+  不必逐个人工列举，漏列也不会再炸。
+- 本地三步复跑（同样文件集与 flags，tools/offline_test 桩 + 5 个 inj 文件）：
+  A 完整清单 + -sourcepath -> javac OK / 204 checks 0 failed；
+  B 故意去掉 UploadNames.java + -sourcepath -> 仍 javac OK / 204 checks 0 failed（回归测试）；
+  C 去掉 UploadNames.java 且无 -sourcepath -> 复现历史报错 cannot find symbol UploadNames。
+- 其余本地自测同时通过：verify_offline 255 项、verify_gate PASS、verify_names OK、verify_upload_names PASS、
+  verify_identity OK、verify_upload_audit 37 项、ci_inj javac OK 87 classes。
+
 # 历史记录（原 HANDOFF.md 全文，按时间追加；现状看根目录 HANDOFF.md）
 
 > 这是给"接手的人或下一次会话"的交付文件：项目现在做到哪、怎么继续。每次有进展都会更新。
