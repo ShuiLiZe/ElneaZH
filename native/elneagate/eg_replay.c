@@ -5,8 +5,9 @@
 //           拿到明文，rp_set_last_tx 记下）→ 发出 → 回包 DecryptRJ256（rec_dec_hook 在这里拿到
 //           明文回包，rp_learn 把「刚才那条请求 → 这条回包」配对存进重放库 files/elneazh_replay.json）。
 //   单机时（一个字节都不发）：
-//     1) HttpSystem::get_IsReachable 按成 false —— connectWWW 走游戏自己的「没网」分支：
-//        不建 UnityWebRequest、不加密，直接 Parse(request, null) 后返回 null。
+//     1) 接管 HttpSystem::connectWWW：照游戏自己「没网」分支的样子（condition=1 → Parse(request,null)
+//        → 返回 null），不建 UnityWebRequest、不加密。不碰 get_IsReachable（TitlePanel.disableLocalPlay
+//        和 GameSystem.Update 都读它，按成 false 会卡标题页）。
 //     2) HttpRequest::Parse(this, null) 被接管：用 get_Param + Json.Serialize 得到这次请求的参数，
 //        算签名去重放库查回包，查到就照 Parse 成功分支的样子填 errorMessage / resultCode /
 //        serverVersion / serviceMode / condition，再虚调 HttpNotify(result)（子类各自处理回包，
@@ -352,7 +353,7 @@ typedef void *(*fn_deser)(void *, void *);      // Json.Deserialize(string, mi)
 typedef void *(*fn_getp)(void *, void *);       // HttpRequest::get_Param(this, mi)
 typedef int  (*fn_iserr)(void *, void *);       // HttpRequest::get_IsError(this, mi)
 typedef void (*fn_parse)(void *, void *, void *);   // Parse(this, www, mi)
-typedef int  (*fn_reach)(void *);               // HttpSystem::get_IsReachable(mi)（static 属性）
+typedef void *(*fn_conn)(void *, void *, void *); // HttpSystem::connectWWW(this, req, mi)
 typedef void *(*fn_vget)(void *, const void *); // il2cpp_object_get_virtual_method
 typedef void (*fn_wb)(void *, void **, void *); // il2cpp_gc_wbarrier_set_field
 typedef void (*fn_notify)(void *, void *, const void *);
@@ -362,7 +363,7 @@ static fn_deser g_deser;
 static fn_getp g_getp;
 static fn_iserr g_iserr;
 static fn_parse g_parse_orig;
-static fn_reach g_reach_orig;
+static fn_conn g_conn_orig;
 static fn_vget g_vget;
 static fn_wb g_wb;
 static fn_s1 g_snew;
@@ -443,9 +444,11 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
     free(made);
     free(tx);
 }
-static int rp_reach_hook(void *mi) {
-    if (eg_of_is_off() && g_rp_ready) return 0;   // 单机：走游戏自己的「没网」分支，不建请求
-    return g_reach_orig ? g_reach_orig(mi) : 0;
+static void *rp_conn_hook(void *self, void *req, void *mi) {
+    if (!eg_of_is_off() || !g_rp_ready || !req) return g_conn_orig(self, req, mi);
+    *(int32_t *) ((char *) req + 0x10) = 1;   // 与原生没网分支一致：先置「请求中」
+    rp_parse_hook(req, NULL, NULL);             // 重放（未命中则原始 Parse 报没网）
+    return NULL;                                // 协程见 null 直接结束，不 yield、不 finishWWW
 }
 #endif
 
@@ -466,20 +469,20 @@ void eg_rp_install(void) {
 #if defined(__aarch64__)
     int nf = 0;
     void *parse = eg_of_method_ptr("HttpRequest", "Parse", 1, &nf);
-    void *reach = eg_of_method_ptr("HttpSystem", "get_IsReachable", 0, &nf);
+    void *conn = eg_of_method_ptr("HttpSystem", "connectWWW", 1, &nf);
     g_ser = (fn_ser) eg_of_method_ptr("Json", "Serialize", 1, &nf);
     g_deser = (fn_deser) eg_of_method_ptr("Json", "Deserialize", 1, &nf);
     g_getp = (fn_getp) eg_of_method_ptr("HttpRequest", "get_Param", 0, &nf);
     g_iserr = (fn_iserr) eg_of_method_ptr("HttpRequest", "get_IsError", 0, &nf);
     g_notify_mi = eg_of_method_info("HttpRequest", "HttpNotify", 1);
-    if (!parse || !reach || !g_ser || !g_deser || !g_getp || !g_notify_mi || !g_snew) {
-        RPW("重放未挂: parse=%p reach=%p ser=%p deser=%p getp=%p notify=%p snew=%p", parse, reach,
+    if (!parse || !conn || !g_ser || !g_deser || !g_getp || !g_notify_mi || !g_snew) {
+        RPW("重放未挂: parse=%p conn=%p ser=%p deser=%p getp=%p notify=%p snew=%p", parse, conn,
             (void *) g_ser, (void *) g_deser, (void *) g_getp, g_notify_mi, (void *) g_snew);
         return;
     }
     A64HookFunction(parse, (void *) rp_parse_hook, (void **) &g_parse_orig);
-    A64HookFunction(reach, (void *) rp_reach_hook, (void **) &g_reach_orig);
-    if (g_parse_orig && g_reach_orig) g_rp_ready = 1;
+    A64HookFunction(conn, (void *) rp_conn_hook, (void **) &g_conn_orig);
+    if (g_parse_orig && g_conn_orig) g_rp_ready = 1;
     RPI("单机重放已挂 ready=%d (wb=%p vget=%p)", g_rp_ready, (void *) g_wb, (void *) g_vget);
 #endif
 }

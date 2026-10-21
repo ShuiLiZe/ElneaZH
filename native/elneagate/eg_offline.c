@@ -963,6 +963,8 @@ int eg_of_install(int target, const char *names) {
                     // 同一个 MethodInfo 槽（同一方法被两族同时点名）只挂一次
                     if (g_hooks[i].slot && g_hooks[i].slot == tmp.slot) { dup = 1; break; }
                 }
+                // 方案 B：connectWWW 已由重放模块 inline 接管，这里不再叠一层
+                if (ok && eg_replay_active() && strcmp(tmp.method, "connectWWW") == 0) dup = 1;
                 if (ok && tmp.target && tmp.slot && !dup) {
                     int idx = g_hook_count;
                     eg_hook_entry *slot = &g_hooks[idx];
