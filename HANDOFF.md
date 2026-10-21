@@ -1,6 +1,55 @@
 # HANDOFF — 现状（只写当前状态；过程见 docs/CHANGELOG.md，规矩见 AGENTS.md）
 
-_最后更新：2026-10-21 07:10 CST_
+_最后更新：2026-10-21 09:05 CST_
+
+## 2026-10-21 09:05 单机模式真机失效：请求出口兜底闸 + 安装链重写（待真机验证）
+
+真机反馈：**单机开着仍然上传存档、邮箱能领、仍弹账号登录面板**。查下来不是「判定写错」，
+而是**钩子一个都没挂上过**，界面上却照常显示「单机已开启」。
+
+### 根因（三个，全在安装链上）
+
+1. `ZhInit` 调 `OfflineGate.install(ctx, 1)` —— 传入 1ms，方法等 1ms 就返回，而后台线程
+   那时还在第一次 `nativeInstall` 里（libil2cpp 还没 dlopen），`lastResults` 全是 0。
+   支援弹窗里那句「原生闸门已挂钩 **0** 处」就是证据：六族一次都没成功。
+2. `OfflineGate.load` 与 `NameGate` **各自解包一份** `libelneagate.so` 再 `System.loadLibrary` 同名；
+   谁先谁后都可能让后者拿到「名字已占用但没真正加载」的状态，于是闸门永远静默不装。
+3. 六族全靠 il2cpp **按名字**解析 `HttpSystem` 的方法名。名字一旦对不上，上传/登录请求
+   一条也拦不住，而开关、界面、提示全都正常 —— 完全无声。
+
+### 改法
+
+| 改动 | 位置 | 作用 |
+|------|------|------|
+| **请求出口兜底闸** `EG_TARGET_ENC` | `eg_offline.c` / `eg_offline.h` | 挂在**已确认生效**的 `Cipher::EncryptRJ256`（与名字闸门同一个 `0x18ad7e4`，挂前先校验 8 字节序言，不认识就不挂）。它是每个 sns04 请求体的唯一出口：单机时返回 `NULL`，调用方走自己的「加密/发送失败」分支 —— **一个字节也出不了手机，且不伪造任何业务回包**。开关关着时原样转发。 |
+| 安装改后台重试 | `OfflineGate.install` | `install()` 立即返回，真装在后台线程；每族带重试直到 libil2cpp 出现（最长 90s），每族结果一出来就对外可见；一族失败不影响其它族。 |
+| `.so` 只装一份 | `OfflineGate.load` | 先复用 `NameGate` 已装好的；装不上才自己解包。 |
+| 状态可自证 | `nativeOff()` / `nativeEncState()` | native 现读的开关值 + 兜底闸状态。`Support` 切开关和启动时打对账日志（`ElneaOffline`），对不上立刻补装。 |
+| 补名单 | `httpTable` / `gateTable` | 加 `LoginRequest.*`、`AccountInputPanel.*` 发登录入口、`AddLoginPanel`（「仍弹账号面板」的直接来源）。 |
+
+### 真机自查（一条命令）
+
+```
+adb logcat -s ElneaOffline
+```
+
+- `boot: offline=true stateMatch=true enc=true` → 状态对上了、请求出口已封。
+- `install started in background` → 后台开始装；随后逐族 `family N -> k`、`hooked[i] kind=…`。
+- `fallback hooked EncryptRJ256 @ …` → **兜底闸挂上了**，这是「请求一定出不去」的判据。
+- 切开关：`state pushed: on=… ok=true nativeOff=1 enc=1` + `offline toggle -> …`。
+- `offline: request body refused at Cipher::EncryptRJ256 (nothing sent)` → 真的挡了一次。
+
+### 仍然的风险（如实写）
+
+- 兜底闸依赖 `EncryptRJ256` 的偏移 `0x18ad7e4` 与 8 字节序言（base 2.10.7）。换版本时
+  `verify_enc` 会返回 0 → **不挂**并打 `encrypt prologue mismatch`。此时只剩六族按名解析，
+  解析不到就还是老样子。所以 `enc=0` 要当成「没生效」看。
+- 六族的类名/方法名仍来自对 global-metadata 的静态推断；`miss=` 计数会告诉你有多少条没解析到。
+  兜底闸的存在就是为了让「名字全错」也不至于漏请求。
+- 登录面板本身：`AccountInputPanel` 在 GATE 名单里（`AddAccountInputPanel`），单机时造出来就
+  收掉；但**本地存档的直接入口**仍取决于游戏自己的离线分支（`OfflineData` / `IsOfflineActive`），
+  若游戏非要 `login.php` 成功才进主循环，它会走 FailPanel —— 这一点真机才能确认。
+
 
 ## 2026-10-21 07:10 单机模式：联网/付费入口**直接隐藏**（六族 native 钩子，待真机验证）
 

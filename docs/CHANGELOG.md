@@ -2,6 +2,24 @@
 
 > 这是给"接手的人或下一次会话"的交付文件：项目现在做到哪、怎么继续。每次有进展都会更新。
 
+## 2026-10-21 09:05 单机模式真机失效：请求出口兜底闸 + 安装链重写
+
+真机：单机开着仍上传存档、邮箱能领、仍弹账号登录面板。根因是**钩子一个都没挂上**：
+
+1. `OfflineGate.install(ctx, 1)` 只等 1ms 就返回，后台线程还在第一次 `nativeInstall`（libil2cpp
+   未 dlopen），六族全 0 —— 支援弹窗「已挂钩 0 处」即是证据；
+2. `OfflineGate.load` 与 `NameGate` 各自解包一份 `.so` 再 `System.loadLibrary` 同名，可能互相抢；
+3. 六族全靠按名解析，`HttpSystem` 名字对不上就一条也拦不住，且完全无声。
+
+改法：① 新增 `EG_TARGET_ENC` 兜底闸，挂在已确认生效的 `Cipher::EncryptRJ256`（同 `0x18ad7e4`，
+先校验 8 字节序言），单机时返回 NULL 让调用方走自己的失败分支（不伪造回包），关掉原样转发；
+② 安装改后台线程 + 每族重试到 libil2cpp 出现（90s 窗口），结果逐步对外可见；③ `.so` 只装一份；
+④ 新增 `nativeOff()`/`nativeEncState()` 与 prefs↔native 对账日志（`ElneaOffline`）；
+⑤ http/gate 名单补 `LoginRequest.*`、`AccountInputPanel.*`、`AddLoginPanel`。
+
+自测：`build_gate.py` 两 ABI 编译通过；`verify_gate.py` PASS（含新 JNI 入口）；`verify_offline.py`
+199 项全过（新增 20 项，含「关掉时原样转发」「兜底闸不伪造回包」）。
+
 ## 2026-10-21 07:10 单机模式的联网/付费入口改成「直接隐藏」（Hark 审查 1faeed8 的修正）
 
 **改了什么**：06:15 版是「入口照常显示 + 原生层置成不可用（变灰）」。Hark 审查指出这不符合
