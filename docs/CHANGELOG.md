@@ -1,3 +1,41 @@
+## 2026-10-21 17:45 真机黑屏：主线程被 native 链卡住（修根因 + crash guard + 阶段日志）
+
+真机（OnePlus Android 16 arm64 PAC）：**单机开、单机关都黑屏**，过一会儿进程退出；
+crash 缓冲区 15:57 之后没有新 tombstone、没有 AndroidRuntime 异常、ElneaGate/ElneaOffline 一条日志都没有
+→ 不是崩溃，是主线程被卡住（ANR / Unity 看门狗）。31dc707（.so 未加载）关单机正常，回归来自 f488ec5 起的 native 链。
+
+### 根因与改法
+
+| # | 根因 | 改法 |
+|---|------|------|
+| 1 | ZhInit.onCreate（主线程）-> NameGate.install 里 done.await() 同步等最长 20s | install 立刻返回；后台 ElneaGate-install 线程，40 x 500ms 上限；新增 awaitInstall 只给测试 |
+| 2 | eg_sym.c 每符号 fopen(/proc/self/maps)，dynsym_lookup 里几十次 -> O(n^2) | maps 一次读成区间表 + 200ms TTL；mem_ok 查表；dynsym_lookup 只做一次内存校验；eg_lib_base 先 dl_iterate_phdr |
+| 3 | OfflineGate 等 probe()>=5 最长 90s；单机**关**时也装六族 | 窗口 90s -> 30s；单机关着直接返回（只留 EncryptRJ256 兜底闸）；装的过程中关单机即时停手 |
+| 4 | SelfCheck.run 同步跑在 onCreate，每次启动一遍 | 挪到后台线程 + 1s 合并 |
+
+顺带修 bug：eg_offline.c 的 eg_find_base() 把 dlopen 返回的 **handle 当基址**用（handle+0x18ad7e4
+从来不是那个函数），改为 eg_lib_base() 并按 16KB 页对齐缓存。
+
+### 新增
+
+- native/elneagate/eg_log.h：统一阶段日志 #N [线程名(tid) t=单调ms] ...，I 级，标签 ElneaGate；
+  API<26 退化成 tid。JNI_OnLoad 进/出、installer 线程、libil2cpp 查找结果、每个 hook 写槽前后都有日志。
+- native/elneagate/eg_boot.c：JNI_OnLoad（只记 JavaVM，O(1)）；JNI_OnUnload；nativeBootReport。
+- native/elneagate/eg_guard.c：crash guard 的 native 侧（nativeGuard / nativeAllowed / nativeWindow）。
+- inj/NativeGuard.java：files/elneazh_native_boot 标记；进主界面或 60s 清除；连续 2 次未清 ->
+  下一轮不加载 native；selfcheck 写 
+ative disabled by crash guard；Support「原生加速（实验）」开关。
+- About.install 现在无条件注册 ActivityLifecycleCallbacks（resumed 即清标记），并保留首启弹窗只弹一次。
+- tools/verify_native_nonblock.py（50 项静态守门）+ tools/offline_test/NativeGateTest.java（31 项 JDK 真跑），
+  都进 build-check.yml。
+
+### 本地验证
+
+verify_native_nonblock 50/50、verify_gate PASS、verify_offline 259/259、verify_native_load OK、
+ci_inj javac OK 100 classes、NativeGateTest 31/31、OfflineTest 204/204。
+.so：arm64-v8a 72488 B / armeabi-v7a 31416 B。未验证：真机。
+---
+
 ## 2026-10-21 15:40 单机真机可用（native 真的加载）+ 换身份清干净 + Support UI 合并
 
 ### 1. native .so 真的进 APK、真的加载（f488ec5）

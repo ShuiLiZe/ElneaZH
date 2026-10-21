@@ -1,6 +1,68 @@
-# HANDOFF — 现状（只写当前状态；过程见 docs/CHANGELOG.md，规矩见 AGENTS.md）
+# HANDOFF —— 现状（只写当前状态；过程见 docs/CHANGELOG.md，规则见 AGENTS.md）
 
-_最后更新：2026-10-21 15:10 CST_
+_最后更新：2026-10-21 17:45 CST_
+
+## 2026-10-21 17:45 真机黑屏事故：主线程被 native 链卡住（本提交修）
+
+真机（OnePlus Android 16 arm64 PAC，17:13 selfcheck）：**单机开、单机关都黑屏**，
+过一会儿进程退出。crash 缓冲区 15:57 之后没有新 tombstone、没有 AndroidRuntime 异常，
+db logcat -s ElneaGate ElneaOffline 一条都没有 —— 不是崩溃，是**主线程被卡住**
+（ANR / Unity 看门狗杀进程）。31dc707 之前（.so 根本没加载）关单机能正常进游戏，
+所以回归来自身 f488ec5 之后真正开始加载的 native 这条链。
+
+### 四条根因（都已改）
+
+| # | 根因 | 位置 | 改法 |
+|---|------|------|------|
+| 1 | 安装线程起完 done.await() **同步等最长 20s**，调用方是 ZhInit.onCreate（主线程） | NameGate.install | 立刻返回；加载/解析/写槽全在后台 ElneaGate-install，40 次 x 500ms 上限 |
+| 2 | 每个符号 open(/proc/self/maps) 全扫，dynsym_lookup 里几十次 → O(n^2) | eg_sym.c | maps 一次读成区间表 + 200ms TTL；mem_ok 查表；eg_lib_base 先 dl_iterate_phdr |
+| 3 | 等待 probe()>=5 最长 **90s** 再逐族装；单机**关**时也照装六族 | OfflineGate.installAll / eg_of_install | 窗口 90s -> 30s；单机关着直接返回（只留 EncryptRJ256 兜底闸）；中途关单机即时停手 |
+| 4 | SelfCheck.run 同步跑在 onCreate（拼音表 + 分类器 + native 状态），每次启动一遍 | ZhInit.onCreate | 挪到后台线程，1s 内合并 |
+
+顺带修掉一个**真 bug**：eg_offline.c 的 eg_find_base() 把 dlopen() 返回的
+**handle 当基址**用（handle + 0x18ad7e4 从来不是那个函数）。现在统一 eg_lib_base()，
+按 16KB 页对齐并缓存。
+
+### 现在的结构（别再退回）
+
+- JNI_OnLoad（eg_boot.c）只做 O(1)：记 JavaVM + 打 enter/exit 日志。不 dlsym、不读
+  /proc、不起线程、不加锁、不调 il2cpp。全仓**没有** __attribute__((constructor))。
+- 主线程（ZhInit.onCreate）只做本地小文件 + 装 Java 闸门 + 起线程；native 的一切都在
+  后台线程 ElneaGate-install / ElneaOffline-install 里，且都有上限。
+- 阶段日志（eg_log.h）：`#阶段号 [线程名(tid) t=单调ms] 消息`，全 I 级，标签 ElneaGate。
+  真机一条命令 `adb logcat -s ElneaGate` —— **最后一条的 #N 就是卡住的位置**。
+
+### crash guard（连续 2 次启动没活下来 → 不加载 native）
+
+- 启动写 files/elneazh_native_boot（第一行 = 累积连击数）；进主界面（Activity onResumed）
+  或运行满 60s 清掉。
+- 连续 2 次没清 → 下一轮 NativeGuard.allowed()==false：libelneagate.so **一次都不 load**，
+  拼音闸门与单机 native 全跳过，NetGuard / NetBlocker 的 Java 兜底照旧；
+  selfcheck 顶部写 `native disabled by crash guard: …`。
+- Support 新增「原生加速（实验）」开关（elneazh_settings/native_boost，默认开）：
+  关掉 = 永不加载 native。改完要重开游戏彻底生效。
+- 自愈：Support 里把开关关了再开（会清连击），或删一次 files/elneazh_native_boot。
+
+### 真机验证清单（拿到 APK 先跑这三条）
+
+```
+adb shell run-as <pkg> cat files/elneazh_selfcheck.txt | head -8   # native guard / native load 两行
+adb logcat -d -s ElneaGate | tail -40                              # 最后一条 #N 在哪一步
+adb shell run-as <pkg> ls files/elneazh_native_boot                # 进游戏后应该「不存在」
+```
+
+看到 `native guard: … allowed=true … survived=true` + ElneaGate 里
+`JNI_OnLoad enter/exit` → `installer thread started` → `name gate: base=…` → `name gate: hooked …`
+就说明整条链通了。若仍黑屏：把 ElneaGate 最后 40 行发回来，#N 一眼定位。
+
+### 守门（CI 会跑）
+
+- `python tools/verify_native_nonblock.py`：静态守 JNI_OnLoad 不阻塞、无 constructor、
+  maps 只读一次、Java 侧不再 await、单机关着不装六族、日志齐全（50 项）。
+- `java com.shuilize.elneazh.inj.NativeGateTest`：真跑 NativeGuard / NativeLoad /
+  OfflineGate（JDK，31 项）—— install 立刻返回、crash guard 连击停用、开关、标记清除、自检文案。
+
+-- 历史（按时间倒序，详细过程见 docs/CHANGELOG.md） --
 
 ## 2026-10-21 15:10 native 闸门真的加载（.so 没进游戏 APK + loadLibrary 用错名字，两个根因一起修）
 
