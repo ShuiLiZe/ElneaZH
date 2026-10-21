@@ -574,6 +574,7 @@ static void rp_note_appver(const char *tx) {
 // 真机 10-22 01:04：单机自造的 write-ack 不带 $_sys_ver_$ / $_sys_service_$，游戏收到空版本号
 // 当成服务端版本变了，弹「请将应用更新到最新版本」并跳应用商店。自造回包统一补上。
 static char g_srvver[48];
+static volatile int g_after_kpi;   // 打点之后才记录 Debug.Log（定位切换区域卡住）
 
 static int rp_emulate(void *self, const char *json) {
     int is_str = 0;
@@ -697,6 +698,7 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
         // 打点（KpiRequest action=Start 等）：真机 10-22 01:15 给了存档式回包后游戏停住不再发请求。
         // 打点服务端不回业务数据，按「成功、无内容」应答。
         RPI("打点 %s 回通用成功", cls);
+        g_after_kpi = 1;
         made = strdup("{\"info\":{\"$_sys_result_$\":\"Done.\"},\"result\":\"empty data\n\"}");
         hit = made;
     } else if (rp_is_write(tx)) {
@@ -817,7 +819,26 @@ static void rp_dlog(const char *lv, void *o) {
 }
 static void rp_le_hook(void *o, void *mi) { rp_dlog("错误", o); if (g_le_orig) g_le_orig(o, mi); }
 static void rp_lw_hook(void *o, void *mi) { rp_dlog("警告", o); if (g_lw_orig) g_lw_orig(o, mi); }
+static fn_dlog g_li_orig;
+static int g_li_n;
+static void rp_li_hook(void *o, void *mi) {
+    if (g_after_kpi && g_li_n < 300) { g_li_n++; g_dlog_n--; rp_dlog("信息", o); }
+    if (g_li_orig) g_li_orig(o, mi);
+}
 static void rp_lx_hook(void *o, void *mi) { rp_dlog("异常", o); if (g_lx_orig) g_lx_orig(o, mi); }
+// 真机 10-22 01:28：Kpi 之后卡「正在切换区域」，没报错也没再发请求 —— 疑似游戏在等
+// Application.internetReachability 变成「有网」。单机时报「有网（Wi-Fi）」。
+typedef int32_t (*fn_inet)(void *);
+static fn_inet g_inet_orig;
+static int32_t rp_inet_hook(void *mi) {
+    int32_t r = g_inet_orig ? g_inet_orig(mi) : 0;
+    if (eg_of_is_off() && g_rp_ready) {
+        static int n;
+        if (n++ < 5) RPI("internetReachability 被查询（原=%d），单机报 2", r);
+        return 2;
+    }
+    return r;
+}
 static void rp_dlog_install(void) {
     int nf = 0;
     g_ex_msg = (fn_str0) eg_of_method_ptr("System.Exception", "get_Message", 0, &nf);
@@ -828,6 +849,11 @@ static void rp_dlog_install(void) {
     if (le) A64HookFunction(le, (void *) rp_le_hook, (void **) &g_le_orig);
     if (lw) A64HookFunction(lw, (void *) rp_lw_hook, (void **) &g_lw_orig);
     if (lx) A64HookFunction(lx, (void *) rp_lx_hook, (void **) &g_lx_orig);
+    void *li = eg_of_method_ptr("UnityEngine.Debug", "Log", 1, &nf);
+    if (li) A64HookFunction(li, (void *) rp_li_hook, (void **) &g_li_orig);
+    void *inet = eg_of_method_ptr("UnityEngine.Application", "get_internetReachability", 0, &nf);
+    if (inet) A64HookFunction(inet, (void *) rp_inet_hook, (void **) &g_inet_orig);
+    RPI("网络状态接管 inet=%p", inet);
     RPI("Unity 日志接管 err=%p warn=%p exc=%p msg=%p", le, lw, lx, (void *) g_ex_msg);
 }
 #endif
