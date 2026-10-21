@@ -219,17 +219,17 @@ public final class OfflineTest {
         ok(miss2.length() == 0, "面板族覆盖必须挡的入口" + (miss2.length() == 0 ? "" : "，缺：" + miss2));
         ok(pan.indexOf("\tAddShopPanel\n") < 0, "AddShopPanel 只出现在 GATE 族（有返回值，不能返回 NULL）");
 
-        // 15. 请求族只挂 HttpSystem，且必须含真正发请求的那几个
+        // 15. 请求族只挂 HttpSystem / LoginRequest / AccountInputPanel（5d5b1de 起补了发登录入口），且必须含真正发请求的那几个
         String htp = OfflineGate.httpTable();
         StringBuilder hbad = new StringBuilder();
         int hc = 0;
         for (String line : htp.split("\n")) {
             if (line.isEmpty()) continue;
             String[] f = line.split("\t");
-            if (f.length != 3 || !"HttpSystem".equals(f[1])) hbad.append(line).append(' ');
+            if (f.length != 3 || !("HttpSystem".equals(f[1]) || "LoginRequest".equals(f[1]) || "AccountInputPanel".equals(f[1]))) hbad.append(line).append(' ');
             hc++;
         }
-        ok(hbad.length() == 0, "请求族只挂 HttpSystem" + (hbad.length() == 0 ? "" : "，问题：" + hbad));
+        ok(hbad.length() == 0, "请求族只挂 HttpSystem/LoginRequest/AccountInputPanel" + (hbad.length() == 0 ? "" : "，问题：" + hbad));
         ok(hc >= 3, "请求族至少 3 条（实际 " + hc + "）");
         for (String m : new String[] {"httpConnect", "connectWWW", "AddHttpQueue"}) {
             ok(htp.indexOf("\t" + m + "\n") >= 0, "请求族含 " + m);
