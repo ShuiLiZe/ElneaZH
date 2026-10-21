@@ -9,8 +9,10 @@ Section 1 = string literal data.
 Changing a literal's length: rewrite section 1, shift later idx, and add delta to every section offset after section 1.
 
 translations/metadata_literals.json: {"<original literal, exact>": "<中文>"}  (matched by exact text, all occurrences)
-Special: NAME_WHITELIST (the in-game allowed-name characters) gets every GB2312 hanzi + common CJK punctuation appended,
-so player-typed Chinese names pass the character check (the glyph check is handled by bmfont_zh.py's BitmapFont-Name).
+Special: NAME_WHITELIST (the in-game allowed-name characters) gets every GB2312 hanzi + the hanzi listed in
+tools/names.txt (the ones bmfont_zh.py puts into BitmapFont-Name) + '·', so player-typed Chinese names pass
+the character check. The two lists come from the same file on purpose: a whitelisted char without a glyph
+renders as a box.
 """
 import struct, json, argparse, os
 
@@ -26,6 +28,24 @@ def gb2312_hanzi():
             except UnicodeDecodeError:
                 pass
     return ''.join(out)
+
+
+def name_chars():
+    """tools/names.txt 第一行：名字字体带了字形的汉字（NPC 全名表 + 常见人名用字）。
+
+    白名单必须和 Name 字体的字形集对齐 —— 白名单允许、字体没字形的字，玩家打出来就是方块。
+    bmfont_zh.py 读的是同一个文件。
+    """
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'names.txt')
+    try:
+        with open(p, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    return ''.join(c for c in line if not c.isspace())
+    except OSError:
+        pass
+    return ''
 
 
 def load(b):
@@ -74,10 +94,12 @@ def main():
     tr = json.load(open(a.tr, encoding='utf-8')) if os.path.exists(a.tr) else {}
     tr = {k: v for k, v in tr.items() if not k.startswith('//')}
     n = 0; wl = 0
+    # 允许取的字符 = 原版白名单 + GB2312 汉字 + 名字字体自带字形的字（names.txt）+ '·'
+    extra = gb2312_hanzi() + ''.join(c for c in name_chars() if c not in gb2312_hanzi()) + '·'
     for i, s in enumerate(lits):
         t = s.decode('utf-8', 'replace')
         if t == NAME_WHITELIST:
-            lits[i] = (t + gb2312_hanzi() + '·').encode('utf-8'); wl += 1
+            lits[i] = (t + extra).encode('utf-8'); wl += 1
         elif t in tr and tr[t]:
             lits[i] = tr[t].encode('utf-8'); n += 1
     new, delta = save(b, secs, lits)
@@ -88,7 +110,7 @@ def main():
         o, sz, _ = secs[i]; o2, sz2, _ = secs2[i]
         assert new[o2:o2 + sz2] == b[o:o + sz], f'section {i} moved wrong'
     open(a.out, 'wb').write(new)
-    print(f'metadata: {n} literals translated, name whitelist x{wl}, size delta {delta}')
+    print(f'metadata: {n} literals translated, name whitelist x{wl} (+{len(extra)} chars), size delta {delta}')
 
 
 if __name__ == '__main__':

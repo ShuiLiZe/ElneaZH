@@ -158,8 +158,64 @@ def main():
             withcjk = [n for n in names if any(is_cjk(c) for c in n)]
             print(f'save {f.name}: {len(names)} names, {len(withcjk)} with CJK -> {withcjk}')
 
+    bad += check_name_glyphs()
+
     print('names OK' if bad == 0 else f'names WRONG ({bad})')
     return 0 if bad == 0 else 1
+
+
+def check_name_glyphs():
+    """名字字体字形集 / 取名白名单 / NPC 全名 三者必须对得上。
+
+    真机上最容易翻车的组合：白名单允许某个汉字、但 BitmapFont-Name 没有它的字形 ——
+    玩家打出来就是方块；或者 NPC 译名里有字没进名字字体 —— 对话里名字显示成方块。
+    tools/names.txt 是这两张表的唯一来源，这里钉住它。
+    """
+    sys.path.insert(0, str(ROOT / 'tools'))
+    bad = 0
+    try:
+        import metadata_zh as M
+        import bmfont_zh as B
+    except Exception as e:  # noqa: BLE001
+        print(f'BAD 名字工具链导入失败: {e}')
+        return 1
+
+    chars = M.name_chars()
+    print(f'--- name glyphs (tools/names.txt: {len(chars)} chars) ---')
+    if not chars:
+        print('BAD tools/names.txt 缺第一行（名字字体字形集）')
+        return bad + 1
+
+    wl = set(M.NAME_WHITELIST) | set(M.gb2312_hanzi()) | set(chars) | {'·'}
+    gap = sorted(chr(c) for c in B.NAME_CHARS if chr(c) not in wl)
+    ok = not gap
+    bad += 0 if ok else 1
+    print(f'{"OK " if ok else "BAD"} 名字字体的字都在取名白名单里 {gap[:10]}')
+
+    zh_chars = set()
+    for line in open(NAMES, encoding='utf-8'):
+        p = line.rstrip('\n').split('\t')
+        if len(p) >= 3 and p[2]:
+            zh_chars.update(p[2])
+    miss = sorted(c for c in zh_chars if is_cjk(c) and ord(c) not in B.NAME_CHARS)
+    ok2 = not miss
+    bad += 0 if ok2 else 1
+    print(f'{"OK " if ok2 else "BAD"} NPC 全名的每个字都有名字字形 {miss[:10]}')
+
+    src = (ROOT / 'tools/bmfont_zh.py').read_text(encoding='utf-8')
+    ok3 = 'NAME_CHARS' in src and 'load_name_chars' in src
+    bad += 0 if ok3 else 1
+    print(f'{"OK " if ok3 else "BAD"} bmfont_zh.py 从 names.txt 取名字字形（不是写死整张 GB2312）')
+
+    # NAME_CHARS 必须存「码位」：area_ids 的键是 int 码位，存字符进去就一个都对不上，
+    # 真机表现是 Name 字体只有原版 260 个字形、中文名全是方块（这条踩过）。
+    ok4 = 'ord(c) for c in line' in src
+    bad += 0 if ok4 else 1
+    print(f'{"OK " if ok4 else "BAD"} NAME_CHARS 存的是码位（ord），不是字符')
+    ok5 = all(isinstance(x, int) for x in B.NAME_CHARS) and len(B.NAME_CHARS) == len(chars)
+    bad += 0 if ok5 else 1
+    print(f'{"OK " if ok5 else "BAD"} 载入后 NAME_CHARS = {len(B.NAME_CHARS)} 个码位')
+    return bad
 
 
 if __name__ == '__main__':

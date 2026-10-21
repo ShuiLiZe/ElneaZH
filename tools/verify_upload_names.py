@@ -286,6 +286,76 @@ def savedata_body(blobs):
     return json.dumps(body, separators=(",", ":"))
 
 
+# ------------------------------------------------------------------ round trip
+
+def _names_tsv():
+    """(npc_map, all_rows) from app/src/main/assets/elneazh/data/names.tsv (built by tools/names_map.py)."""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, "app", "src", "main", "assets", "elneazh", "data", "names.tsv")
+    npc, rows = {}, []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                p = line.rstrip("\n").split("\t")
+                if len(p) != 3 or not p[1] or not p[2]:
+                    continue
+                npc.setdefault(p[2], p[1])
+                rows.append((p[1], p[2]))
+    except OSError:
+        pass
+    return npc, rows
+
+
+def roundtrip_names():
+    """本地存档写的是中文名（SaveNames），上传时必须一对一换回英文原名；玩家名走拼音。"""
+    npc, rows = _names_tsv()
+    # 同一个中文名可能对应多个英文原名（例如 法比奥 / 法比奥拉 译名撞车），
+    # 那是 names.tsv 自己的事（verify_names.py 抽样盯），这里只看「有名可换」的行。
+    zh_count = {}
+    for _en, zh in rows:
+        zh_count[zh] = zh_count.get(zh, 0) + 1
+    ok = total = ascii_bad = 0
+    max_len = 0
+    for en, zh in rows:
+        if zh_count[zh] != 1:
+            continue
+        total += 1
+        if any(ord(c) > 0x7F for c in en):
+            ascii_bad += 1
+        raw = bytes([0x01]) + bytes([len(zh.encode("utf-8"))]) + zh.encode("utf-8")
+        fixed, ch = filter_names(raw, npc)
+        max_len = max(max_len, len(en.encode("utf-8")))
+        if ch == 1 and fixed == bytes([0x01, len(en.encode("utf-8"))]) + en.encode("utf-8"):
+            ok += 1
+    # 玩家自己取的中文名（不在 names.tsv 里）：NameFix.filterNames 的做法是「查表落空 -> 逐字拼音」，
+    # 这里补上同一段兜底，测的是「存档里就是中文，发出去之前必须变成 ASCII」。
+    ply = PLAYER_NAME
+    praw = bytes([0x01]) + bytes([len(ply.encode("utf-8"))]) + ply.encode("utf-8")
+    en_map = dict(npc)
+    en_map[ply] = _pinyin_name(ply)
+    pfix, pch = filter_names(praw, en_map)
+    player_ok = pch == 1 and pfix == bytes([0x01, len(en_map[ply].encode("utf-8"))]) + en_map[ply].encode() \
+        and not has_han(pfix.decode("utf-8", "replace"))
+    return dict(npc_ok=ok, npc_total=total, ascii_bad=ascii_bad, max_len=max_len, player_ok=player_ok)
+
+
+# 拼音兜底（和 assets/elneazh/data/pinyin.tsv + Pinyin.tidy 同一算法）
+_PINYIN = {"赵": "zhao", "四": "si"}
+PLAYER_NAME = "赵四"
+
+
+def _pinyin_name(zh):
+    """Pinyin.tidy(Pinyin.toAscii(zh))：逐字取拼音，首字母大写拼 camel。"""
+    parts = []
+    for ch in zh:
+        if ch in _PINYIN:
+            parts.append(_PINYIN[ch].capitalize())
+        elif ch.isascii() and ch.isalnum():
+            parts.append(ch)
+    return "".join(parts)
+
+
 # ------------------------------------------------------------------ checks
 
 def main(argv):
@@ -418,6 +488,15 @@ def main(argv):
     nb, h = filter_json_blobs(ascii_body)
     check("ASCII-only body untouched", nb == ascii_body and h == 0)
     check("idempotent (second pass changes nothing)", filter_names(fixed)[1] == 0)
+
+    # --- 本地存档 -> 上传 的往返：SaveNames 写进去的中文名，上传时一对一换回英文原名 / 拼音 ---
+    rt = roundtrip_names()
+    check("names.tsv npc names -> english (all rows)",
+          rt["npc_ok"] == rt["npc_total"] and rt["npc_total"] > 1000,
+          "%d/%d" % (rt["npc_ok"], rt["npc_total"]))
+    check("names.tsv english column is ascii", rt["ascii_bad"] == 0, str(rt["ascii_bad"]))
+    check("npc name uploads ascii within 255 bytes", rt["max_len"] <= 255, "max %d" % rt["max_len"])
+    check("player name (not in names.tsv) -> pinyin", rt["player_ok"])
 
     print("upload name filter: offline round-trip test")
     print("  python %s" % sys.version.split()[0])
