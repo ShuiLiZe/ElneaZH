@@ -219,8 +219,9 @@ check("downloadTip" in nb, "闸门能给界面一句下载提示")
 check("pass through ASSET download" in nb, "放行的下载有 logcat 记录")
 
 sup2 = read("Support.java")
-check("Offline.purchaseHint" in sup2, "Support 界面展示已购内容说明")
-check("照常下载" in sup2, "Support 界面写明资源照常下载")
+# 第四批起弹窗只留一行开关说明（版面要求），已购说明挪到 Offline.purchaseHint 供日志/其它入口用
+check("purchaseHint" in read("Offline.java"), "Offline.purchaseHint 仍在（日志/其它入口用）")
+check("资源照常下载" in sup2, "Support 界面写明资源照常下载")
 
 # ---------------------------------------------------------------- manifest
 
@@ -239,6 +240,22 @@ check("Offline.isOn" in sup, "Support 弹窗读当前状态")
 check("shareBackup" in sup, "Support 弹窗有「导出存档」入口")
 check("shareNameTable" in sup, "Support 弹窗有「导出名字对照表」入口")
 check("Backup.pick" in sup or "restore" in sup, "Support 弹窗有「导入存档」入口")
+
+# 弹窗版面（第四批）：一条 QQ 群、收款码折叠、存档组、单机一个开关、账号组、底部链接
+check(sup.count("ORANGE, ORANGE_DARK, Color.WHITE") == 1, "整个弹窗只有一个橙色按钮")
+for label in ("立即备份", "导出分享", "导入存档", "更换游戏身份", "关闭"):
+    check('"%s"' % label in sup, "弹窗按钮「%s」" % label)
+for label in ("导出名字对照表", "联系原作者", "赞赏支持"):
+    check(label in sup and "link(a, d," in sup, "「%s」是小文字链接" % label)
+check("fold.setVisibility(View.GONE)" in sup, "收款码默认折叠")
+check("QQ + \"（点这里加入）\"" in sup or "汉化交流 QQ 群" in sup, "顶部一行 QQ 群")
+check("addShareSection" not in sup, "旧的「分享 / 导出」整块已并入存档组")
+check("ScrollView" in sup, "弹窗可滚动")
+b = sup[sup.index("static Dialog build"):sup.index("private static void addSep")]
+check("\\n" not in "".join(__import__("re").findall(r'"([^"]*)"', b)), "弹窗文案没有换行（每条 ≤1 行）")
+check("addOfflineSection" in b, "单机模式组在弹窗里")
+check("caption(a, d, card, \"存档\")" in b and "caption(a, d, card, \"账号\")" in b
+      and "caption(a, d, card, \"单机模式\")" in sup, "存档 / 单机模式 / 账号 三个分组标题")
 
 zh = read("ZhInit.java")
 check("NetBlocker.install" in zh, "ZhInit 启动时装网络闸门")
@@ -295,7 +312,7 @@ if "OfflineGate.install" in zh2:
 
 sup3 = read("Support.java")
 check("OfflineGate.push" in sup3, "Support 切开关时推状态给原生闸门")
-check("OfflineGate.summary" in sup3, "Support 显示原生闸门现状")
+check("ElneaOffline" in sup3 and "describe()" in sup3, "闸门现状进 logcat（弹窗不再占版面）")
 
 sc = read("SelfCheck.java")
 check("offline native" in sc, "SelfCheck 报了原生闸门状态")

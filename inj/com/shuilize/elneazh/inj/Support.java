@@ -10,11 +10,13 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
 import android.net.Uri;
+import android.text.TextUtils;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
@@ -72,172 +74,264 @@ final class Support {
         title.setPadding(0, 0, 0, (int) (8 * d));
         card.addView(title, new LinearLayout.LayoutParams(-1, -2));
 
-        View line = new View(a);
-        line.setBackgroundColor(Color.argb(0x66, 0x7A, 0x4B, 0x24));
-        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(-1, Math.max(1, (int) (1.5f * d)));
-        llp.bottomMargin = (int) (10 * d);
-        card.addView(line, llp);
-
-        TextView tv = new TextView(a);
-        tv.setTextColor(BROWN_TEXT);
-        tv.setTextSize(14);
-        tv.setLineSpacing(0, 1.25f);
-        tv.setText("本汉化完全免费，禁止倒卖。\n"
-                + "反馈没汉化的地方、获取新版，欢迎进汉化交流 QQ 群：" + QQ + "。");
-        card.addView(tv, new LinearLayout.LayoutParams(-1, -2));
-
-        card.addView(button(a, d, "加入 QQ 群", ORANGE, ORANGE_DARK, Color.WHITE, new View.OnClickListener() {
+        // ---------------- 顶行：QQ 群（一行文字 + 群号，点了就复制/打开） ----------------
+        TextView qq = new TextView(a);
+        qq.setText("汉化交流 QQ 群：" + QQ + "（点这里加入）");
+        qq.setTextColor(BROWN_TEXT);
+        qq.setTextSize(13);
+        qq.setGravity(Gravity.CENTER);
+        qq.setSingleLine(true);
+        qq.setEllipsize(TextUtils.TruncateAt.END);
+        qq.setPadding(0, (int) (2 * d), 0, (int) (2 * d));
+        qq.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { joinQQ(a); }
-        }));
+        });
+        card.addView(qq, new LinearLayout.LayoutParams(-1, -2));
 
+        // ---------------- 打赏：折叠成一行按钮，点开才显示收款码 ----------------
         Bitmap qr = null;
         try (InputStream in = a.getAssets().open("elneazh/about/qr.png")) { qr = BitmapFactory.decodeStream(in); } catch (Throwable ignored) {}
         if (qr != null) {
-            TextView cap = new TextView(a);
-            cap.setTextColor(BROWN_TEXT);
-            cap.setTextSize(13);
-            cap.setGravity(Gravity.CENTER);
-            cap.setLineSpacing(0, 1.2f);
-            cap.setText("觉得好玩，可以微信扫码请汉化作者喝杯奶茶。\n全凭自愿，不捐也一样能玩。");
+            final Bitmap qrBmp = qr;
+            final LinearLayout fold = new LinearLayout(a);
+            fold.setOrientation(LinearLayout.VERTICAL);
+            fold.setGravity(Gravity.CENTER_HORIZONTAL);
+            fold.setVisibility(View.GONE);
+
+            TextView cap = small(a, "觉得好玩，可以扫码请汉化作者喝杯奶茶（全凭自愿，不捐一样能玩）。");
             LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, -2);
-            cp.topMargin = (int) (14 * d);
-            card.addView(cap, cp);
+            cp.topMargin = (int) (6 * d);
+            fold.addView(cap, cp);
+
             FrameLayout qrBox = new FrameLayout(a);
             qrBox.setBackground(round(Color.WHITE, BROWN, 2 * d, 8 * d));
             int qp = (int) (6 * d);
             qrBox.setPadding(qp, qp, qp, qp);
             ImageView iv = new ImageView(a);
-            iv.setImageBitmap(qr);
+            iv.setImageBitmap(qrBmp);
             iv.setAdjustViewBounds(true);
-            int s = (int) (170 * d);
+            int s = (int) (150 * d);
             qrBox.addView(iv, new FrameLayout.LayoutParams(s, s));
             LinearLayout.LayoutParams qlp = new LinearLayout.LayoutParams(-2, -2);
-            qlp.topMargin = (int) (8 * d);
-            card.addView(qrBox, qlp);
+            qlp.topMargin = (int) (6 * d);
+            fold.addView(qrBox, qlp);
+            card.addView(fold, new LinearLayout.LayoutParams(-1, -2));
+
+            final TextView pay = link(a, d, "赞赏支持（扫码 / 点开收款码）");
+            pay.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    boolean show = fold.getVisibility() != View.VISIBLE;
+                    fold.setVisibility(show ? View.VISIBLE : View.GONE);
+                    pay.setText(show ? "收起收款码" : "赞赏支持（扫码 / 点开收款码）");
+                }
+            });
+            card.addView(pay);
         }
 
-        card.addView(button(a, d, "存档备份", ORANGE, ORANGE_DARK, Color.WHITE, new View.OnClickListener() {
-            @Override public void onClick(View v) { Backup.manage(a); }
-        }));
-        TextView bk = new TextView(a);
-        bk.setTextColor(BROWN_TEXT);
-        bk.setTextSize(12);
-        bk.setGravity(Gravity.CENTER);
-        bk.setText("每次启动自动备份，卸载游戏也不会丢。");
-        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-1, -2);
-        bp.topMargin = (int) (6 * d);
-        card.addView(bk, bp);
+        addSep(a, d, card, 10);
+        caption(a, d, card, "存档");
 
-        card.addView(button(a, d, "更换游戏身份", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
-            @Override public void onClick(View v) { Identity.confirm(a, null); }
+        // 主按钮：立即备份（整个弹窗只有这一个橙色）
+        card.addView(button(a, d, "立即备份", ORANGE, ORANGE_DARK, Color.WHITE, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                try {
+                    Backup.manage(a);
+                } catch (Throwable t) {
+                    Log.w(TAG, "backup", t);
+                    Toast.makeText(a, "备份出错：" + t, Toast.LENGTH_LONG).show();
+                }
+            }
         }));
-        TextView idt = new TextView(a);
-        idt.setTextColor(BROWN_TEXT);
-        idt.setTextSize(12);
-        idt.setGravity(Gravity.CENTER);
-        idt.setText("一直卡「维护中」或强制输入账号时用，不用清除数据。");
-        LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(-1, -2);
-        ip.topMargin = (int) (6 * d);
-        card.addView(idt, ip);
+        smallLine(a, d, card, "启动时也会自动备份，卸载游戏也不丢。");
 
-        // ---------------- 单机模式（第二批） ----------------
+        // 并排：导出分享 / 导入存档
+        LinearLayout row = new LinearLayout(a);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, -2);
+        rlp.topMargin = (int) (10 * d);
+        card.addView(row, rlp);
+
+        LinearLayout.LayoutParams half = new LinearLayout.LayoutParams(0, (int) (46 * d), 1f);
+        half.rightMargin = (int) (6 * d);
+        TextView exp = button(a, d, "导出分享", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                try {
+                    Share.shareBackup(a);
+                } catch (Throwable t) {
+                    Log.w(TAG, "export save", t);
+                    Toast.makeText(a, "导出出错：" + t, Toast.LENGTH_LONG).show();
+                }
+            }
+        });
+        row.addView(exp, half);
+
+        LinearLayout.LayoutParams half2 = new LinearLayout.LayoutParams(0, (int) (46 * d), 1f);
+        half2.leftMargin = (int) (6 * d);
+        TextView imp = button(a, d, "导入存档", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                try {
+                    // 走已有的 restore 流程：选 zip → 二次确认 → 先自动备份当前存档再覆盖
+                    if (a instanceof SupportActivity) {
+                        Backup.pick(a);
+                    } else {
+                        Intent i = new Intent(a, SupportActivity.class);
+                        i.putExtra("restore", true);
+                        a.startActivity(i);
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "import save", t);
+                    Toast.makeText(a, "导入出错：" + t, Toast.LENGTH_LONG).show();
+                }
+            }
+        });
+        row.addView(imp, half2);
+
+        // 小文字链接：导出名字对照表
+        TextView names = link(a, d, "导出名字对照表（NPC 中文名 ↔ 上传用英文）");
+        names.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                try {
+                    Share.shareNameTable(a);
+                } catch (Throwable t) {
+                    Log.w(TAG, "export names", t);
+                    Toast.makeText(a, "导出名字对照表出错：" + t, Toast.LENGTH_LONG).show();
+                }
+            }
+        });
+        LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(-1, -2);
+        nlp.topMargin = (int) (4 * d);
+        card.addView(names, nlp);
+
+        // ---------------- 单机模式 ----------------
         try {
             addOfflineSection(a, d, card);
         } catch (Throwable t) {
             Log.w(TAG, "offline section", t);   // 这一段画不出来也不影响其它按钮
         }
 
-        // ---------------- 分享 / 导出（第三批） ----------------
-        try {
-            addShareSection(a, d, card);
-        } catch (Throwable t) {
-            Log.w(TAG, "share section", t);
-        }
-
-        card.addView(button(a, d, "联系原作者（英文邮件）", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
-            @Override public void onClick(View v) { mailDev(a); }
+        // ---------------- 账号 ----------------
+        addSep(a, d, card, 12);
+        caption(a, d, card, "账号");
+        card.addView(button(a, d, "更换游戏身份", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                try {
+                    Identity.confirm(a, null);
+                } catch (Throwable t) {
+                    Log.w(TAG, "identity", t);
+                }
+            }
         }));
+        smallLine(a, d, card, "一直卡「维护中」时用，不用清除数据。");
+
+        // ---------------- 底部 ----------------
+        addSep(a, d, card, 12);
+        TextView dev = link(a, d, "联系原作者（英文邮件）");
+        dev.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { mailDev(a); }
+        });
+        card.addView(dev);
         card.addView(button(a, d, "关闭", BROWN, Color.rgb(0x4E, 0x2F, 0x14), Color.WHITE, new View.OnClickListener() {
             @Override public void onClick(View v) { try { dlg.dismiss(); } catch (Throwable ignored) {} }
         }));
 
         ScrollView sv = new ScrollView(a);
         sv.setFillViewport(false);
-        sv.setVerticalScrollBarEnabled(false);
+        sv.setVerticalScrollBarEnabled(true);
         sv.addView(card, new FrameLayout.LayoutParams(-1, -2));
         dlg.setContentView(sv);
         Window w = dlg.getWindow();
         if (w != null) {
             w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
             int sw = a.getResources().getDisplayMetrics().widthPixels;
+            int sh = a.getResources().getDisplayMetrics().heightPixels;
             int width = Math.min((int) (sw * 0.9f), (int) (380 * d));
-            w.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
+            // 高度留出上下边距，内容超出就滚动（小屏也能把「关闭」滚到）
+            w.setLayout(width, Math.min((int) (sh * 0.86f), ViewGroup.LayoutParams.WRAP_CONTENT));
         }
         return dlg;
     }
 
+    /** 分隔线。 */
+    private static void addSep(Activity a, float d, LinearLayout card, int top) {
+        View sep = new View(a);
+        sep.setBackgroundColor(Color.argb(0x33, 0x7A, 0x4B, 0x24));
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, Math.max(1, (int) (1.5f * d)));
+        slp.topMargin = (int) (top * d);
+        card.addView(sep, slp);
+    }
+
+    /** 分组标题（存档 / 单机模式 / 账号）：一行、小号、深棕。 */
+    private static void caption(Activity a, float d, LinearLayout card, String text) {
+        TextView t = new TextView(a);
+        t.setText(text);
+        t.setTextColor(BROWN);
+        t.setTextSize(14);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setGravity(Gravity.CENTER);
+        t.setSingleLine(true);
+        t.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.topMargin = (int) (8 * d);
+        card.addView(t, lp);
+    }
+
+    /** 按钮下面那行小字：一行、居中、不抢眼。 */
+    private static void smallLine(Activity a, float d, LinearLayout card, String text) {
+        TextView t = small(a, text);
+        t.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.topMargin = (int) (4 * d);
+        card.addView(t, lp);
+    }
+
+    static TextView small(Activity a, String text) {
+        TextView t = new TextView(a);
+        t.setText(text);
+        t.setTextColor(BROWN_TEXT);
+        t.setTextSize(11);
+        t.setSingleLine(true);
+        t.setEllipsize(TextUtils.TruncateAt.END);
+        return t;
+    }
+
+    /** 小文字链接：无底色、下划线、点了才动。 */
+    static TextView link(final Activity a, final float d, String text) {
+        TextView t = new TextView(a);
+        t.setText(text);
+        t.setTextColor(Color.rgb(0x2F, 0x5D, 0x8A));
+        t.setTextSize(12);
+        t.setGravity(Gravity.CENTER);
+        t.setSingleLine(true);
+        t.setEllipsize(TextUtils.TruncateAt.END);
+        t.setPaintFlags(t.getPaintFlags() | Paint.UNDERLINE_TEXT_FLAG);
+        t.setClickable(true);
+        t.setFocusable(true);
+        t.setPadding(0, (int) (6 * d), 0, (int) (6 * d));
+        t.setLayoutParams(new LinearLayout.LayoutParams(-1, -2));
+        return t;
+    }
+
     /**
-     * 单机模式开关 + 说明。
+     * 单机模式：一个开关 + 一行说明。
      *
      * 开关状态存 shared_prefs/elneazh_settings（键 offline），Backup 会随存档一起备份/恢复。
-     * 点一下即生效（NetBlocker 每个请求都现读 Offline.isOn()，不需要重进游戏）。
+     * 点一下即生效（NetBlocker / 原生闸门每个请求都现读 Offline.isOn()，不需要重进游戏）。
+     * 详细状态（挂钩了多少入口、挡了几次）只写 logcat（标签 ElneaOffline），不占弹窗版面。
      */
     private static void addOfflineSection(final Activity a, final float d, LinearLayout card) {
         final boolean[] on = {Offline.isOn(a)};
 
-        View sep = new View(a);
-        sep.setBackgroundColor(Color.argb(0x33, 0x7A, 0x4B, 0x24));
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, Math.max(1, (int) (1.5f * d)));
-        slp.topMargin = (int) (10 * d);
-        card.addView(sep, slp);
+        addSep(a, d, card, 12);
+        caption(a, d, card, "单机模式");
 
         final TextView toggle = button(a, d, toggleLabel(on[0]),
                 on[0] ? ORANGE : CREAM_DARK, on[0] ? ORANGE_DARK : BROWN, on[0] ? Color.WHITE : BROWN, null);
-        final TextView state = new TextView(a);
-        state.setTextColor(BROWN_TEXT);
-        state.setTextSize(12);
-        state.setLineSpacing(0, 1.25f);
-        state.setText(offlineText(on[0]));
+        final TextView state = smallLine1(a, offlineText(on[0]));
+        card.addView(toggle);
         LinearLayout.LayoutParams stp = new LinearLayout.LayoutParams(-1, -2);
-        stp.topMargin = (int) (6 * d);
+        stp.topMargin = (int) (4 * d);
         card.addView(state, stp);
-
-        // 原生闸门现状（单机开着时才显示）：挂钩了多少个入口、已经挡了几次。
-        // 拿不到就整行不显示 —— 这里出错绝不影响弹窗其它部分。
-        final TextView native_ = new TextView(a);
-        native_.setTextColor(Color.rgb(0x5A, 0x4A, 0x3A));
-        native_.setTextSize(11);
-        native_.setLineSpacing(0, 1.2f);
-        try {
-            native_.setText(OfflineGate.summary());
-        } catch (Throwable t) {
-            native_.setText("");
-        }
-        native_.setVisibility(on[0] && native_.getText().length() > 0 ? View.VISIBLE : View.GONE);
-        LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(-1, -2);
-        nlp.topMargin = (int) (4 * d);
-        card.addView(native_, nlp);
-
-        // 单机开着时挂一行「资源照常下载」；若真有需要身份的接口被拦，再换成红灯提示。
-        final TextView dl = new TextView(a);
-        dl.setTextColor(Color.rgb(0x2E, 0x6B, 0x2E));
-        dl.setTextSize(12);
-        dl.setLineSpacing(0, 1.25f);
-        final String okTip = "资源/扩展包：单机时照常下载（这条路径不带账号或设备信息）。"
-                + Offline.purchaseHint();
-        dl.setText(okTip);
-        dl.setVisibility(on[0] ? View.VISIBLE : View.GONE);
-        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, -2);
-        dlp.topMargin = (int) (4 * d);
-        card.addView(dl, dlp);
-
-        if (on[0]) {
-            String blocked = NetBlocker.downloadTip();
-            if (!blocked.isEmpty()) {
-                dl.setTextColor(Color.rgb(0x8B, 0x2E, 0x1A));
-                dl.setText(blocked);
-            }
-        }
 
         toggle.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
@@ -260,7 +354,8 @@ final class Support {
                             OfflineGate.ensureInstalled(a);
                             OfflineGate.push(next);
                         }
-                        Log.i(TAG, "offline toggle -> " + next + " | " + OfflineGate.describe());
+                        Log.i("ElneaOffline", "toggle -> " + next + " match=" + OfflineGate.stateMatches(a)
+                                + " " + OfflineGate.describe());
                     } catch (Throwable t) {
                         Log.w(TAG, "offline gate push", t);
                     }
@@ -268,24 +363,7 @@ final class Support {
                     toggle.setTextColor(next ? Color.WHITE : BROWN);
                     toggle.setBackground(round(next ? ORANGE : CREAM_DARK, next ? ORANGE_DARK : BROWN, 2.5f * d, 10 * d));
                     state.setText(offlineText(next));
-                    dl.setVisibility(next ? View.VISIBLE : View.GONE);
-                    try {
-                        native_.setText(OfflineGate.summary());
-                        native_.setVisibility(next && native_.getText().length() > 0
-                                ? View.VISIBLE : View.GONE);
-                    } catch (Throwable t) {
-                        native_.setVisibility(View.GONE);
-                    }
-                    if (next) {
-                        String blocked = NetBlocker.downloadTip();
-                        dl.setTextColor(Color.rgb(0x2E, 0x6B, 0x2E));
-                        dl.setText(okTip);
-                        if (!blocked.isEmpty()) {
-                            dl.setTextColor(Color.rgb(0x8B, 0x2E, 0x1A));
-                            dl.setText(blocked);
-                        }
-                    }
-                    Toast.makeText(a, next ? "单机模式已开启：联网/付费入口已隐藏，请求不发出去"
+                    Toast.makeText(a, next ? "单机模式已开启：不连服务器，请求不发出去"
                                     : "单机模式已关闭：恢复正常联网",
                             Toast.LENGTH_SHORT).show();
                 } catch (Throwable t) {
@@ -294,103 +372,30 @@ final class Support {
                 }
             }
         });
-        card.addView(toggle);
     }
 
     private static String toggleLabel(boolean on) {
         return on ? "单机模式：开 ✓（点击关闭）" : "单机模式：关（点击开启）";
     }
 
-    /** 开关下方那几行说明：必须让人一眼看到「哪些功能没了」。 */
+    /** 开关下面那一行：必须一行说清「开了会怎样、要不要重启」。 */
     private static String offlineText(boolean on) {
-        StringBuilder b = new StringBuilder();
-        b.append(Offline.summary(on)).append('\n');
-        for (String s : Offline.limits()) b.append("· ").append(s).append('\n');
-        if (on) {
-            b.append("带账号/设备信息的接口（登录、存档、排行、邮件等）全部在本机被接住，不发出去。");
-            b.append('\n').append("资源与扩展包边走边下不受影响：这条下载路径不带任何身份信息。");
-            b.append('\n').append("游戏内商店、邮箱、好友、PVP、排行、公告、活动、广告的入口"
-                    + "在原生层被直接隐藏、点了也不执行，不发任何请求。关掉单机后重新进界面就回来。");
-            try {
-                String gate = OfflineGate.summary();
-                if (gate.length() > 0) b.append('\n').append(gate).append('。');
-            } catch (Throwable t) {
-                Log.w(TAG, "offline gate summary", t);
-            }
-            String tip = NetBlocker.downloadTip();
-            if (!tip.isEmpty()) b.append('\n').append(tip);
-        } else {
-            b.append("开启后只挡带身份的接口，资源照常下载，设备信息不外泄。\n导出/导入存档请用下面「存档备份」里的功能。");
+        if (!on) {
+            return "开：不连服务器，商店/邮箱/好友/PVP 入口隐藏，资源照常下载。";
         }
-        return b.toString();
+        String tip = "";
+        try { tip = NetBlocker.downloadTip(); } catch (Throwable ignored) {}
+        if (tip != null && !tip.isEmpty()) return "已开：不连服务器，资源照常下载（少数需关单机）。";
+        return "已开：不连服务器，商店/邮箱/好友/PVP 已隐藏，需重开游戏彻底生效。";
     }
 
-    /** 导出存档 / 导入存档 / 导出名字对照表。三个按钮各自独立，坏了互不影响。 */
-    private static void addShareSection(final Activity a, final float d, LinearLayout card) {
-        View sep = new View(a);
-        sep.setBackgroundColor(Color.argb(0x33, 0x7A, 0x4B, 0x24));
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, Math.max(1, (int) (1.5f * d)));
-        slp.topMargin = (int) (12 * d);
-        card.addView(sep, slp);
-
-        TextView cap = new TextView(a);
-        cap.setTextColor(BROWN_TEXT);
-        cap.setTextSize(13);
-        cap.setGravity(Gravity.CENTER);
-        cap.setText("分享 / 导出");
-        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, -2);
-        cp.topMargin = (int) (10 * d);
-        card.addView(cap, cp);
-
-        card.addView(button(a, d, "导出存档", ORANGE, ORANGE_DARK, Color.WHITE, new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                try {
-                    Share.shareBackup(a);
-                } catch (Throwable t) {
-                    Log.w(TAG, "export save", t);
-                    Toast.makeText(a, "导出出错：" + t, Toast.LENGTH_LONG).show();
-                }
-            }
-        }));
-
-        card.addView(button(a, d, "导入存档", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                try {
-                    // 走已有的 restore 流程：选 zip → 二次确认 → 先自动备份当前存档再覆盖
-                    if (a instanceof SupportActivity) {
-                        Backup.pick(a);
-                    } else {
-                        Intent i = new Intent(a, SupportActivity.class);
-                        i.putExtra("restore", true);
-                        a.startActivity(i);
-                    }
-                } catch (Throwable t) {
-                    Log.w(TAG, "import save", t);
-                    Toast.makeText(a, "导入出错：" + t, Toast.LENGTH_LONG).show();
-                }
-            }
-        }));
-
-        card.addView(button(a, d, "导出名字对照表", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                try {
-                    Share.shareNameTable(a);
-                } catch (Throwable t) {
-                    Log.w(TAG, "export names", t);
-                    Toast.makeText(a, "导出名字对照表出错：" + t, Toast.LENGTH_LONG).show();
-                }
-            }
-        }));
-
-        TextView hint = new TextView(a);
-        hint.setTextColor(BROWN_TEXT);
-        hint.setTextSize(11);
-        hint.setGravity(Gravity.CENTER);
-        hint.setText("导出会通过系统分享面板发到微信 / QQ / 文件；导入前会自动先备份当前存档。");
-        LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(-1, -2);
-        hp.topMargin = (int) (6 * d);
-        card.addView(hint, hp);
+    /** 单行小字（超长省略号），用于开关说明。 */
+    private static TextView smallLine1(Activity a, String text) {
+        TextView t = small(a, text);
+        t.setGravity(Gravity.CENTER);
+        return t;
     }
+
 
     static TextView button(Context c, float d, String text, int fill, int stroke, int textColor, View.OnClickListener l) {
         TextView b = new TextView(c);
