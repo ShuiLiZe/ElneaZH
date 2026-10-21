@@ -278,6 +278,7 @@ static char *eg_string_to_utf8(void *s, size_t *out_len) {
 }
 
 char *eg_rp_fix_uniq(const char *tx);
+char *eg_rp_fix_master(const char *tx);
 #if defined(__aarch64__)
 static void *eg_hook(void *plain_str) {
     g_stats_calls++;
@@ -301,6 +302,8 @@ static void *eg_hook(void *plain_str) {
     {
         char *u = eg_rp_fix_uniq(plain);   // 换身份后登录：user_uniq 换回服务器认的
         if (u) { free(plain); plain = u; plain_len = strlen(u); ctx.hits += 0; uniq_fixed = 1; }
+        char *m = eg_rp_fix_master(plain);  // 联网补整表：库里没有整表的主数据表让服务器回整表
+        if (m) { free(plain); plain = m; plain_len = strlen(m); uniq_fixed = 1; }
     }
     if (plain && plain_len > 0) {
         fixed = eg_filter_json(&ctx, plain, plain_len, &fixed_len);

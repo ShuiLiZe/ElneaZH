@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "eg_log.h"
 #include "eg_offline.h"
@@ -34,6 +35,9 @@
 #define FILES "/data/data/jp.co.althi.elnea.en/files/"
 #endif
 #define REPLAY_PATH FILES "elneazh_replay.json"
+// 外部目录备份：/sdcard/Android/data/<包>/files/（免权限；清应用缓存、内部库损坏时还能找回）
+#define REPLAY_EXT "/sdcard/Android/data/jp.co.althi.elnea.en/files/elneazh_replay.json"
+#define REPLAY_MAX (48L << 20)
 #define TAG "ElneaReplay"
 #define RPI(...) eg_plog(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define RPW(...) eg_plog(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
@@ -196,10 +200,12 @@ static char *rp_unescape(const char *s, size_t n) {
 static void rp_load(void) {
     if (g_loaded) return;
     g_loaded = 1;
-    FILE *f = fopen(REPLAY_PATH, "r");
+    const char *path = REPLAY_PATH;
+    FILE *f = fopen(path, "r");
+    if (!f) { path = REPLAY_EXT; f = fopen(path, "r"); }
     if (!f) { RPW("replay库不存在: %s", REPLAY_PATH); return; }
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-    if (sz <= 2 || sz > (8 << 20)) { fclose(f); return; }
+    if (sz <= 2 || sz > REPLAY_MAX) { fclose(f); return; }
     char *buf = (char *) malloc((size_t) sz + 1);
     if (!buf) { fclose(f); return; }
     size_t rd = fread(buf, 1, (size_t) sz, f); buf[rd] = 0; fclose(f);
@@ -222,7 +228,7 @@ static void rp_load(void) {
     }
     pthread_mutex_unlock(&g_map_lock);
     free(buf);
-    RPI("replay库载入 %d 条", n);
+    RPI("replay库载入 %d 条（%s）", n, path);
 }
 
 // JSON 字符串转义写文件
@@ -234,9 +240,11 @@ static void rp_fput_escaped(FILE *f, const char *s) {
         else if ((unsigned char) *s >= 0x20) fputc(*s, f);
     }
 }
-static void rp_persist(void) {
-    FILE *f = fopen(REPLAY_PATH, "w");
-    if (!f) return;
+// 锁内只把整库拷进内存（很快），落盘在锁外做，主线程查库不会被磁盘 IO 卡住
+static char *rp_snapshot(size_t *out_len) {
+    char *buf = NULL; size_t len = 0;
+    FILE *f = open_memstream(&buf, &len);
+    if (!f) return NULL;
     fputc('{', f);
     int first = 1;
     pthread_mutex_lock(&g_map_lock);
@@ -251,22 +259,101 @@ static void rp_persist(void) {
     pthread_mutex_unlock(&g_map_lock);
     fputc('}', f);
     fclose(f);
+    *out_len = len;
+    return buf;
+}
+static void rp_write_file(const char *final_path, const char *buf, size_t len) {
+    char tmp[256];
+    snprintf(tmp, sizeof tmp, "%s.tmp", final_path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    int bad = fwrite(buf, 1, len, f) != len;
+    if (fclose(f) != 0) bad = 1;
+    if (!bad) rename(tmp, final_path); else remove(tmp);   // 写完再换名：中途被杀不会留下半个库
+}
+static void rp_persist(void) {
+    size_t len = 0;
+    char *buf = rp_snapshot(&len);
+    if (!buf) return;
+    rp_write_file(REPLAY_PATH, buf, len);
+    rp_write_file(REPLAY_EXT, buf, len);
+    free(buf);
+}
+// 学习发生在主线程（Parse 里），整库几 MB，不能每条回包都同步重写：标脏，后台线程 2s 后落盘
+static volatile int g_dirty;
+static volatile int g_saver_started;
+static void *rp_saver(void *a) {
+    (void) a;
+    for (;;) {
+        sleep(2);
+        if (g_dirty) { g_dirty = 0; rp_persist(); }
+    }
+    return NULL;
+}
+static void rp_mark_dirty(void) {
+    g_dirty = 1;
+    if (!g_saver_started) {
+        g_saver_started = 1;
+        pthread_t t;
+        if (pthread_create(&t, NULL, rp_saver, NULL) == 0) pthread_detach(t);
+        else { g_saver_started = 0; g_dirty = 0; rp_persist(); }
+    }
 }
 
-// 联网时：rec_dec_hook 拿到一条回包明文 rx，与 rp_set_last_tx 记的请求配对后存库
+// 联网时由 rp_parse_hook 设置：当前正在 Parse 的请求类名 + 用 get_Param 序列化的请求参数。
+// 与单机查库时用的是同一套参数和签名，配对不再依赖「最近一次加密的请求」（排队请求会配错：
+// 真机 10-22 00:26 重放库里签名 "|" 存的是存档恢复回包，单机时被当成 MasterCheckRequest 的回包 →
+// 主数据检查死循环）。
+static __thread const char *g_cur_cls;
+static __thread char *g_cur_tx;
+
+static int rp_is_empty_table(const char *v) {
+    return v && strstr(v, "\"result\":\"empty data") != NULL;
+}
+static volatile int g_forced, g_full_learned;   // 补整表：改过日期的请求数 / 学到的整表数
+static void rp_put_learned(const char *key, const char *val) {
+    const char *old = rp_get(key);
+    if (strstr(key, "table_name=") && !rp_is_empty_table(val) && (!old || rp_is_empty_table(old)))
+        g_full_learned++;
+    // 主数据表：已有整表时不让「empty data（没有更新）」覆盖掉，新装/没缓存时还要靠整表
+    if (old && rp_is_empty_table(val) && !rp_is_empty_table(old)) return;
+    rp_put(key, val);
+}
+
+// 联网时：rec_dec_hook 拿到一条回包明文 rx，与当前请求配对后存库
 void rp_learn(const char *rx, size_t n) {
-    if (!g_last_tx || !rx || n < 32) return;
+    const char *tx = g_cur_tx ? g_cur_tx : g_last_tx;
+    if (!tx || !rx || n < 32) return;
     if (!strstr(rx, "\"$_sys_result_$\":\"Done.")) return;   // 只学成功回包
     char sign[512];
-    if (!rp_sign(g_last_tx, strlen(g_last_tx), sign, sizeof sign)) return;
+    if (!rp_sign(tx, strlen(tx), sign, sizeof sign)) return;
     rp_load();
-    pthread_mutex_lock(&g_map_lock);
     const char *body = strstr(rx, "response[JSON]=");
-    rp_put(sign, body ? body + 15 : rx);
+    const char *val = body ? body + 15 : rx;
+    pthread_mutex_lock(&g_map_lock);
+    if (g_cur_cls && g_cur_tx) {
+        char csign[600];
+        snprintf(csign, sizeof csign, "%s#%s", g_cur_cls, sign);
+        rp_put_learned(csign, val);
+    }
+    // 不带类名的签名 "|"（版本检查 / 主数据检查 / 存档恢复都长这样）有歧义，只按类名存
+    if (strcmp(sign, "|") != 0) rp_put_learned(sign, val);
     pthread_mutex_unlock(&g_map_lock);
-    rp_persist();
+    rp_mark_dirty();
 }
 
+// 库里有没有这张主数据表的整表回包（不是 "empty data"）
+static int rp_has_full_table(const char *table) {
+    char pat[128];
+    snprintf(pat, sizeof pat, "table_name=%s;|", table);
+    int ok = 0;
+    pthread_mutex_lock(&g_map_lock);
+    for (int b = 0; b < RP_BUCKETS && !ok; b++)
+        for (rp_e *e = g_map[b]; e && !ok; e = e->next)
+            if (strstr(e->key, pat) && e->val && !rp_is_empty_table(e->val)) ok = 1;
+    pthread_mutex_unlock(&g_map_lock);
+    return ok;
+}
 
 // ---------------------------------------------------------- 换身份后的登录：user_uniq 对齐
 // 真机 10-22 00:14：换身份后游戏仍用旧游客账号（user_name/user_pass/login_key）登录，但 addUniqArg
@@ -323,6 +410,37 @@ char *eg_rp_fix_uniq(const char *tx) {
         out = rp_replace(tx, f, t);
     }
     free(cur);
+    return out;
+}
+
+// ---------------------------------------------------------- 联网时补齐整表
+// 游戏每次启动都按表发 MasterRequest(table_name, table_date)，服务器只回 table_date 之后变过的行，
+// 本机有缓存时几乎全是 "empty data"，重放库就永远攒不到整表（新装断网进不去）。
+// 库里还没有整表的表，联网时把 table_date 改成很早的时间，让服务器回整表（与新装首次下载同一应答），
+// 学进库后就不再改。只改日期字段，不碰账号。
+char *eg_rp_fix_master(const char *tx) {
+    if (!tx || eg_of_is_off()) return NULL;
+    char *table = rp_json_str(tx, "table_name");
+    if (!table) return NULL;
+    char *out = NULL;
+    rp_load();
+    char *cur = rp_json_str(tx, "table_date");
+    if (cur) {
+        RPI("主数据请求 %s table_date=[%s]", table, cur);
+        // 保险：改了 8 张以上还一张整表都没学到（服务器不认这个日期格式之类），本次进程不再改
+        if (cur[0] && g_forced - g_full_learned < 8 && !rp_has_full_table(table)) {
+            int digits = 1;
+            for (const char *c = cur; *c; c++) if (*c < '0' || *c > '9') { digits = 0; break; }
+            const char *old = digits ? "0" : "2000-01-01 00:00:00";
+            char f[160], t[96];
+            snprintf(f, sizeof f, "\"table_date\":\"%s\"", cur);
+            snprintf(t, sizeof t, "\"table_date\":\"%s\"", old);
+            if (strlen(cur) < 100) out = rp_replace(tx, f, t);
+            if (out) { g_forced++; RPI("主数据补整表：%s table_date %s → %s", table, cur, old); }
+        }
+        free(cur);
+    }
+    free(table);
     return out;
 }
 
@@ -490,7 +608,19 @@ static const char *rp_cls(void *obj) {
 #if defined(__aarch64__)
 static void rp_parse_hook(void *self, void *www, void *mi) {
     if (www || !eg_of_is_off() || !g_rp_ready || !self) {
+        char *ctx_tx = NULL;
+        if (www && self && !eg_of_is_off() && g_getp && g_ser) {
+            void *pp = g_getp(self, NULL);
+            void *pj = pp ? g_ser(pp, NULL) : NULL;
+            size_t pl = 0;
+            ctx_tx = pj ? eg_rec_str(pj, &pl) : NULL;
+            g_cur_tx = ctx_tx;
+            g_cur_cls = rp_cls(self);
+        }
         g_parse_orig(self, www, mi);
+        g_cur_tx = NULL;
+        g_cur_cls = NULL;
+        free(ctx_tx);
         // 联网出错时把游戏自己记下的错误写进 native.log（www.error 或服务端 "." 开头的明文错误）
         const char *pc = self ? rp_cls(self) : "?";
         int cond = self ? *(int32_t *) ((char *) self + 0x10) : -1;
@@ -533,11 +663,15 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
         char csign[600];
         snprintf(csign, sizeof csign, "%s#%s", cls, sign);
         RPI("请求 %s 签名 %s", cls, sign);
+        // 签名只有 "|" 的请求（版本检查 / MasterCheckRequest / 存档恢复）只认带类名的记录：
+        // 10-22 00:26 MasterCheckRequest 拿到了存档恢复回包 → 主数据检查死循环。
+        int ambiguous = strcmp(sign, "|") == 0 || strcmp(cls, "UserWorldRecovRequest") == 0;
         pthread_mutex_lock(&g_map_lock);
         hit = rp_get(csign);
-        if (!hit && strcmp(cls, "UserWorldRecovRequest") != 0) hit = rp_get(sign);
-        if (!hit && strcmp(cls, "UserWorldRecovRequest") != 0) { hit = rp_get_fuzzy(sign); if (hit) RPI("近似命中: %s", sign); }
+        if (!hit && !ambiguous) hit = rp_get(sign);
+        if (!hit && !ambiguous) { hit = rp_get_fuzzy(sign); if (hit) RPI("近似命中: %s", sign); }
         pthread_mutex_unlock(&g_map_lock);
+        if (!hit && ambiguous) RPW("单机：%s 还没有录到（需联网进一次游戏）", cls);
     }
     if (!hit && strstr(tx, "\"table_name\"")) {
         // 主数据表：本地已有缓存，回「没有更新」（与服务器对未更新表的应答一致）
@@ -548,7 +682,7 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
         RPW("单机未命中，按没网处理: %s", sign);
         free(tx); g_parse_orig(self, www, mi); return;
     }
-    RPI("单机重放: %s", made ? "write-ack" : sign);
+    RPI("单机重放: %s", made ? (rp_is_write(tx) ? "write-ack" : "empty-data") : sign);
     if (!rp_emulate(self, hit)) g_parse_orig(self, www, mi);
     free(made);
     free(tx);
