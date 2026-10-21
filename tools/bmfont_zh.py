@@ -309,11 +309,11 @@ def apply(env_file, ttf_path, extra_chars=(), log=print):
 
     area_glyphs = [glyph(i, gid) for gid, i in area_ids.items()]
     name_glyphs = [glyph(i, gid) for gid, i in name_ids.items()]
-    # 名字字体也要能画出汉字：本地人名就是中文（NPC 名照常翻译，玩家也可用中文取名），
-    # 显示字必须齐；上传时再换回英文原名 / 拼音（NameFix.filterNames），本地不妥协。
-    # 只补「名字真用得到的字」（tools/names.txt 第一行），不把 GB2312 全塞进来。
+    # 名字字体 = 游戏取名时的合法字符集（不在 Name 字体里的字会提示“含无效字符”）。
+    # 必须和 main 一样带上全部汉字（GB2312 + names.txt），只补 names.txt 那一撮会让玩家打不出大部分中文名。
+    # 上传时再换回英文原名 / 拼音（NameFix.filterNames），本地不妥协。
     name_glyphs += [glyph(i, gid) for gid, i in area_ids.items()
-                    if gid in NAME_CHARS and gid not in name_ids]
+                    if (is_han(chr(gid)) or gid in NAME_CHARS) and gid not in name_ids]
 
     # ----- write objects -----
     vw, vh = W, RH                                    # virtual font texture = the sheet itself
