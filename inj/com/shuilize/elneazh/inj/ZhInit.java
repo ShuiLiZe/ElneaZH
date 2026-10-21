@@ -34,6 +34,8 @@ public final class ZhInit extends ContentProvider {
         try { Backup.auto(getContext()); } catch (Throwable t) { Log.e(TAG, "auto backup failed", t); }
         try { deploy(getContext()); } catch (Throwable t) { Log.e(TAG, "deploy failed", t); }
         try { Bundles.run(getContext()); } catch (Throwable t) { Log.e(TAG, "bundles failed", t); }
+        // 老存档里的英文人名转成中文（先备份原文件）。本地一切照旧是中文。
+        try { SaveNames.run(getContext()); } catch (Throwable t) { Log.e(TAG, "names failed", t); }
         try { About.install(getContext()); } catch (Throwable t) { Log.e(TAG, "about failed", t); }
         // 上传方向的兜底闸：请求明文里的中文名换成拼音（单向，响应不处理）。
         try {
@@ -44,9 +46,19 @@ public final class ZhInit extends ContentProvider {
         try { NameGate.install(getContext(), 1); } catch (Throwable t) { Log.w(TAG, "gate install failed", t); }
         // 单机模式的闸门：常驻安装（是否真拦由 Offline.isOn() 现读决定，切开关不用重进游戏）
         try { NetBlocker.install(getContext()); } catch (Throwable t) { Log.w(TAG, "offline gate failed", t); }
-        // 单机模式的 native 闸门（离线入口 + HTTP）：与名字闸门同一个 .so，靠 il2cpp 运行时 API 按名字
-        // 解析方法后 hook，解析不到就跳过，绝不崩。是否真拦同样是现读 Offline.isOn()。
-        try { OfflineGate.install(getContext(), 1); } catch (Throwable t) { Log.w(TAG, "offline native gate failed", t); }
+        // 单机模式的 native 闸门（离线入口 + HTTP + 请求出口兜底）：
+        // 与名字闸门同一个 .so；入口/面板靠 il2cpp 按名解析后 inline hook，
+        // 请求出口（Cipher::EncryptRJ256）走固定偏移，不依赖解析 —— 单机时任何 sns04 请求都发不出去。
+        // 安装全程在后台线程里重试到 libil2cpp 出现（本调用立即返回，不拖启动）。
+        try { OfflineGate.install(getContext(), 0); } catch (Throwable t) { Log.w(TAG, "offline native gate failed", t); }
+        // 开关状态与 native 侧对账：真机「单机开着仍联网」第一步就查这个。日志标签 ElneaOffline。
+        try {
+            boolean on = Offline.isOn(getContext());
+            Log.i("ElneaOffline", "boot: offline=" + on
+                    + " stateMatch=" + OfflineGate.stateMatches(getContext())
+                    + " enc=" + OfflineGate.encHooked()
+                    + " " + OfflineGate.describe());
+        } catch (Throwable t) { Log.w(TAG, "offline state check failed", t); }
         try { SelfCheck.run(getContext()); } catch (Throwable t) { Log.w(TAG, "selfcheck failed", t); }
         return true;
     }

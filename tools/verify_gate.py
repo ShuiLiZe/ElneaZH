@@ -48,11 +48,15 @@ def check(ok, what):
 # ---------------------------------------------------------------- 核心复刻
 
 def slot_len(b, i):
-    """i 处若是「0x01 + len(1..64 可打印 UTF-8)」返回 len，否则 -1。"""
+    """i 处若是「0x01 + len(1..255 可打印 UTF-8)」返回 len，否则 -1。
+
+    上限是 255（长度字节的极限），不是 64：拼音比汉字长，20 个汉字的名字就有 60 字节，
+    放宽到 255 才不漏长名字；替换后长度字节同步改写。
+    """
     if i + 2 > len(b) or b[i] != 0x01:
         return -1
     n = b[i + 1]
-    if n < 1 or n > 64 or i + 2 + n > len(b):
+    if n < 1 or n > 255 or i + 2 + n > len(b):
         return -1
     seg = b[i + 2:i + 2 + n]
     if any(c < 0x20 or c == 0x7F for c in seg):
@@ -321,7 +325,8 @@ def main():
             for sym in (b"OfflineGate_nativeInstall", b"OfflineGate_nativePush",
                         b"OfflineGate_nativeStats", b"OfflineGate_nativeResetStats",
                         b"OfflineGate_nativeResolvable", b"OfflineGate_nativeClassPresent",
-                        b"OfflineGate_nativeProbe"):
+                        b"OfflineGate_nativeProbe", b"OfflineGate_nativeOff",
+                        b"OfflineGate_nativeEncState"):
                 check(sym in data, "%s 导出 JNI 入口 %s" % (abi, sym.decode()))
             # 六族钩子的日志：真机上靠这几条判断「哪一族挂上了」
             # 只在 arm64-v8a 上检查 —— armv7 没有 hook 引擎，eg_dispatch 会被优化掉。

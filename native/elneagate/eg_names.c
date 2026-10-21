@@ -66,7 +66,8 @@ int eg_slot_len(const unsigned char *raw, size_t len, size_t i) {
     if (!raw || i + 2 > len) return -1;
     if (raw[i] != 0x01) return -1;
     int n = raw[i + 1];
-    if (n < 1 || n > 64) return -1;
+    // 上限 255（长度字节的极限），不是 64：拼音比汉字长，长名字不能被漏掉。
+    if (n < 1 || n > 255) return -1;
     if (i + 2 + (size_t) n > len) return -1;
     for (int k = 0; k < n; k++) {
         unsigned char v = raw[i + 2 + k];
@@ -305,7 +306,8 @@ static char *eg_filter_one(eg_filter_ctx *ctx, const char *b64, size_t n, size_t
     char *enc = eg_b64_encode(rep, rep_len, &enc_len);
     free(rep);
     if (!enc) return NULL;
-    if (enc_len > n) { free(enc); return NULL; }   // 只许变短
+    // 拼音比汉字长，允许变长；只做个「解错了」的兜底上限（4 倍 + 4KB），超了当没改。
+    if (enc_len > n * 4 + 4096) { free(enc); return NULL; }
     *out_len = enc_len;
     return enc;
 }

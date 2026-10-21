@@ -1,5 +1,0 @@
-# 必须保持原版英文的 TextAsset（这些名字会写进存档、随 read.php/pvp.php/好友列表上传）
-# build_patch.py --names 读它；ci_names.py 按它校验产物
-NameMale_en
-NameFemale_en
-NameFamily_en

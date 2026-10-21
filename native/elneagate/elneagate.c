@@ -467,20 +467,39 @@ Java_com_shuilize_elneazh_inj_OfflineGate_nativeUninstall(JNIEnv *env, jclass cl
     return eg_of_uninstall();
 }
 
-// [0]=已挂 [1]=入口不创建 [2]=请求拦截 [3]=面板/按钮置灰 [4]=遮罩挡住
-// [5]=解析失败 [6]=回调异常
+// [0]=已挂 [1]=入口不创建/面板收掉 [2]=请求拦截 [3]=界面隐藏 [4]=遮罩跳过
+// [5]=解析失败 [6]=回调异常 [7]=兜底闸（EncryptRJ256）已挂
 JNIEXPORT jintArray JNICALL
 Java_com_shuilize_elneazh_inj_OfflineGate_nativeStats(JNIEnv *env, jclass cls) {
+    (void) env;
     (void) cls;
-    int v[7];
+    int v[EG_STATS_SLOTS];
+    memset(v, 0, sizeof v);
     eg_of_stats(v);
-    jint jv[7] = { v[0], v[1], v[2], v[3], v[4], v[5], v[6] };
-    jintArray a = (*env)->NewIntArray(env, 7);
-    if (a) (*env)->SetIntArrayRegion(env, a, 0, 7, jv);
+    jint jv[EG_STATS_SLOTS];
+    for (int i = 0; i < EG_STATS_SLOTS; i++) jv[i] = v[i];
+    jintArray a = (*env)->NewIntArray(env, EG_STATS_SLOTS);
+    if (a) (*env)->SetIntArrayRegion(env, a, 0, EG_STATS_SLOTS, jv);
     return a;
 }
 
-// 清空计数（切换开关时用，便于真机判断「这一轮有没有拦住」）。
+// native 侧现在读到的「单机开」值（1/0）。切开关后 Java 可以拿它对账：
+// 如果这里一直是 0 而 prefs 里是 true，说明状态没推进 native（push 没生效）。
+JNIEXPORT jint JNICALL
+Java_com_shuilize_elneazh_inj_OfflineGate_nativeOff(JNIEnv *env, jclass cls) {
+    (void) env;
+    (void) cls;
+    return eg_of_is_off();
+}
+
+// 兜底闸状态：1 = 已挂在 EncryptRJ256 上
+JNIEXPORT jint JNICALL
+Java_com_shuilize_elneazh_inj_OfflineGate_nativeEncState(JNIEnv *env, jclass cls) {
+    (void) env;
+    (void) cls;
+    return eg_of_enc_state();
+}
+
 JNIEXPORT jint JNICALL
 Java_com_shuilize_elneazh_inj_OfflineGate_nativeResetStats(JNIEnv *env, jclass cls) {
     (void) env;

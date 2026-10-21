@@ -23,12 +23,19 @@ extern "C" {
 #define EG_TARGET_BUTTON 4
 #define EG_TARGET_HIDE   5
 #define EG_TARGET_MASKS  6
+// 兜底族：Cipher::EncryptRJ256（每个 sns04 请求体的唯一出口）。不需要 il2cpp 按名解析，
+// 用固定偏移挂；单机时直接返回 NULL，让调用方走自己的「加密/发送失败」分支。
+#define EG_TARGET_ENC    7
 
 #define EG_TARGET_MIN    1
-#define EG_TARGET_MAX    6
+#define EG_TARGET_MAX    7
 
-// 统计槽数：已挂 / 入口不创建 / 请求拦截 / 隐藏或收面板 / 遮罩跳过 / 解析失败 / 回调异常
-#define EG_STATS_SLOTS   7
+// 统计槽数：已挂 / 入口不创建 / 请求拦截 / 隐藏或收面板 / 遮罩跳过 / 解析失败 / 回调异常 / 兜底闸
+#define EG_STATS_SLOTS   8
+
+// Cipher::EncryptRJ256(string) 在 libil2cpp.so 里的偏移（base 2.10.7，与名字闸门同一入口）。
+#define EG_ENC_OFFSET    0x18ad7e4u
+#define EG_ENC_PROLOGUE_LEN 8
 
 // 挂一族钩子。names 是若干 "命名空间\t类名\t方法名" 行（'\n' 分隔，'#' 开头为注释）。
 // 返回新挂上的数量；<0 表示整族失败：
@@ -47,13 +54,19 @@ void eg_of_set_state(const char *state);
 void eg_of_set_enabled(int on);
 
 // 统计：out[0]=已挂 out[1]=入口不创建 out[2]=请求拦截 out[3]=隐藏/收面板
-//       out[4]=遮罩跳过 out[5]=解析失败 out[6]=回调异常
+//       out[4]=遮罩跳过 out[5]=解析失败 out[6]=回调异常 out[7]=兜底闸已挂
 void eg_of_stats(int out[EG_STATS_SLOTS]);
 
 void eg_of_reset_stats(void);
 
 // 依赖的 il2cpp API 能 dlsym 到几个（期望 5）
 int eg_of_api_probe(void);
+
+// 兜底闸状态：1 = 已挂在 EncryptRJ256 上，0 = 还没挂，负数 = 挂失败原因
+int eg_of_enc_state(void);
+
+// 现在是不是「单机开」（hook 每次现读同一个值；界面/自检可据此断言）
+int eg_of_is_off(void);
 
 // 只解析不调用：能不能按名字找到 ns::klass::method（ns 传 "*" 表示不限）
 int eg_of_resolvable(const char *ns, const char *klass, const char *method);

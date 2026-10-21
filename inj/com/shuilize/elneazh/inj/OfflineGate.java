@@ -32,6 +32,11 @@ import java.util.concurrent.CountDownLatch;
  *       （游戏里有 {@code OfflineData}/{@code IsOfflineActive}、{@code errorOfflineCheckHttp}）。
  *       <b>不伪造任何服务器回包。</b></li>
  *   <li>{@link #TARGET_MASKS}：遮罩系列。单机时不加遮罩，页面保持可用。</li>
+ *   <li><b>请求出口兜底闸</b>（{@code EG_TARGET_ENC}，native 内部）：挂在
+ *       {@code Cipher::EncryptRJ256} 这个**已经确认生效**的入口上（名字闸门用的同一个）。
+ *       它是每个 sns04 请求体的唯一出口；单机时直接返回 NULL，调用方走它自己的
+ *       「加密/发送失败」分支 —— 请求一个字节也出不了手机，且**不伪造任何业务回包**。
+ *       这条不依赖 il2cpp 按名解析，所以即使上面的方法名对不上，上传/邮箱/登录请求也漏不出去。</li>
  * </ol>
  *
  * <p>为什么必须走 native：游戏的 UI 与网络都在 il2cpp 里，Java 层既反射不到
@@ -54,6 +59,9 @@ final class OfflineGate {
     private static boolean loadTried;
     private static volatile int[] lastResults = new int[0];
     private static volatile boolean installedAny;
+    private static volatile boolean workerRunning;
+    /** 后台安装窗口：从进程起来算，最多等这么久让 libil2cpp 出现。 */
+    private static final long INSTALL_WINDOW_MS = 90_000L;
 
     private OfflineGate() {}
 
@@ -66,6 +74,12 @@ final class OfflineGate {
     private static native int nativePush(String state);
 
     private static native int[] nativeStats();
+
+    /** native 侧现在读到的「单机开」值（1/0），用于切开关后对账。 */
+    private static native int nativeOff();
+
+    /** 兜底闸（EncryptRJ256）状态：1 = 已挂上。请求发不出去的最后一道保证。 */
+    private static native int nativeEncState();
 
     private static native int nativeResetStats();
 
@@ -235,6 +249,7 @@ final class OfflineGate {
         add(b, "AddWebPanel");
         add(b, "AddAccountSettingPanel");
         add(b, "AddAccountInputPanel");
+        add(b, "AddLoginPanel");
         add(b, "AddMigrantPasswordIssueListPanel");
         add(b, "AddReportPanel");
         return b.toString();
@@ -293,6 +308,16 @@ final class OfflineGate {
         add(b, "HttpSystem", "AddHttpQueue");
         add(b, "HttpSystem", "StartHttpQueue");
         add(b, "HttpSystem", "UpdateUserInfoPair");
+        // 真机「仍弹账号输入面板」的直接来源：这些是「发登录/建号请求」的函数，
+        // 名字取自 global-metadata 里 LoginRequest / AccountInputPanel 附近的成员表。
+        // 解析不到就跳过（miss 计数会加一），不影响其它条目。
+        add(b, "LoginRequest", "Request");
+        add(b, "LoginRequest", "Send");
+        add(b, "LoginRequest", "Start");
+        add(b, "AccountInputPanel", "SendButtonClick");
+        add(b, "AccountInputPanel", "LoginButtonClick");
+        add(b, "AccountInputPanel", "createButtonClick");
+        add(b, "AccountInputPanel", "SendLogin");
         return b.toString();
     }
 
@@ -336,11 +361,24 @@ final class OfflineGate {
         if (loaded) return true;
         if (loadTried) return false;
         loadTried = true;
+        // 与名字闸门共用同一个 libelneagate.so。进程里只能有一份：
+        // 这里先请 NameGate 装（它有自己的 assets 解包 + 失败日志），装上了就直接复用。
+        // 早先两边各自解包一份再 System.loadLibrary 同一个名字，谁先谁后都可能让后者拿到
+        // 一个「名字已占用但没真正加载」的状态，闸门就永远不会挂上。
         try {
-            unpack(ctx, LIB);   // 和名字闸门同一套解包，但本类自己带一份，测试环境里不依赖 NameGate
+            if (NameGate.load(ctx)) {
+                loaded = true;
+                Log.i(TAG, "libelneagate.so ready (shared with name gate)");
+                return true;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "name gate load threw: " + t);
+        }
+        try {
+            unpack(ctx, LIB);
             System.loadLibrary(LIB);
             loaded = true;
-            Log.i(TAG, "libelneagate.so loaded (offline gate)");
+            Log.i(TAG, "libelneagate.so loaded (offline gate, own copy)");
         } catch (Throwable t) {
             Log.w(TAG, "libelneagate.so not loaded (offline gate): " + t);
         }
@@ -371,11 +409,50 @@ final class OfflineGate {
     }
 
     static synchronized boolean push(boolean on) {
-        if (!loaded) return false;
+        if (!loaded) {
+            Log.w(TAG, "push(" + on + "): native not loaded yet, state not pushed");
+            return false;
+        }
         try {
-            return nativePush(on ? "1" : "0") != 0;
+            int r = nativePush(on ? "1" : "0");
+            int now = nativeOff();
+            Log.i(TAG, "state pushed: on=" + on + " ok=" + (r != 0) + " nativeOff=" + now
+                    + " enc=" + encState());
+            return r != 0;
         } catch (Throwable t) {
             Log.w(TAG, "push failed: " + t);
+            return false;
+        }
+    }
+
+    /**
+     * 对账：prefs 里的值 vs native 里现读的值。
+     *
+     * <p>真机反馈「单机开着仍然上传/仍弹登录」时，第一步就是看这两个数对不对得上：
+     * prefs=true 而 native=0 说明状态没推到 native（push 没跑 / .so 没装 / native 早退），
+     * 这时闸门一律当「没开」，请求照常出去 —— 正是那批现象。
+     */
+    static boolean stateMatches(Context ctx) {
+        boolean want;
+        try {
+            want = Offline.isOn(ctx);
+        } catch (Throwable t) {
+            return false;
+        }
+        if (!loaded) return !want;            // 没加载：只有「关着」才算对得上
+        try {
+            return (nativeOff() != 0) == want;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 兜底闸（EncryptRJ256）是否挂上。挂上 = 单机时请求体一个字节也出不去。 */
+    static boolean encHooked() {
+        if (!loaded) return false;
+        try {
+            return nativeEncState() != 0;
+        } catch (Throwable t) {
             return false;
         }
     }
@@ -383,17 +460,26 @@ final class OfflineGate {
     // ---------------- 安装 ----------------
 
     /**
-     * 安装六族 hook。放后台线程并最多等 {@code waitMs} 毫秒：il2cpp 比 ContentProvider 起得晚，
-     * 早到的调用会拿不到 API 指针，需要重试。
+     * 安装六族 hook + 兜底闸。返回**立刻**，真正的安装在后台线程里做完。
      *
-     * <p>本方法**绝不抛异常**，也绝不让游戏的启动等太久（最长一次等 {@code waitMs}）。
+     * <p>早先这里等 {@code waitMs} 毫秒后返回，调用方传的是 1ms，结果：
+     * 后台线程还在第一次 {@code nativeInstall} 里（il2cpp 那时还没 dlopen），
+     * {@code lastResults} 全是 0，弹窗里的「原生闸门已挂钩 0 处」就是这么来的。
+     * 现在后台线程一直重试到 libil2cpp 出现为止（最长 {@value #INSTALL_WINDOW_MS}ms），
+     * 每族的结果一出来就写进 {@link #lastResults}，界面刷新时能看到真实数字。
      *
-     * @return 六族合计挂上的方法数；0 或负数表示这次没成（日志里有原因码）
+     * <p>本方法**绝不抛异常**，也绝不让游戏的启动等它。
+     *
+     * @return 上次已知的合计挂载数（后台还在装时可能是 0）
      */
     static int install(final Context ctx, int waitMs) {
         if (!load(ctx)) return -100;
         push(ctx);
-        final CountDownLatch done = new CountDownLatch(1);
+        if (workerRunning) {
+            Log.i(TAG, "install already running; push only");
+            return total();
+        }
+        workerRunning = true;
         Thread t = new Thread(new Runnable() {
             @Override public void run() {
                 try {
@@ -401,45 +487,60 @@ final class OfflineGate {
                 } catch (Throwable e) {
                     Log.w(TAG, "install failed", e);
                 } finally {
-                    done.countDown();
+                    workerRunning = false;
                 }
             }
         }, "ElneaOffline-install");
         t.setDaemon(true);
         t.start();
-        try {
-            done.await(waitMs, java.util.concurrent.TimeUnit.MILLISECONDS);
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
-        } catch (Throwable ignored) {
-        }
-        int total = 0;
-        for (int r : lastResults) total += Math.max(0, r);
-        Log.i(TAG, "install done: " + describe());
-        return total;
+        Log.i(TAG, "install started in background (waitMs=" + waitMs + " ignored)");
+        return 0;
+    }
+
+    /** 应用回到前台时再补一次：进程里可能已经装过，这里只补没挂上的族。 */
+    static void ensureInstalled(final Context ctx) {
+        if (ctx == null) return;
+        push(ctx);
+        if (workerRunning) return;
+        install(ctx, 0);
     }
 
     /** 逐个 target 装，每个都单独 try/catch：一族失败不影响其它族。 */
     private static void installAll() {
         int[][] gs = groups();
         int[] results = new int[gs.length];
-        boolean any = false;
+        // 第一轮：等 libil2cpp 出现（最长 INSTALL_WINDOW_MS）。只要有一族挂上就说明运行时起来了。
+        long deadline = System.currentTimeMillis() + INSTALL_WINDOW_MS;
+        boolean api = false;
+        while (System.currentTimeMillis() < deadline && !api) {
+            api = probe() >= 5;
+            if (!api) sleep(500);
+        }
+        Log.i(TAG, "il2cpp api probe=" + probe() + "/5 after wait");
         for (int i = 0; i < gs.length; i++) {
             int target = gs[i][0];
             try {
                 int n = installRetry(target, table(target));
                 results[i] = n;
-                if (n > 0) any = true;
+                lastResults = results.clone();      // 一族完成就对外可见
+                Log.i(TAG, "family " + target + " -> " + n);
             } catch (Throwable t) {
                 results[i] = -102;
                 Log.w(TAG, "install target " + target + " threw: " + t);
             }
         }
         lastResults = results;
-        installedAny = any;
+        installedAny = total() > 0;
+        Log.i(TAG, "install done: " + describe());
     }
 
-    /** 反复重试直到拿到正的挂载数（说明 il2cpp 已经起来、名字也解析上了）。 */
+    /**
+     * 反复重试直到不再返回 -1（il2cpp 还没可见）。
+     *
+     * <p>注意：<b>0 也是终态</b>。0 的意思是「il2cpp 起来了，但这一族的名字一个都没解析到」，
+     * 再等下去也不会变；早先这里把 0 当成成功立即返回，其它族也就跟着跑完了，
+     * 但日志里看不出「解析到了几次」，所以 {@link #describe()} 现在会把 miss 一起打出来。
+     */
     private static int installRetry(int target, String table) {
         if (table == null || table.isEmpty()) return 0;
         int last = Integer.MIN_VALUE;
@@ -450,16 +551,19 @@ final class OfflineGate {
                 Log.w(TAG, "nativeInstall(" + target + ") threw: " + t);
                 return -102;
             }
-            // 负数里只有 -1（il2cpp 还没可见）值得重试；-4/-5 是永久性的
+            // 负数里只有 -1（il2cpp 还没可见）值得重试；-2/-3/-4/-5 是永久性的
             if (last != -1) return last;
-            try {
-                Thread.sleep(500);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return last;
-            }
+            sleep(500);
         }
         return last;
+    }
+
+    private static void sleep(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /** 卸掉所有 hook（正常路径靠开关值就够，不必卸）。 */
@@ -582,19 +686,55 @@ final class OfflineGate {
         parts.add("mask=" + s[4]);
         parts.add("miss=" + s[5]);
         parts.add("fault=" + s[6]);
+        parts.add("enc=" + (s.length > 7 ? s[7] : 0));
+        parts.add("off=" + safeOff());
+        parts.add("families=" + java.util.Arrays.toString(lastResults));
         return "native: " + parts;
     }
 
-    /** 给 SelfCheck / 支援弹窗用的一句话现状（不含任何路径与账号信息）。 */
+    private static int safeOff() {
+        try {
+            return loaded ? nativeOff() : -1;
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    private static int encState() {
+        try {
+            return loaded ? nativeEncState() : -1;
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /** 合计挂载数（六族之和）。 */
+    static int total() {
+        int n = 0;
+        for (int r : lastResults) n += Math.max(0, r);
+        return n;
+    }
+
+    /**
+     * 给 SelfCheck / 支援弹窗用的一句话现状（不含任何路径与账号信息）。
+     *
+     * <p>「生效」的判据不是「挂了多少个」，而是**兜底闸在不在**：请求体最后一道出口是
+     * {@code Cipher::EncryptRJ256}，只要它挂上了，单机时任何 sns04 请求都发不出去。
+     */
     static String summary() {
         if (!loaded) {
             return "原生闸门未加载（仅 Java 层拦截生效）";
         }
         int[] s = stats();
         if (s == null) return "原生闸门未就绪";
-        if (s[0] <= 0) return "原生闸门未挂上（il2cpp 未就绪）";
-        return "原生闸门已挂钩 " + s[0] + " 处：入口隐藏 " + s[1] + " 次、挡请求 " + s[2]
-                + " 次、界面隐藏 " + s[3] + " 次";
+        boolean enc = s.length > 7 && s[7] != 0;
+        if (enc) {
+            return "单机闸门已生效：请求出口已封（EncryptRJ256），另挂钩 " + s[0] + " 处入口";
+        }
+        if (s[0] <= 0) {
+            return "原生闸门未挂上（il2cpp 未就绪；请求出口未封）";
+        }
+        return "已挂钩 " + s[0] + " 处，但请求出口（EncryptRJ256）未挂上";
     }
 
     /** 每一族的挂载结果（自检用，顺序与 {@link #groups()} 一致）。 */

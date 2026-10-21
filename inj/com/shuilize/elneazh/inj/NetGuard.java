@@ -33,7 +33,10 @@ final class NetGuard {
     private NetGuard() {}
 
     static synchronized boolean install(Context ctx) {
-        if (ctx != null) APP = ctx.getApplicationContext();
+        if (ctx != null) {
+            APP = ctx.getApplicationContext();
+            try { NameFix.load(ctx); } catch (Throwable t) { Log.w(TAG, "names load", t); }
+        }
         if (installed) return true;
         // Java 层的 UnityWebRequest 导出：本机 APK 里没有 com.unity3d.player.UnityWebRequest，
         // 传输走 libunity.so 的 native curl，Java 侧没有可替换的入口（见 HANDOFF「网络栈」）。
@@ -89,17 +92,19 @@ final class NetGuard {
 
     // ---------------------------------------------------------------- 纯函数（离线可测）
 
-    /** 存档区块清洗：中文名 → 固定拼音（同一中文名恒定同一结果，别名表优先）。 */
+    /** 存档区块清洗：NPC 中文名 → 英文原名，玩家自定义中文名 → 固定拼音（同一中文名恒定同一结果）。 */
     static String blobs(String plain) {
         if (plain == null || !Pinyin.hasHan(plain)) return plain;
         final Context ctx = APP;
-        return UploadNames.filterJsonBlobs(plain, new UploadNames.Mapper() {
+        String out = UploadNames.filterJsonBlobs(plain, new UploadNames.Mapper() {
             @Override public String ascii(String zh) {
                 String a = ctx == null ? null : NameFix.ascii(ctx, zh);
                 if (a == null) a = Pinyin.tidy(Pinyin.toAscii(zh));   // 词表没就绪时的兜底，同样是纯函数
                 return a;
             }
         });
+        NameFix.warnLeftover(out, "ws_* upload body");   // 只记 WARN，不阻断
+        return out;
     }
 
     /**

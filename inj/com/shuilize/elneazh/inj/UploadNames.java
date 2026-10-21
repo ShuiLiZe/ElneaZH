@@ -14,9 +14,10 @@ package com.shuilize.elneazh.inj;
  * <p>安全边界（宁可不动，也不写坏存档）：
  * <ul>
  *   <li>只改「含中文」的槽；没有中文的槽原样拷贝，其它字节（id、25 字节外观、link、噪声串）一个不动。</li>
- *   <li>拼音替换后长度必须 ≤ 255 字节，否则这条保持原样（绝不截断名字）。</li>
+ *   <li>名字槽长度上限 255（长度字节的极限）；替换后长度字节同步改写，允许变长，超过 255 才放弃这一条
+ *       （绝不截断名字；超限时调用方退到逐字拼音，见 {@code NameFix.filterNames}）。</li>
  *   <li>zlib 解不开 / base64 非法 / 结构对不上 —— 一律原样返回原串。</li>
- *   <li>单个 ws_* 值重新打包后不得超过原值长度（只许变短或等长），保证外层 JSON 不会撑大。</li>
+ *   <li>单个 ws_* 值重新打包后允许变长，但超过 4 倍 + 4KB 视为解错，返回原串。</li>
  *   <li>全程纯函数（映射由调用方传入 {@link Mapper}），同一份算法在电脑上由
  *       tools/verify_upload_names.py 离线验过。</li>
  * </ul>
@@ -167,7 +168,8 @@ final class UploadNames {
             byte[] repacked = deflate(fixed);
             if (repacked == null) return b64;
             String out = Base64.encode(repacked);
-            if (out.length() > b64.length()) return b64;      // 只许变短
+            // 允许变长（拼音比汉字长），但给个上限：超过 4 倍原值说明结构解错了，宁可不动。
+            if (out.length() > b64.length() * 4L + 4096) return b64;
             return out;
         } catch (Throwable t) {
             return b64;
@@ -177,7 +179,9 @@ final class UploadNames {
     // ---------------------------------------------------------------- 存档二进制层（纯函数）
 
     /**
-     * 扫一遍存档二进制，把所有「0x01 + 长度 + UTF-8」且含中文的名字槽换成拼音（长度字节同步改写）。
+     * 扫一遍存档二进制，把所有「0x01 + 长度 + UTF-8」且含中文的名字槽换成 ASCII（长度字节同步改写）。
+     * 槽长上限按 255 算（长度字节的极限），所以长名字不会漏；替换后可以变长。
+     * 映射由 {@code NameFix} 提供：NPC 中文名换回英文原名，玩家自定义名换拼音。
      *
      * @return 改过的数组；无变化时返回**同一个对象**
      */
@@ -187,7 +191,7 @@ final class UploadNames {
         int i = 0;
         while (i < raw.length) {
             byte[] src = cur == null ? raw : cur;
-            int len = slotLen(src, i);
+            int len = slotLen(src, i, 255);
             if (len < 0) { i++; continue; }
             String name;
             try {
@@ -221,10 +225,22 @@ final class UploadNames {
 
     /** i 处若是一个合法名字槽，返回它的长度；否则 -1。 */
     static int slotLen(byte[] b, int i) {
+        return slotLen(b, i, 64);
+    }
+
+    /**
+     * 同上，但允许名字最长 {@code maxLen} 字节（1..255）。
+     *
+     * <p>为什么要有上限参数：中文名换拼音后字节数会变长（一个汉字 3 字节 → 拼音可到 4 倍长），
+     * 放宽到 255（长度字节的极限）才能不把长名字漏掉；调用方仍需自己校验结构。
+     */
+    static int slotLen(byte[] b, int i, int maxLen) {
         if (b == null || i + 2 > b.length) return -1;
         if ((b[i] & 0xFF) != 0x01) return -1;
         int len = b[i + 1] & 0xFF;
-        if (len < 1 || len > 64 || i + 2 + len > b.length) return -1;
+        if (maxLen < 1) maxLen = 1;
+        if (maxLen > 255) maxLen = 255;
+        if (len < 1 || len > maxLen || i + 2 + len > b.length) return -1;
         for (int k = i + 2; k < i + 2 + len; k++) {
             int v = b[k] & 0xFF;
             if (v < 0x20 || v == 0x7F) return -1;

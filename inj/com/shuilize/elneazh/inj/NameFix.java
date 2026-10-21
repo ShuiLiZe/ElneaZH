@@ -145,6 +145,80 @@ final class NameFix {
     // ---------------- 上传前的清洗 ----------------
 
     /**
+     * 存档区块（ws_profiles / ws_familys / ws_*）里名字槽的清洗：中文名换成上传用的 ASCII。
+     *
+     * <p>与 {@link #sanitize} 的区别：这里知道「这一槽是名字」，所以优先按整词查表 ——
+     * NPC 名（names.tsv 里译过的人名）换回<b>英文原名</b>，与服务器上原本就有的名字一致；
+     * 查不到表的（玩家自己起的中文名）才逐字转拼音。
+     *
+     * <p>长度：{@code slotLen} 允许 1..255，替换后长度可以变长（拼音比汉字更多字节），
+     * 长度字节同步改写；超过 255 才放弃这一条（原样保留，绝不截断）。
+     *
+     * @return 改过的数组；无变化时返回**同一个对象**
+     */
+    static byte[] filterNames(Context ctx, byte[] raw, int[] changes) {
+        if (raw == null || raw.length < 3) return raw;
+        byte[] cur = null;
+        int n = 0;
+        int i = 0;
+        while (i < raw.length) {
+            byte[] src = cur == null ? raw : cur;
+            int len = UploadNames.slotLen(src, i, 255);
+            if (len < 0) { i++; continue; }
+            String name;
+            try {
+                name = new String(src, i + 2, len, "UTF-8");
+            } catch (Throwable t) {
+                i++;
+                continue;
+            }
+            if (!Pinyin.hasHan(name)) { i += 2 + len; continue; }
+            String ascii;
+            synchronized (NameFix.class) { ascii = ALIAS_ZH2ASCII.get(name); }
+            if (ascii == null) ascii = ZH2EN.get(name);          // NPC：换回英文原名
+            if (ascii == null) ascii = ascii(ctx, name);         // 玩家自定义：拼音
+            if (ascii == null || ascii.isEmpty() || Pinyin.hasNonAscii(ascii)) { i += 2 + len; continue; }
+            byte[] nb;
+            try {
+                nb = ascii.getBytes("UTF-8");
+            } catch (Throwable t) {
+                i += 2 + len;
+                continue;
+            }
+            if (nb.length < 1 || nb.length > 255) { i += 2 + len; continue; }   // 超限：原样保留
+            byte[] dst = new byte[src.length - len + nb.length];
+            System.arraycopy(src, 0, dst, 0, i);
+            dst[i] = 0x01;
+            dst[i + 1] = (byte) nb.length;
+            System.arraycopy(nb, 0, dst, i + 2, nb.length);
+            System.arraycopy(src, i + 2 + len, dst, i + 2 + nb.length, src.length - (i + 2 + len));
+            cur = dst;
+            n++;
+            i += 2 + nb.length;
+        }
+        if (changes != null && changes.length > 0) changes[0] = n;
+        return cur == null ? raw : cur;
+    }
+
+    /**
+     * 洗完一遍后，明文里若还有汉字，按「不阻断」原则只记一条 WARN（用户要求：不阻断请求）。
+     *
+     * @return 剩下的汉字个数
+     */
+    static int warnLeftover(String plain, String where) {
+        if (plain == null) return 0;
+        int n = 0;
+        for (int i = 0; i < plain.length(); ) {
+            int cp = plain.codePointAt(i);
+            if (Pinyin.isHan(cp)) n++;
+            i += Character.charCount(cp);
+        }
+        if (n > 0) Log.w("ElneaGate", "WARN name filter left " + n + " CJK char(s) in " + where
+                + " (not blocking the request)");
+        return n;
+    }
+
+    /**
      * 明文里还有汉字就替换成 ASCII：先 names.tsv 的中文名（整词，最长优先，换回英文原文），
      * 再玩家别名，最后逐字拼音。返回 ASCII 串；无汉字时原样返回同一个对象（调用方可用引用比较跳过）。
      */

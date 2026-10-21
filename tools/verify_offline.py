@@ -247,7 +247,8 @@ check("connectWWW" in og, "请求族含 HttpSystem.connectWWW")
 check("AssetBundleManager" not in og and "downloadAndCache" not in og,
       "资源下载路径不在拦截名单里（边玩边下必须可用）")
 check(og.count("try") >= 10, "OfflineGate 处处 try/catch（%d 处）" % og.count("try"))
-check("done.await(waitMs" in og, "安装不等太久（最多等 waitMs，绝不拖住启动）")
+check("install started in background" in og,
+      "安装立即返回、真装在后台（绝不拖住启动）")
 check("countLines" in og, "名单行数可数（测试/自检用）")
 check("nativeResetStats" in og, "切开关时能清零计数（真机看日志更直观）")
 
@@ -302,6 +303,58 @@ if eg:
     # 不伪造回包：native 侧不许出现任何组包/造响应对象的逻辑
     for bad in ("il2cpp_object_new", "il2cpp_string_new(\"{"):
         check(bad not in eg, "native 不伪造服务器回包（无 %s）" % bad)
+
+# ---- 兜底闸（请求出口兜底）：这一段的护栏意义是「即使 il2cpp 按名解析全对不上，
+# 单机时请求也发不出去」。所以钉死三件事：挂在加密入口上、开关关着时原样转发、不伪造回包。
+
+check("EG_TARGET_ENC" in og, "OfflineGate/头文件里有请求出口兜底族 EG_TARGET_ENC")
+check("nativeEncState" in og, "OfflineGate 能查兜底闸是否挂上")
+check("nativeOff" in og, "OfflineGate 能查 native 现读的开关值（对账用）")
+check("stateMatches" in og, "OfflineGate 有 prefs vs native 对账函数")
+check("encHooked" in og, "OfflineGate 有 encHooked()")
+if eg:
+    check("EG_TARGET_ENC" in eg, "native dispatch 有 EG_TARGET_ENC 分支")
+    check("eg_install_enc_fallback" in eg, "native 有兜底闸安装函数")
+    check("EG_ENC_OFFSET" in eg, "兜底闸用固定偏移（不依赖按名解析）")
+    check("eg_verify_enc" in eg, "兜底闸挂之前校验入口序言（不认识就不挂）")
+    check("g_enc_orig" in eg and "eg_enc_hook" in eg, "兜底闸有自己的 trampoline 与回调")
+    check("return g_enc_orig ? g_enc_orig(a0) : NULL;" in eg,
+          "开关关着时兜底闸原样转发（关掉立刻恢复联网）")
+    check("g_enc_hooked = 1;" in eg, "兜底闸挂上后置位")
+    # 兜底闸不许伪造回包：它只能返回 NULL，让调用方自己走失败分支
+    i = eg.index("static void *eg_enc_hook(void *a0)")
+    hook_body = eg[i: eg.index("\n}\n", i)]
+    check("il2cpp" not in hook_body and "HTTP" not in hook_body,
+          "兜底闸回调里不碰 il2cpp / 不组 HTTP 回包（只拒绝加密）")
+    check("return NULL;" in hook_body, "单机时兜底闸返回 NULL（不发货）")
+
+hdr = ""
+fp = os.path.join(ROOT, "native/elneagate/eg_offline.h")
+if os.path.isfile(fp):
+    hdr = io.open(fp, encoding="utf-8").read()
+check("EG_TARGET_ENC    7" in hdr, "头文件 EG_TARGET_ENC = 7")
+check("EG_TARGET_MAX    7" in hdr, "头文件 EG_TARGET_MAX = 7（兜底族在范围内）")
+check("EG_STATS_SLOTS   8" in hdr, "头文件统计槽 8 个（含兜底闸状态）")
+
+# Java 侧：安装必须在后台重试到 il2cpp 出现，而不是等 1ms 就返回
+check("INSTALL_WINDOW_MS" in og, "安装窗口是长窗口（不是等 1ms）")
+check("workerRunning" in og, "安装有后台单实例保护（不会重复装）")
+i = og.index("static int install(final Context ctx, int waitMs)") if "static int install(final Context ctx, int waitMs)" in og else -1
+check(i >= 0, "install(Context,int) 签名存在")
+if i >= 0:
+    seg = og[i: i + 900]
+    check("Thread" in seg, "install 立即返回，真装在后台线程")
+check("name gate load threw" in og or "NameGate.load(ctx)" in og,
+      "先复用 NameGate 已加载的 .so（避免二次 System.load 抢名字）")
+check("installRetry" in og, "每族都带重试（il2cpp 未就绪就再等）")
+check("lastResults = results.clone()" in og, "每族结果一出来就对外可见（界面能看到真实数字）")
+
+zh3 = read("ZhInit.java")
+check("Offline.isOn" in zh3 and "stateMatch" in zh3, "启动时打一条 prefs/native 对账日志")
+
+sup4 = read("Support.java")
+check("stateMatches" in sup4, "Support 切开关后对账")
+check("ensureInstalled" in sup4, "Support 对账失败时补装闸门")
 
 egc = ""
 fp = os.path.join(ROOT, "native/elneagate/elneagate.c")

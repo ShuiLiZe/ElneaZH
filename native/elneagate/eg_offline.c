@@ -115,6 +115,29 @@ static int eg_api_load(void) {
     return 1;
 }
 
+// libil2cpp.so 的基址（dl_iterate_phdr；找不到返回 NULL）
+static void *eg_find_base(void) {
+    void *base = dlopen("libil2cpp.so", RTLD_NOW | RTLD_NOLOAD);
+    if (base) return base;
+    return NULL;
+}
+
+// 校验 EncryptRJ256 入口的 8 字节序言。1 = 完全一致，0 = 不认识（不挂），
+// -1 = 该地址根本不在任何可读映射里（只在内存里读 8 字节，绝不写）。
+static int eg_verify_enc(void *addr) {
+    static const unsigned char prologue[EG_ENC_PROLOGUE_LEN] = {
+        0xfe, 0x0f, 0x1d, 0xf8,   // str  x30, [sp, #-0x30]!
+        0xf6, 0x57, 0x01, 0xa9,   // stp  x22, x21, [sp, #0x10]
+    };
+    if (!addr) return -1;
+    Dl_info info;
+    if (!dladdr(addr, &info) || !info.dli_fbase) return -1;
+    const char *name = info.dli_fname ? info.dli_fname : "";
+    size_t l = strlen(name);
+    if (l < 12 || strcmp(name + l - 12, "libil2cpp.so") != 0) return -1;
+    return memcmp(addr, prologue, sizeof prologue) == 0 ? 1 : 0;
+}
+
 // 运行时探测：依赖的核心 API 里能取到几个（给 SelfCheck 用，期望 5）
 int eg_of_api_probe(void) {
     const char *names[] = {
@@ -210,6 +233,14 @@ static eg_hook_entry g_hooks[EG_MAX];
 static void *eg_panel_last;
 static int g_hook_count;
 static pthread_mutex_t g_install_lock = PTHREAD_MUTEX_INITIALIZER;
+
+// 兜底闸：直接挂在**已确认生效**的 Cipher::EncryptRJ256 上（与名字闸门同一个入口）。
+// 它是每一个 sns04 请求体的唯一出口；单机时在这里返回 NULL，调用方会走它自己的
+// 「加密/发送失败」分支（不伪造任何业务回包，也不建立任何连接）。
+// 这条不依赖 il2cpp 按名解析，所以即便 HttpSystem 的方法名对不上，请求也出不了手机。
+typedef void *(*eg_enc_fn)(void *);
+static eg_enc_fn g_enc_orig;
+static volatile int g_enc_hooked;
 
 static volatile int g_stats_resolve;   // 已挂数量
 static volatile int g_stats_panel;     // 入口不创建（PANEL+HTTP 挡住次数）
@@ -369,11 +400,33 @@ static void *eg_dispatch(eg_hook_entry *e, void *a0, void *a1, void *a2, void *a
             }
             break;
 
+        case EG_TARGET_ENC:
+            // 兜底族：入口是 Cipher::EncryptRJ256（每个请求体的唯一出口）。
+            // 单机时不加密、不发送，返回 NULL —— 调用方走它自己的「加密/发送失败」分支。
+            if (off) {
+                g_stats_http++;
+                LOGI("offline: request body refused at %s::%s (nothing sent)", e->klass, e->method);
+                return NULL;
+            }
+            break;
+
         default:
             break;
     }
     if (!orig) return NULL;
     return orig(a0, a1, a2, a3, a4, a5, a6, a7);
+}
+
+// 兜底入口（挂 EncryptRJ256）。与 eg_dispatch 分开写：这条路径在「开关关着」时必须
+// 原样转发，否则关掉单机后所有请求都会失败。
+__attribute__((unused))
+static void *eg_enc_hook(void *a0) {
+    if (eg_is_off()) {
+        g_stats_http++;
+        LOGI("offline: request body refused at EncryptRJ256 (nothing sent)");
+        return NULL;
+    }
+    return g_enc_orig ? g_enc_orig(a0) : NULL;
 }
 
 #if defined(__aarch64__)
@@ -476,12 +529,37 @@ static int eg_resolve_line(eg_hook_entry *e, const char *line) {
     return 1;
 }
 
+// 兜底闸：把 Cipher::EncryptRJ256 挂上（与名字闸门同一个偏移，各自独立一份 trampoline）。
+// 不依赖 il2cpp 按名解析 —— 即使 HttpSystem 的方法名对不上，请求体也出不了手机。
+static int eg_install_enc_fallback(void) {
+    if (g_enc_hooked) return 1;
+    void *base = eg_find_base();
+    if (!base) return -1;
+    void *target = (void *) ((uintptr_t) base + EG_ENC_OFFSET);
+    int ok = eg_verify_enc(target);
+    if (ok <= 0) {
+        LOGW("encrypt prologue mismatch at %p+0x%x; fallback hook skipped", base, EG_ENC_OFFSET);
+        return -3;
+    }
+#if defined(__aarch64__)
+    A64HookFunction(target, (void *) eg_enc_hook, (void **) &g_enc_orig);
+    if (!g_enc_orig) { LOGW("fallback hook engine returned no trampoline"); return -2; }
+    g_enc_hooked = 1;
+    LOGI("fallback hooked EncryptRJ256 @ %p+0x%x", base, EG_ENC_OFFSET);
+    return 1;
+#else
+    return -4;
+#endif
+}
+
 int eg_of_install(int target, const char *names) {
     if (target < EG_TARGET_MIN || target > EG_TARGET_MAX) return -5;
     pthread_mutex_lock(&g_install_lock);
+    // 兜底闸优先：只要 libil2cpp 在内存里就能挂，不等 il2cpp API。
+    int enc = eg_install_enc_fallback();
     if (!eg_api_load()) {
         pthread_mutex_unlock(&g_install_lock);
-        LOGW("il2cpp API not visible yet (libil2cpp not loaded?); nothing hooked");
+        LOGW("il2cpp API not visible yet (libil2cpp not loaded?); fallback=%d, will retry", enc);
         return -1;
     }
 #if !defined(__aarch64__)
@@ -535,14 +613,24 @@ int eg_of_install(int target, const char *names) {
     }
     int added = g_hook_count - before;
     pthread_mutex_unlock(&g_install_lock);
-    LOGI("install: target=%d hooked %d, skipped %d (total hooked %d)",
-         target, added, skipped, g_hook_count);
+    LOGI("install: target=%d hooked %d, skipped %d (total hooked %d, fallback=%d, off=%d)",
+         target, added, skipped, g_hook_count, enc, eg_is_off());
+    for (int i = before; i < g_hook_count; i++) {
+        LOGI("  hooked[%d] kind=%d %s::%s @ %p", i, g_hooks[i].target_kind,
+             g_hooks[i].klass, g_hooks[i].method, g_hooks[i].target);
+    }
     return added;
 }
 
 int eg_of_uninstall(void) {
     pthread_mutex_lock(&g_install_lock);
     int n = 0;
+    if (g_enc_hooked && g_enc_orig) {
+        A64HookFunction((void *) ((uintptr_t) eg_find_base() + EG_ENC_OFFSET),
+                        (void *) g_enc_orig, NULL);
+        g_enc_hooked = 0;
+        n++;
+    }
 #if defined(__aarch64__)
     for (int i = 0; i < g_hook_count; i++) {
         if (g_hooks[i].installed && g_hooks[i].target) {
@@ -566,6 +654,7 @@ void eg_of_stats(int out[EG_STATS_SLOTS]) {
     out[4] = g_stats_wait;
     out[5] = g_stats_skipped;
     out[6] = g_stats_fault;
+    out[7] = g_enc_hooked;       // 兜底闸（EncryptRJ256）是否挂上
 }
 
 void eg_of_reset_stats(void) {
@@ -584,6 +673,14 @@ int eg_of_resolvable(const char *ns, const char *klass, const char *method) {
     Il2CppClass *c = eg_find_class(ns && ns[0] ? ns : "*", klass);
     if (!c) return 0;
     return eg_resolve(c, method, -1) != NULL;
+}
+
+int eg_of_enc_state(void) {
+    return g_enc_hooked ? 1 : 0;
+}
+
+int eg_of_is_off(void) {
+    return eg_is_off();
 }
 
 // 自检用：某个类现在能不能看到（不调用任何方法）

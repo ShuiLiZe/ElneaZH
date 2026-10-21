@@ -29,7 +29,8 @@ import json
 import sys
 import zlib
 
-# Chinese name -> fixed pinyin (first letter upper case, no tones, no spaces).
+# Chinese name -> uploaded ASCII.
+# player-typed names: fixed pinyin (first letter upper case, no tones, no spaces).
 # Same name must always give the same ASCII name, otherwise the server sees a rename.
 MAP = {
     "凯恩": "KaiEn",
@@ -37,6 +38,13 @@ MAP = {
     "约尔格": "YueErGe",
     "铁蛋": "TieDan",
     "王小明": "WangXiaoMing",
+    # NPC names that are translated in the client: they go back to the ORIGINAL ENGLISH name,
+    # which is what the server already has for that character (see tools/names_map.py / names.tsv).
+    "塞尔吉": "Serge",
+    "爱德华": "Edward",
+    "鲁本": "Ruben",
+    "卡洛斯": "Carlos",
+    "伊戈尔": "Igor",
 }
 
 B64_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
@@ -48,12 +56,15 @@ def has_han(text):
 
 # ------------------------------------------------------------------ binary layer
 
-def slot_ok(raw, i):
-    """Return (length, name) if a valid `0x01 + len + UTF-8` name slot starts at i, else None."""
+def slot_ok(raw, i, maxlen=255):
+    """Return (length, name) if a valid `0x01 + len + UTF-8` name slot starts at i, else None.
+
+    Length byte max is 255 (that is the limit of the length field); replacement may grow the slot.
+    """
     if i + 2 > len(raw) or raw[i] != 0x01:
         return None
     ln = raw[i + 1]
-    if ln < 1 or ln > 64 or i + 2 + ln > len(raw):
+    if ln < 1 or ln > min(maxlen, 255) or i + 2 + ln > len(raw):
         return None
     chunk = raw[i + 2:i + 2 + ln]
     if any(b < 0x20 or b == 0x7F for b in chunk):
@@ -129,7 +140,8 @@ def filter_one(b64):
         return b64
     repacked = zlib.compress(fixed, 9)
     out = base64.b64encode(repacked).decode()
-    return out if len(out) <= len(b64) else b64
+    # pinyin is LONGER than the hanzi it replaces, so growth is allowed (bounded sanity check only)
+    return out if len(out) <= len(b64) * 4 + 4096 else b64
 
 
 # ------------------------------------------------------------------ JSON layer
@@ -307,6 +319,8 @@ def main(argv):
             i += 1
         return bytes(s)
 
+    # The *byte shape* must be identical: every non-slot byte in place, and the same number of slots
+    # in the same order. (Slot payloads may differ in length - pinyin is longer than the hanzi.)
     check("all non-name bytes preserved", skeleton(raw) == skeleton(fixed),
           "%d bytes" % len(skeleton(raw)))
     for k in (1, 2, 3, 4):
@@ -331,12 +345,13 @@ def main(argv):
     check("base64(zlib) value changed", b64b != b64)
     check("zlib round trip == filtered bytes",
           zlib.decompress(base64.b64decode(b64b)) == fixed, "%d bytes" % len(fixed))
-    check("repacked value not longer", len(b64b) <= len(b64), "%d -> %d" % (len(b64), len(b64b)))
+    check("repacked value allowed to grow (pinyin is longer than hanzi)", True,
+          "%d -> %d" % (len(b64), len(b64b)))
+    check("repacked value still sane (< 4x + 4KB)", len(b64b) <= len(b64) * 4 + 4096)
 
     body = savedata_body({"ws_profiles": raw, "ws_familys": sample_familys()})
     new_body, hits = filter_json_blobs(body)
     check("both ws_* values rewritten", hits == 2, "hits=%d" % hits)
-    check("body not longer", len(new_body) <= len(body), "%d -> %d" % (len(body), len(new_body)))
     try:
         parsed = json.loads(new_body)
         savedata2 = json.loads(parsed["savedata"])
@@ -350,7 +365,7 @@ def main(argv):
     except Exception as e:  # noqa: BLE001
         check("new body still parses", False, repr(e))
 
-    # replacement that would be > 255 bytes must be refused
+    # replacement that would be > 255 bytes must be refused (255 is the length-field limit)
     long_name = bytes([0x01, 63]) + ("长" * 21).encode("utf-8")     # 63 bytes, valid UTF-8
     over_map = {"长" * 21: "A" * 300}                               # 300 > 255
     kept, ch = filter_names(long_name, over_map)
@@ -358,6 +373,41 @@ def main(argv):
     shorter_map = {"长" * 21: "A" * 10}
     kept2, ch2 = filter_names(long_name, shorter_map)
     check("short replacement applied", ch2 == 1 and kept2 == bytes([0x01, 10]) + b"A" * 10)
+
+    # --- long names: the slot may GROW (a hanzi is 3 bytes, its pinyin up to ~4x that) ---
+    # 20 hanzi = 60 bytes; with 64-byte slot cap it was silently skipped before this fix.
+    big = "王" * 20
+    grown_map = {big: "Wang" * 20}                                  # 80 bytes > 60
+    grown, chg = filter_names(bytes([0x01, 60]) + big.encode("utf-8"), grown_map)
+    check("long name slot still recognised (>64 bytes)",
+          chg == 1 and grown == bytes([0x01, 80]) + b"Wang" * 20,
+          "len byte %d" % (grown[1] if grown[:1] == b"\x01" else -1))
+    check("long name length byte == new utf-8 byte count", grown[1] == len(("Wang" * 20).encode("utf-8")))
+    # a 254-byte slot is still a valid slot (limit is the length field, 255)
+    near = "李" * 84                                                # 252 bytes
+    near_slot = bytes([0x01, 252]) + near.encode("utf-8")
+    check("254/255-byte slot recognised", slot_ok(near_slot, 0) is not None)
+    # but growth past 255 is refused, slot kept byte-for-byte
+    huge_map = {near: "A" * 300}
+    hkept, hch = filter_names(near_slot, huge_map)
+    check("growth past 255 refused, slot kept as-is", hch == 0 and hkept == near_slot)
+
+    # --- NPC names go back to the ORIGINAL ENGLISH name, not to pinyin ---
+    npc = bytes([0x01]) + bytes([len("塞尔吉".encode("utf-8"))]) + "塞尔吉".encode("utf-8")
+    npc_fixed, npc_ch = filter_names(npc)
+    check("NPC Chinese name -> original English (Serge)",
+          npc_ch == 1 and npc_fixed == slot("Serge"), npc_fixed.hex())
+    check("NPC name is NOT pinyin", slot("SerGe") not in npc_fixed)
+    # player-typed name is not in names.tsv -> pinyin path
+    ply = bytes([0x01]) + bytes([len("铁蛋".encode("utf-8"))]) + "铁蛋".encode("utf-8")
+    ply_fixed, ply_ch = filter_names(ply)
+    check("player name -> pinyin (TieDan)", ply_ch == 1 and ply_fixed == slot("TieDan"))
+
+    # --- non-blocking: a name the mapper cannot convert is left alone (caller only logs WARN) ---
+    unknown = "𠀀𠀁"                                                # beyond the BMP, not in any table
+    unk = bytes([0x01]) + bytes([len(unknown.encode("utf-8"))]) + unknown.encode("utf-8")
+    ukept, uch = filter_names(unk, {})
+    check("unknown name untouched, no crash", uch == 0 and ukept == unk)
 
     check("bad base64 unchanged", filter_one("!!!!not-base64!!!!") == "!!!!not-base64!!!!")
     nonz = base64.b64encode(b"plain text, not zlib").decode()

@@ -253,6 +253,14 @@ final class Support {
                     try {
                         OfflineGate.push(next);
                         OfflineGate.resetStats();
+                        // 对账：prefs 与 native 现读值必须一致。不一致 = 请求还会出去，
+                        // 这里立刻再补一次 install（.so 可能刚刚才装好）。
+                        if (!OfflineGate.stateMatches(a)) {
+                            Log.w(TAG, "offline state mismatch after push; reinstalling gate");
+                            OfflineGate.ensureInstalled(a);
+                            OfflineGate.push(next);
+                        }
+                        Log.i(TAG, "offline toggle -> " + next + " | " + OfflineGate.describe());
                     } catch (Throwable t) {
                         Log.w(TAG, "offline gate push", t);
                     }
