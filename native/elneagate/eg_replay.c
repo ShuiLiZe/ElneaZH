@@ -570,12 +570,20 @@ static void rp_note_appver(const char *tx) {
     free(v);
 }
 
+// 最近一条录制回包里的服务端版本号（$_sys_ver_$，如 2605281924）。
+// 真机 10-22 01:04：单机自造的 write-ack 不带 $_sys_ver_$ / $_sys_service_$，游戏收到空版本号
+// 当成服务端版本变了，弹「请将应用更新到最新版本」并跳应用商店。自造回包统一补上。
+static char g_srvver[48];
+
 static int rp_emulate(void *self, const char *json) {
     int is_str = 0;
     char *res = rp_result(json, &is_str);
     char *ver = rp_json_str(json, "$_sys_ver_$");
     char *rc = rp_json_str(json, "$_sys_result_$");
     char *svc = rp_json_str(json, "$_sys_service_$");
+    if (ver && ver[0]) snprintf(g_srvver, sizeof g_srvver, "%s", ver);
+    if (!ver && g_srvver[0]) ver = strdup(g_srvver);
+    if (!svc && g_appver[0]) svc = strdup(g_appver);
     void *resobj = NULL;
     if (res && !is_str) resobj = g_deser(g_snew(res), NULL);
     rp_setf(self, 0x20, (res && is_str) ? g_snew(res) : NULL);       // errorMessage
@@ -681,6 +689,16 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
     if (!hit) {
         RPW("单机未命中，按没网处理: %s", sign);
         free(tx); g_parse_orig(self, www, mi); return;
+    }
+    if (made && !g_srvver[0]) {   // 本次进程还没重放过录制回包：从库里随便取一条的服务端版本号
+        pthread_mutex_lock(&g_map_lock);
+        for (int b = 0; b < RP_BUCKETS && !g_srvver[0]; b++)
+            for (rp_e *e = g_map[b]; e && !g_srvver[0]; e = e->next) {
+                char *v = rp_json_str(e->val, "$_sys_ver_$");
+                if (v && v[0]) snprintf(g_srvver, sizeof g_srvver, "%s", v);
+                free(v);
+            }
+        pthread_mutex_unlock(&g_map_lock);
     }
     RPI("单机重放: %s", made ? (rp_is_write(tx) ? "write-ack" : "empty-data") : sign);
     if (!rp_emulate(self, hit)) g_parse_orig(self, www, mi);
