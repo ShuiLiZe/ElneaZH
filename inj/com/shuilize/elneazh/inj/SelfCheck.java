@@ -50,6 +50,10 @@ final class SelfCheck {
             }
             r.append("name gate: ").append(NameGate.loadState()).append('\n');
             r.append("name gate hooked: ").append(NameGate.hooked()).append('\n');
+            if (!NameGate.hooked()) {
+                // 没挂上时把 native 自己的结论写进来：解析方式 / 基址 / 校验第一处不匹配的字节
+                r.append("name gate diag: ").append(NameGate.diag()).append('\n');
+            }
             r.append("offline gate: ").append(OfflineGate.loadState()).append('\n');
             // 就地显示自检写入的时刻：知道这份报告是「加载前」还是「挂完之后」写的。
             r.append("written: ").append(new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss",

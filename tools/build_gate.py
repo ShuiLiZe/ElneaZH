@@ -25,6 +25,7 @@ ABIS = [
     ("armv7a-linux-androideabi24", "armeabi-v7a"),
 ]
 SRC = ["native/elneagate/elneagate.c", "native/elneagate/eg_names.c",
+       "native/elneagate/eg_sym.c",
        "native/elneagate/eg_offline.c",
        "native/elneagate/vendor/And64InlineHook.cpp"]
 HDRS = ["native/elneagate", "native/elneagate/vendor"]

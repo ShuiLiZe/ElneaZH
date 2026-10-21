@@ -51,6 +51,15 @@ final class NameGate {
 
     private static native boolean nativeHooked();
 
+    /**
+     * 自检用：native 自己解释「为什么没挂上」。
+     *
+     * <p>返回一行 {@code code=… stage=… lib=… verify=… first_mismatch=… actual=… expect=…}；
+     * {@code code[0]} 与 nativeInstall 的返回码一致。旧 .so 没有这个符号时返回 null，
+     * 不影响任何逻辑（{@link #diag()} 吞掉 UnsatisfiedLinkError）。
+     */
+    private static native String nativeDiag(int[] code);
+
     // ---------------- 加载 ----------------
 
     /**
@@ -168,7 +177,7 @@ final class NameGate {
         }
         installResult = last.get();
         if (installResult != 0) {
-            Log.w(TAG, "not hooked (code " + installResult + "); game runs unchanged");
+            Log.w(TAG, "not hooked (code " + installResult + "): " + diag() + "; game runs unchanged");
         }
         return installResult;
     }
@@ -193,6 +202,20 @@ final class NameGate {
     }
 
     // ---------------- 自检用 ----------------
+
+    /**
+     * native 侧对「闸门为什么没挂上」的自述；未加载 / 旧 .so 没有该符号时返回一句人话。
+     */
+    static String diag() {
+        if (!loaded) return "code=" + installResult + " (native not loaded: " + NativeLoad.describe() + ")";
+        try {
+            int[] code = new int[1];
+            String s = nativeDiag(code);
+            return s == null ? "code=" + installResult + " (nativeDiag unavailable)" : s;
+        } catch (Throwable t) {
+            return "code=" + installResult + " (nativeDiag unavailable: " + t.getClass().getSimpleName() + ")";
+        }
+    }
 
     static String filterJson(String plain) {
         try {
@@ -229,6 +252,7 @@ final class NameGate {
         parts.add("rewrites=" + s[0]);
         parts.add("calls=" + s[1]);
         parts.add("table=" + s[3]);
+        parts.add("diag{" + diag() + "}");
         return "native: " + parts;
     }
 }

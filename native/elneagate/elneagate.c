@@ -29,6 +29,7 @@
 
 #include "eg_names.h"
 #include "eg_offline.h"
+#include "eg_sym.h"
 
 #include "vendor/And64InlineHook.hpp"
 
@@ -59,6 +60,16 @@ typedef void *(*enc_fn_t)(void *il2cpp_string);
 static enc_fn_t g_orig_enc;
 static void *g_base;
 static int g_hooked;
+// nativeInstall 会被 Java 侧每 500ms 轮询调进来：失败日志按次数说话，不刷屏
+#define EG_INSTALL_GIVEUP_TICKS 40
+static int g_install_fail_ticks;
+// 诊断（给 selfcheck 看）：失败码 / 校验结果 / 第一处不匹配 / 附加说明
+static volatile int g_diag_code = -1;
+static volatile int g_diag_verify = -1;     // 1 = 40B 对上了；0 = 没对上；-1 = 没读
+static volatile int g_diag_mismatch = -1;   // 第一处不匹配的下标
+static volatile int g_diag_actual = -1;
+static volatile int g_diag_expect = -1;
+static volatile int g_diag_detail;
 static __thread int g_depth;
 
 // il2cpp 导出函数（运行时按名字取，避免依赖具体版本）
@@ -205,6 +216,16 @@ static void *eg_find_libil2cpp(void) {
 static int eg_verify(void *addr) {
     unsigned char cur[ENC_PROLOGUE_LEN];
     memcpy(cur, addr, sizeof cur);
+    // 逐字节比：失败时记下第一个不同的位置和「实际/期望」两个字节，真机上直接能对
+    g_diag_mismatch = 0;
+    for (size_t i = 0; i < ENC_PROLOGUE_LEN; i++) {
+        if (cur[i] != ENC_PROLOGUE[i]) {
+            g_diag_mismatch = (int) i;
+            g_diag_actual = cur[i];
+            g_diag_expect = ENC_PROLOGUE[i];
+            break;
+        }
+    }
     if (memcmp(cur, ENC_PROLOGUE, sizeof cur) != 0) return 0;
     return 1;
 }
@@ -291,34 +312,67 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeInstall(JNIEnv *env, jclass cls) {
     (void) cls;
     if (g_hooked) return 0;
 
-    g_string_new = (il2cpp_string_new_t) dlsym(RTLD_DEFAULT, "il2cpp_string_new");
-    g_string_new_utf16 = (il2cpp_string_new_utf16_t) dlsym(RTLD_DEFAULT, "il2cpp_string_new_utf16");
+    // dlsym(RTLD_DEFAULT) 在 Android 的链接器命名空间里经常看不到 Unity 自己 dlopen 的
+    // libil2cpp.so：走 eg_sym 的四级兜底（默认作用域 → 句柄 → maps 路径句柄 → ELF .dynsym）。
+    g_string_new = (il2cpp_string_new_t) eg_sym_find("il2cpp_string_new");
+    g_string_new_utf16 = (il2cpp_string_new_utf16_t) eg_sym_find("il2cpp_string_new_utf16");
     if (!g_string_new) {
-        // libil2cpp 可能还没 dlopen：用绝对路径再试一次
-        dlopen("libil2cpp.so", RTLD_NOW | RTLD_NOLOAD);
-        g_string_new = (il2cpp_string_new_t) dlsym(RTLD_DEFAULT, "il2cpp_string_new");
-    }
-    if (!g_string_new) {
-        LOGW("il2cpp_string_new not visible yet; will retry on next launch");
+        // 只在第一次、且真正放弃时打一条（Java 侧每 500ms 会调进来，这里不再刷屏）
+        if (g_install_fail_ticks++ == 0 || g_install_fail_ticks >= EG_INSTALL_GIVEUP_TICKS) {
+            LOGW("il2cpp_string_new unresolved after %d tries (stage=%s, base=%p); %s",
+                 g_install_fail_ticks, eg_sym_stage(),
+                 (void *) eg_lib_base("libil2cpp.so"),
+                 g_install_fail_ticks >= EG_INSTALL_GIVEUP_TICKS ? "giving up, Java layer only"
+                                                                 : "will retry");
+        }
         return -1;
     }
+    LOGI("il2cpp_string_new @ %p via %s", (void *) g_string_new, eg_sym_stage());
+    g_diag_code = 1;
+    g_diag_detail = 1;   // 能拿到 string_new，说明命名空间解析通了
 
     void *base = eg_find_libil2cpp();
-    if (!base) { LOGW("libil2cpp.so not loaded; skip"); return -1; }
+    if (!base) base = (void *) eg_lib_base("libil2cpp.so");
+    if (!base) {
+        g_diag_detail = 2;
+        LOGW("libil2cpp.so base not found (dl_iterate_phdr + maps 都是 0); skip");
+        return -1;
+    }
     g_base = base;
     void *target = (void *) ((uintptr_t) base + ENC_OFFSET);
     if (!eg_verify(target)) {
-        LOGW("verify failed at %p+0x%x (base changed? not hooking)", base, ENC_OFFSET);
+        // 把具体字节打出来：真机上才能判断是「基址变了」还是「这版序言不一样」
+        const unsigned char *cur = (const unsigned char *) target;
+        g_diag_code = 2;
+        g_diag_verify = 0;
+        g_diag_detail = 3;
+        LOGW("verify failed at %p+0x%x: first mismatch @%d actual=0x%02x expect=0x%02x "
+             "head=%02x%02x%02x%02x%02x%02x%02x%02x %02x%02x%02x%02x%02x%02x%02x%02x (not hooking)",
+             base, ENC_OFFSET, g_diag_mismatch, (unsigned) g_diag_actual,
+             (unsigned) g_diag_expect,
+             cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7],
+             cur[8], cur[9], cur[10], cur[11], cur[12], cur[13], cur[14], cur[15]);
         return -2;
     }
+    g_diag_verify = 1;
 #if defined(__aarch64__)
     A64HookFunction(target, (void *) eg_hook, (void **) &g_orig_enc);
 #else
-    LOGW("no hook engine for this ABI (arm64 only yet); game runs unchanged");
+    g_diag_code = 4;
+    // 单机整体降级到 Java 层；不再重复刷同一条日志
+    if (!g_diag_detail) {
+        g_diag_detail = 4;
+        LOGW("no hook engine for this ABI (arm64 only yet); Java layer only, game runs unchanged");
+    }
     return -4;
 #endif
-    if (!g_orig_enc) { LOGW("hook engine returned no trampoline"); return -3; }
+    if (!g_orig_enc) {
+        g_diag_code = 3;
+        LOGW("hook engine returned no trampoline at %p+0x%x", base, ENC_OFFSET);
+        return -3;
+    }
     g_hooked = 1;
+    g_diag_code = 0;
     LOGI("hooked EncryptRJ256 @ %p+0x%x (base %p)", target, ENC_OFFSET, base);
     return 0;
 }
@@ -395,6 +449,30 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeHooked(JNIEnv *env, jclass cls) {
     (void) env;
     (void) cls;
     return g_hooked ? JNI_TRUE : JNI_FALSE;
+}
+
+// 自检用：解析诊断。0 = 已挂上；1 = 符号没解析到；2 = 符号有但 40B 入口校验不过；
+// 3 = hook 引擎没给 trampoline；4 = 此 ABI 没有 hook 引擎；-1 = 还没试过。
+// 同时把「用什么方式解析的 / libil2cpp 基址 / 校验位置和实际字节」一起交给 Java 写进 selfcheck。
+JNIEXPORT jstring JNICALL
+Java_com_shuilize_elneazh_inj_NameGate_nativeDiag(JNIEnv *env, jclass cls, jintArray code) {
+    (void) cls;
+    char buf[512];
+    void *base = eg_find_libil2cpp();
+    if (!base) base = (void *) eg_lib_base("libil2cpp.so");
+    snprintf(buf, sizeof buf,
+             "code=%d hook=EncryptRJ256 stage=%s lib=%p off=0x%x verify=%s gate=%s "
+             "first_mismatch=0x%x actual=0x%02x expect=0x%02x detail=%d",
+             g_diag_code, eg_sym_stage(), base, (unsigned) ENC_OFFSET,
+             g_diag_verify == 1 ? "ok" : (g_diag_verify == 0 ? "fail" : "n/a"),
+             g_hooked ? "hooked" : "not-hooked",
+             (unsigned) g_diag_mismatch, (unsigned) g_diag_actual,
+             (unsigned) g_diag_expect, g_diag_detail);
+    if (code) {
+        jint v[1] = {(jint) g_diag_code};
+        (*env)->SetIntArrayRegion(env, code, 0, 1, v);
+    }
+    return (*env)->NewStringUTF(env, buf);
 }
 
 // 自检用：直接喂一段「存档原始字节」（raw），走与线上完全相同的 eg_filter_raw 路径，
