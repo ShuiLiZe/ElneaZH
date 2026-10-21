@@ -150,9 +150,9 @@ final class NameGate {
      * 40×500ms = 20s 刚好差一秒：既白等满 20 秒（主线程黑屏 / ANR），又永远等不到库。
      * 现在改成 200ms 间隔 + 120s 上限，并且**全程在后台线程**，主线程一秒都不等。
      */
-    static final int MAX_TRIES = (int) (WAIT_IL2CPP_MS / RETRY_MS);
     static final long RETRY_MS = 200;
     static final long WAIT_IL2CPP_MS = 120_000L;
+    static final int MAX_TRIES = (int) (WAIT_IL2CPP_MS / RETRY_MS);
 
     /** 安装线程是否在跑；在跑时再调 {@link #install} 只做一次幂等 push，不重复起线程。 */
     private static volatile Thread worker;
