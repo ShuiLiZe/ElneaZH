@@ -104,7 +104,8 @@ static void rec_write(const char *dir, const char *txt, size_t n, void *fp) {
     char stk[REC_FRAMES * 14 + 8];
     rec_stack(fp, stk, sizeof stk);
     pthread_mutex_lock(&g_rec_lock);
-    if (!g_rec) { g_rec = fopen(REC_PATH, "a"); g_rec_size = 0; }
+    // 每次启动重写：旧版追加到 24MB 上限后再也不录新内容（真机 23:55 联网卡登录时一条没录到）
+    if (!g_rec) { g_rec = fopen(REC_PATH, "w"); g_rec_size = 0; }
     if (g_rec && g_rec_size < REC_CAP) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);

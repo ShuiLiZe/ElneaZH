@@ -384,6 +384,16 @@ static void rp_setf(void *obj, int off, void *val) {
     if (g_wb) g_wb(obj, slot, val); else *slot = val;
 }
 
+// 本机游戏版本（取自请求里的 "$_sys_ver_$":"Android Version 2.10.7"）
+static char g_appver[32];
+static void rp_note_appver(const char *tx) {
+    char *v = rp_json_str(tx, "$_sys_ver_$");
+    if (!v) return;
+    const char *sp = strrchr(v, ' ');
+    snprintf(g_appver, sizeof g_appver, "%s", sp ? sp + 1 : v);
+    free(v);
+}
+
 static int rp_emulate(void *self, const char *json) {
     int is_str = 0;
     char *res = rp_result(json, &is_str);
@@ -395,6 +405,9 @@ static int rp_emulate(void *self, const char *json) {
     rp_setf(self, 0x20, (res && is_str) ? g_snew(res) : NULL);       // errorMessage
     rp_setf(self, 0x38, ver ? g_snew(ver) : NULL);                    // serverVersion
     rp_setf(self, 0x30, g_snew(rc ? rc : "Done."));                   // resultCode
+    // 真机 23:49：录的回包 $_sys_service_$=2.10.8 > 本机 2.10.7，游戏随即提示「请更新到最新版本」并跳应用商店。
+    // 单机时把服务端版本按成本机版本。
+    if (svc && g_appver[0]) { free(svc); svc = strdup(g_appver); }
     rp_setf(self, 0x40, svc ? g_snew(svc) : NULL);                    // serviceMode
     *(int32_t *) ((char *) self + 0x10) = 2;                          // condition：完成
     if (g_iserr && g_iserr(self, NULL)) *(int32_t *) ((char *) self + 0x10) = 3;
@@ -425,6 +438,7 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
     char *tx = js ? eg_rec_str(js, &tl) : NULL;
     if (!tx) { g_parse_orig(self, www, mi); return; }
     rp_load();
+    rp_note_appver(tx);
     const char *hit = NULL;
     char *made = NULL;
     char sign[512];
