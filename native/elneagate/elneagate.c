@@ -192,26 +192,12 @@ static void *eg_hook(void *plain_str) {
 
 // ------------------------------------------------------------------ 基址与校验
 
-static void *g_found_base;
-
-static int eg_phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
-    (void) size;
-    (void) data;
-    if (!info->dlpi_name) return 0;
-    const char *n = info->dlpi_name;
-    // 只看 libil2cpp.so（路径结尾匹配，避免误判）
-    size_t l = strlen(n);
-    const char *want = "libil2cpp.so";
-    size_t w = strlen(want);
-    if (l < w || strcmp(n + l - w, want) != 0) return 0;
-    g_found_base = (void *) (uintptr_t) info->dlpi_addr;
-    return 1;   // 停
-}
-
 static void *eg_find_libil2cpp(void) {
-    g_found_base = NULL;
-    dl_iterate_phdr(eg_phdr_cb, NULL);
-    return g_found_base;
+    // 统一走 eg_sym 的缓存（dl_iterate_phdr 优先，退回 maps）。
+    // 以前这里自己再 dl_iterate_phdr 一遍、eg_offline 里又各解析一遍 —— 三份结果还不一定一致；
+    // 真机崩的那次就是「一边说 base=0x0，另一边拿 0 去加偏移」。现在只有一份。
+    uintptr_t b = eg_lib_base("libil2cpp.so");
+    return b ? (void *) b : NULL;
 }
 
 // 校验入口 40 字节；返回 1 表示匹配
@@ -317,6 +303,18 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeInstall(JNIEnv *env, jclass cls) {
     (void) cls;
     if (g_hooked) return 0;
     long long t0 = eg_now_ms();
+    // 这里的线程名/tid 由 nativeLogBegin 那边打；这里只保证「进入」这条一定有
+    EG_I("nativeInstall enter (thread=%s tid=%ld)", eg_thread_tag(), eg_tid());
+
+    // 先看库在不在。不在就立刻 -1（让 Java 侧 200ms 后再来），**不解析符号**：
+    // 每次解析都要过 eg_sym 四级兜底，库还没来时纯属白烧。
+    if (!eg_lib_present()) {
+        if (g_install_fail_ticks++ == 0 || g_install_fail_ticks >= EG_INSTALL_GIVEUP_TICKS) {
+            LOGW("libil2cpp not mapped yet (tick %d); waiting for Unity to dlopen it",
+                 g_install_fail_ticks);
+        }
+        return -1;
+    }
 
     // dlsym(RTLD_DEFAULT) 在 Android 的链接器命名空间里经常看不到 Unity 自己 dlopen 的
     // libil2cpp.so：走 eg_sym 的四级兜底（默认作用域 → 句柄 → maps 路径句柄 → ELF .dynsym）。
@@ -324,13 +322,14 @@ Java_com_shuilize_elneazh_inj_NameGate_nativeInstall(JNIEnv *env, jclass cls) {
     g_string_new = (il2cpp_string_new_t) eg_sym_find("il2cpp_string_new");
     g_string_new_utf16 = (il2cpp_string_new_utf16_t) eg_sym_find("il2cpp_string_new_utf16");
     if (!g_string_new) {
-        // 只在第一次、且真正放弃时打一条（Java 侧每 500ms 会调进来，这里不再刷屏）
+        // 只在第一次、且真正放弃时打一条（Java 侧每 200ms 会调进来，这里不再刷屏）
         if (g_install_fail_ticks++ == 0 || g_install_fail_ticks >= EG_INSTALL_GIVEUP_TICKS) {
             LOGW("il2cpp_string_new unresolved after %d tries (stage=%s, base=%p); %s",
                  g_install_fail_ticks, eg_sym_stage(),
                  (void *) eg_lib_base("libil2cpp.so"),
-                 g_install_fail_ticks >= EG_INSTALL_GIVEUP_TICKS ? "giving up, Java layer only"
-                                                                 : "will retry");
+                 g_install_fail_ticks >= EG_INSTALL_GIVEUP_TICKS
+                     ? "still unresolved, Java layer only until libil2cpp shows up"
+                     : "will retry");
         }
         return -1;
     }

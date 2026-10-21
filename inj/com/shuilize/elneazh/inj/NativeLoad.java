@@ -41,6 +41,7 @@ final class NativeLoad {
     static final long RETRY_GAP_MS = 2000;
 
     private static boolean loaded;
+    private static boolean loading;
     private static long lastTry;
     private static String lastErr = "";
     private static String lastPath = "";
@@ -55,6 +56,16 @@ final class NativeLoad {
      */
     static synchronized boolean ready() {
         return loaded;
+    }
+
+    /** 正在加载中（后台线程里 System.load 还没返回）：用来合并重复请求，避免两个线程同时 load。 */
+    static synchronized boolean loading() {
+        return loading;
+    }
+
+    /** **只给自检/后台用**：清掉「2 秒内不重试」的节流，让安装线程立刻再试一次。 */
+    static synchronized void resetBackoff() {
+        lastTry = 0;
     }
 
     /** native 崩溃保护的 JNI 入口（eg_guard.c）：把这一轮的允许标记与安装窗口推给 native。 */
@@ -80,10 +91,12 @@ final class NativeLoad {
             return false;
         }
         long now = System.currentTimeMillis();
+        if (loading) return false;                       // 另一个线程正在 load，别抢
         if (lastTry != 0 && now - lastTry < RETRY_GAP_MS) return false;
         lastTry = now;
         attempts++;
         String path = null;
+        loading = true;
         try {
             path = ensure(ctx, LIB);
             if (path == null) {
@@ -105,6 +118,8 @@ final class NativeLoad {
             lastErr = describe("System.load(" + path + ")", t);
             Log.w(TAG, "attempt#" + attempts + " lib" + LIB + ".so NOT loaded: " + lastErr);
             return false;
+        } finally {
+            loading = false;
         }
     }
 

@@ -141,9 +141,18 @@ final class NameGate {
 
     // ---------------- 挂载 ----------------
 
-    /** 后台轮询上限：40 × 500ms = 20s。到点就放弃，游戏照常跑（Java 层兜底仍在）。 */
-    private static final int MAX_TRIES = 40;
-    private static final long RETRY_MS = 500;
+    /**
+     * 后台轮询上限：{@value #WAIT_IL2CPP_MS} 毫秒（=120s），每 {@value #RETRY_MS} ms 试一次。
+     *
+     * <p>为什么是「等到 libil2cpp 出现为止（有上限）」而不是「40 次就放弃」：
+     * 真机时间线（pid 8974）——17:17:00 进程起来、17:17:20 我们的旧循环 40 次用光就放弃，
+     * 而 Unity 要到 17:17:21.072 才打出 `Context Type`（UnityPlayerActivity 创建，libil2cpp 这时才 dlopen）。
+     * 40×500ms = 20s 刚好差一秒：既白等满 20 秒（主线程黑屏 / ANR），又永远等不到库。
+     * 现在改成 200ms 间隔 + 120s 上限，并且**全程在后台线程**，主线程一秒都不等。
+     */
+    static final int MAX_TRIES = (int) (WAIT_IL2CPP_MS / RETRY_MS);
+    static final long RETRY_MS = 200;
+    static final long WAIT_IL2CPP_MS = 120_000L;
 
     /** 安装线程是否在跑；在跑时再调 {@link #install} 只做一次幂等 push，不重复起线程。 */
     private static volatile Thread worker;
@@ -154,12 +163,12 @@ final class NameGate {
      * <p>真机黑屏事故的直接来源就是旧版这里：它起完后台线程后 `done.await()` **同步等**，
      * 最长 20s；而它的调用方是 {@code ZhInit.onCreate}（ContentProvider，进程一启动就跑在
      * 主线程上的那个线程）。libil2cpp 那时还没 dlopen，于是整个启动被按住 20 秒，
-     * 用户看到的就是「黑屏，一会儿后进程退出」（Unity 看门狗 / ANR），
-     * 而且 logcat 里连一条闸门日志都没有 —— 因为进程在打日志之前就被掐了。
+     * 用户看到的就是「黑屏，一会儿后进程退出」（Unity 看门狗 / ANR）。
      *
      * <p>现在的约定（主线程只做 O(1)）：
      * <ul>
-     *   <li>本方法在调用线程上只做「起线程」这一件事，绝不 sleep / 绝不 await / 绝不 join；</li>
+     *   <li>本方法在调用线程上只做「起线程」这一件事，绝不 sleep / 绝不 await / 绝不 join，
+     *       连 {@code System.load} 都不在调用线程上做；</li>
      *   <li>加载 .so、灌名字表、解析 il2cpp、写 hook 全在后台线程里，重试用
      *       {@link #MAX_TRIES} 限次、{@link #RETRY_MS} 间隔，到点放弃；</li>
      *   <li>返回值只代表「上次已知结果」，调用方不得据此等待。</li>
@@ -168,51 +177,34 @@ final class NameGate {
      * @return 上次已知的结果码（后台还在装时可能是 {@link Integer#MIN_VALUE}）
      */
     static int install(final Context ctx, int tries) {
-        if (!NativeLoad.ready()) {
-            // 加载本身也可能慢（解包 + System.load）；同样挪到后台，主线程不等。
-            startWorker(ctx);
-            return -100;
-        }
-        startWorker(ctx);
+        boolean mayLoad = NativeLoad.ready() || NativeGuard.allowed();
+        startWorker(ctx, mayLoad);
         return installResult;
     }
 
-    /** 起（或复用）后台安装线程。本方法不做任何阻塞操作。 */
-    private static void startWorker(final Context ctx) {
+    /**
+     * 起（或复用）后台安装线程。本方法不做任何阻塞操作。
+     *
+     * @param mayLoad 这一轮允不允许把 .so 加载进进程（crash guard / Support 开关的结论）。
+     *                不允许时照样起线程，但只做「纯 Java 的拼音替换」那一半。
+     */
+    private static void startWorker(final Context ctx, final boolean mayLoad) {
+        if (ctx == null) return;
         Thread cur = worker;
-        if (cur != null && cur.isAlive()) {
-            // 已经在装：只补一次幂等的名字表推送，不重复起线程、不等待
-            try { pushNames(ctx); } catch (Throwable ignored) {}
-            return;
-        }
+        if (cur != null && cur.isAlive()) return;   // 已经在装：什么都不用再做
         final Thread t = new Thread(new Runnable() {
             @Override public void run() {
                 long t0 = System.currentTimeMillis();
                 Log.i(TAG, "installer thread started (" + Thread.currentThread().getName()
-                        + "/" + android.os.Process.myTid() + ")");
+                        + "/" + android.os.Process.myTid() + ", mayLoad=" + mayLoad + ")");
                 int last = Integer.MIN_VALUE;
                 try {
-                    Log.i(TAG, "installer: loading .so (background)");
-                    if (!load(ctx)) {
-                        installResult = last = -100;
-                        Log.w(TAG, "installer: .so not loaded: " + NativeLoad.describe());
+                    if (!mayLoad) {
+                        last = -100;
+                        Log.i(TAG, "installer: native not allowed: " + NativeGuard.reason()
+                                + " — java fallback only");
                     } else {
-                        Log.i(TAG, "installer: pushing names table");
-                        pushNames(ctx);
-                        for (int i = 0; i < MAX_TRIES; i++) {
-                            long s0 = System.currentTimeMillis();
-                            int r = nativeInstall();
-                            last = r;
-                            Log.i(TAG, "installer: nativeInstall try " + (i + 1) + "/" + MAX_TRIES
-                                    + " -> " + r + " (" + (System.currentTimeMillis() - s0) + "ms)");
-                            if (r == 0) break;
-                            try {
-                                Thread.sleep(RETRY_MS);
-                            } catch (InterruptedException ie) {
-                                Thread.currentThread().interrupt();
-                                break;
-                            }
-                        }
+                        last = runNative(ctx, t0);
                     }
                 } catch (Throwable e) {
                     Log.w(TAG, "installer failed", e);
@@ -225,12 +217,71 @@ final class NameGate {
                         Log.w(TAG, "not hooked (code " + installResult + "): " + diag()
                                 + "; game runs unchanged");
                     }
+                    // 挂没挂上都要把真实结论写进 selfcheck（这一份是「挂完之后」的）
+                    SelfCheck.rewriteAsync(ctx);
                 }
             }
         }, "ElneaGate-install");
         t.setDaemon(true);
         worker = t;
         t.start();
+    }
+
+    /** 后台线程里的 native 部分：加载 → 灌表 → 等 libil2cpp → 挂。返回结果码。 */
+    private static int runNative(Context ctx, long t0) {
+        // ① 等 .so 真的 load 进来。crash guard 可能中途停用 → 不再重试，别空转。
+        while (!NativeLoad.ready()) {
+            if (!NativeGuard.allowed()) {
+                Log.i(TAG, "installer: native disabled mid-wait: " + NativeGuard.reason());
+                return -100;
+            }
+            NativeLoad.resetBackoff();
+            if (!load(ctx)) {
+                Log.w(TAG, "installer: .so not loaded yet: " + NativeLoad.describe());
+                if (NativeLoad.ready()) break;
+                if (System.currentTimeMillis() - t0 > WAIT_IL2CPP_MS) return -100;
+                if (!sleepQuiet(RETRY_MS)) return -100;
+            }
+            if (NativeLoad.ready()) break;
+        }
+        Log.i(TAG, "installer: .so ready (" + (System.currentTimeMillis() - t0) + "ms): "
+                + NativeLoad.describe());
+        Log.i(TAG, "installer: pushing names table");
+        pushNames(ctx);
+        Log.i(TAG, "installer: waiting for libil2cpp (poll " + RETRY_MS
+                + "ms, up to " + (WAIT_IL2CPP_MS / 1000) + "s, background only)");
+        int last = Integer.MIN_VALUE;
+        for (int i = 0; i < MAX_TRIES; i++) {
+            long s0 = System.currentTimeMillis();
+            int r;
+            try {
+                r = nativeInstall();
+            } catch (Throwable e) {
+                Log.w(TAG, "nativeInstall threw", e);
+                return -103;
+            }
+            last = r;
+            if (r == 0 || (i % 25) == 0) {
+                Log.i(TAG, "installer: nativeInstall try " + (i + 1) + "/" + MAX_TRIES
+                        + " -> " + r + " (" + (System.currentTimeMillis() - s0)
+                        + "ms, " + (System.currentTimeMillis() - t0) + "ms total)");
+            }
+            if (r != -1) break;          // 0 成功；-2/-3/-4 永久性失败
+            if (!sleepQuiet(RETRY_MS)) break;
+            if (!NativeGuard.allowed()) return -100;
+        }
+        return last;
+    }
+
+    /** 可被打断的 sleep；返回 false 表示线程被要求退出。 */
+    private static boolean sleepQuiet(long ms) {
+        try {
+            Thread.sleep(ms);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     /** 等安装结束**只给自检/测试用**：绝不在主线程或 Unity 线程上调。 */

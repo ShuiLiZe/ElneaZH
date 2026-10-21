@@ -161,6 +161,8 @@ void *eg_dlopen_from_maps(const char *soname) {
 // 再退回 /proc/self/maps 里文件偏移为 0 那一段的起点。
 static void *g_found_base;
 static const char *g_found_soname;
+// libil2cpp.so 的基址缓存：只增不减（库一旦映射地址不会变），谁先解析谁写，其余人共享。
+static uintptr_t g_cached_base;
 
 static int eg_phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
     (void) size;
@@ -178,12 +180,16 @@ uintptr_t eg_lib_base(const char *soname) {
     long long t0 = eg_now_ms();
     g_found_soname = soname;
     g_found_base = NULL;
+    // ① 首选：dl_iterate_phdr —— 走的是进程的模块表，与链接器命名空间无关，也不读文件。
     dl_iterate_phdr(eg_phdr_cb, NULL);
     if (g_found_base) {
-        eg_ilog("base %s = %p (phdr, %lldms)", soname, g_found_base, eg_now_ms() - t0);
+        if (!g_cached_base) {
+            g_cached_base = (uintptr_t) g_found_base;
+            eg_ilog("base %s = %p (phdr, %lldms)", soname, g_found_base, eg_now_ms() - t0);
+        }
         return (uintptr_t) g_found_base;
     }
-    // 退回 maps：文件偏移 0 那一段的 lo 就是基址
+    // ② 退回 maps：文件偏移 0 那一段的 lo 就是基址
     size_t sl = strlen(soname);
     uintptr_t best = 0, bestoff = (uintptr_t) -1;
     FILE *f = fopen("/proc/self/maps", "re");
@@ -204,8 +210,26 @@ uintptr_t eg_lib_base(const char *soname) {
         }
         fclose(f);
     }
-    eg_ilog("base %s = %p (maps, %lldms)", soname, (void *) best, eg_now_ms() - t0);
+    if (best && !g_cached_base) {
+        g_cached_base = best;
+        eg_ilog("base %s = %p (maps, %lldms)", soname, (void *) best, eg_now_ms() - t0);
+    }
     return best;
+}
+
+// 已缓存的基址（0 = 还没有）。给别的 .c 共享，别各自再解析一遍。
+uintptr_t eg_lib_base_cached(void) { return g_cached_base; }
+
+// libil2cpp.so 在不在内存里：只查模块表 / maps，不 dlopen、不解析符号。轮询用（很便宜）。
+int eg_lib_present(void) {
+    if (g_cached_base) return 1;
+    return eg_lib_base("libil2cpp.so") != 0;
+}
+
+uintptr_t eg_lib_base_refresh(void) {
+    // 库地址一旦映射就不会变；只有「之前还没 dlopen」的情况需要再查，所以清缓存再查一次。
+    g_cached_base = 0;
+    return eg_lib_base("libil2cpp.so");
 }
 
 // ---------------------------------------------------------------- ELF .dynsym 自查（第 4 级）

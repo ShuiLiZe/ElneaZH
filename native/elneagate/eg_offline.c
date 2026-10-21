@@ -108,6 +108,9 @@ static void *eg_sym(const char *name) {
 
 static int eg_api_load(void) {
     if (g_api.ready) return 1;
+    // 库还没映射就什么都不解析：eg_sym_find 会走四级兜底（含 dlopen NOLOAD 与读 .dynsym），
+    // 在库还没来的时候纯属白烧（真机上这一串把启动拖到 ANR）。
+    if (!eg_lib_present()) return 0;
     long long t0 = eg_now_ms();
     g_api.domain_get = (fn_domain_get) eg_sym("il2cpp_domain_get");
     g_api.domain_get_assemblies = (fn_domain_get_assemblies) eg_sym("il2cpp_domain_get_assemblies");
@@ -122,7 +125,7 @@ static int eg_api_load(void) {
 
     if (!g_api.domain_get || !g_api.domain_get_assemblies || !g_api.assembly_get_image
         || !g_api.class_from_name || !g_api.class_get_method_from_name) {
-        // 只打一次（真机上 Java 侧每 500ms 会调进来，不能刷屏）
+        // 只打一次（真机上 Java 侧每 200ms 会调进来，不能刷屏）
         if (!g_api.api_load_logged) {
             g_api.api_load_logged = 1;
             LOGW("il2cpp api not ready yet (%lldms, stage=%s)", eg_now_ms() - t0, eg_sym_stage());
@@ -134,21 +137,26 @@ static int eg_api_load(void) {
     return 1;
 }
 
-// libil2cpp.so 的加载基址。
-// 早先这里把 dlopen(NOLOAD) 返回的 **handle** 当基址用（再加固定偏移）—— 那是错的：
-// handle 是 solist 里的指针，不是映射起点。现在走 eg_sym 的 dl_iterate_phdr → maps，
-// 并按硬页（16KB，Android 16 / arm64 常见的 page size）对齐，避免个别 rom 上 +0x18ad7e4
-// 落到非页边界被读成错地址。
+// libil2cpp.so 的加载基址（与名字闸门共享 eg_sym 里那一份缓存）。
+//
+// 真机崩溃就是这里（17:17:21.219，线程 ElneaOffline-in，SIGSEGV SEGV_MAPERR，x0=0，
+// x25=0x00000000018ad7e4）：旧代码拿 dlopen 的 **handle** 当基址，而 libil2cpp 那时还没
+// dlopen，handle 是 0 —— 于是「0 + 0x18ad7e4」被当成函数地址去读，必崩（而且是 Unity 自己的
+// 崩溃处理器接的，所以没有 tombstone）。
+//
+// 现在：只用 dl_iterate_phdr（eg_sym 里，首选，不受命名空间限制），**返回 0 就代表「库还没来」**，
+// 调用方一律先判 0 再动手 —— 见 eg_install_enc_fallback / eg_of_install。
 #define EG_PAGE_16K 0x4000ULL
-static void *g_cached_base;
 
 static void *eg_find_base(void) {
-    if (g_cached_base) return g_cached_base;
-    uintptr_t b = eg_lib_base("libil2cpp.so");
+    uintptr_t cached = eg_lib_base_cached();
+    if (cached) return (void *) (cached & ~(uintptr_t) (EG_PAGE_16K - 1));
+    uintptr_t b = eg_lib_base("libil2cpp.so");   // phdr 优先；拿不到才退回 maps
     if (!b) return NULL;
-    g_cached_base = (void *) (b & ~(uintptr_t) (EG_PAGE_16K - 1));
-    EG_I("offline: libil2cpp base=%p (raw=%p)", g_cached_base, (void *) b);
-    return g_cached_base;
+    // 按 16KB 硬页对齐：Android 16 / arm64 常见 16KB 页，避免 +0x18ad7e4 落到非页边界被读错
+    b &= ~(uintptr_t) (EG_PAGE_16K - 1);
+    EG_I("offline: libil2cpp base=%p", (void *) b);
+    return (void *) b;
 }
 
 // 校验 EncryptRJ256 入口的 8 字节序言。1 = 完全一致，0 = 不认识（不挂），
@@ -653,12 +661,15 @@ static int eg_resolve_line(eg_hook_entry *e, const char *line) {
         return 0;
     }
     // 『*』表示不限命名空间；否则先按给的名字空间找，找不到再退回不限
+    EG_I("resolve: %s::%s::%s begin (thread=%s)", e->ns[0] ? e->ns : "*", e->klass,
+         e->method, eg_thread_tag());
     Il2CppClass *c = NULL;
     if (e->ns[0] && !(e->ns[0] == '*' && !e->ns[1])) {
         c = eg_find_class(e->ns, e->klass);
     }
     if (!c) c = eg_find_class("*", e->klass);
     if (!c) {
+        EG_I("resolve: %s::%s class NOT found", e->ns[0] ? e->ns : "*", e->klass);
         eg_fail_add("class-not-found", e, NULL);
         return 0;
     }
@@ -666,9 +677,13 @@ static int eg_resolve_line(eg_hook_entry *e, const char *line) {
     void *fn = eg_resolve_slot(c, e->method, -1, &slot);
     // fn == 0 表示这是个没有方法体的成员（抽象/外部实现），没有可替换的地址，跳过
     if (!fn || !slot) {
+        EG_I("resolve: %s::%s::%s no body (fn=%p slot=%p)", e->ns[0] ? e->ns : "*",
+             e->klass, e->method, fn, slot);
         eg_fail_add("method-not-found-or-no-body", e, NULL);
         return 0;
     }
+    EG_I("resolve: %s::%s::%s -> fn=%p slot=%p", e->ns[0] ? e->ns : "*", e->klass,
+         e->method, fn, slot);
     e->target = fn;
     e->slot = slot;
     return 1;
@@ -750,8 +765,16 @@ static int eg_slot_restore(void *slot, void *orig) {
 static int eg_install_enc_fallback(void) {
     if (g_enc_hooked) return 1;
     void *base = eg_find_base();
-    if (!base) return -1;
+    if (!base) {
+        // 库还没映射：**绝不能**拿 0 去算 base+offset（真机 SIGSEGV 就是这么来的）
+        EG_I("fallback: libil2cpp not mapped yet, skip (will retry)");
+        return -1;
+    }
     void *target = (void *) ((uintptr_t) base + EG_ENC_OFFSET);
+    if (!eg_mem_ok((uintptr_t) target, 16)) {
+        EG_I("fallback: target %p outside any readable mapping, skip", target);
+        return -1;
+    }
     int ok = eg_verify_enc(target);
     if (ok <= 0) {
         // 具体字节：真机上才能判断是「基址变了」还是「这版序言不一样」
@@ -783,6 +806,13 @@ static int eg_install_enc_fallback(void) {
 int eg_of_install(int target, const char *names) {
     if (target < EG_TARGET_MIN || target > EG_TARGET_MAX) return -5;
     long long t0 = eg_now_ms();
+    // libil2cpp 还没进内存 → 直接 -1（「请稍后再来」），**绝不**往下算 base+offset。
+    // 真机 17:17:21 的 SIGSEGV 就是在这里发生的：那时 base 还是 0。
+    if (!eg_lib_present()) {
+        EG_I("offline: target=%d deferred, libil2cpp not mapped yet (%lldms)",
+             target, eg_now_ms() - t0);
+        return -1;
+    }
     // 单机模式**关着**时：除兜底闸（EncryptRJ256，两闸共用）外一个 hook 都不装。
     // 关单机本来就不需要界面/请求那几族 —— 早先这里照样去解析并挂载，
     // 白花几十次 il2cpp 解析（真机上就是这一串把启动拖住的）。Java 侧也会跳过，
@@ -833,10 +863,14 @@ int eg_of_install(int target, const char *names) {
                     *slot = tmp;
                     slot->target_kind = target;
                     slot->hook = EG_HOOK_FNS[idx];
+                    EG_I("slot write: [%d] %s::%s slot=%p -> hook=%p (before)", idx, slot->klass,
+                         slot->method, slot->slot, slot->hook);
+                    long long w0 = eg_now_ms();
                     if (EG_HOOK_FNS[idx] && eg_slot_replace(slot->slot, slot->hook, &slot->orig)) {
                         slot->installed = 1;
                         g_hook_count++;          // 提交：从现在起回调读得到这一项
                         g_stats_resolve++;
+                        EG_I("slot write: [%d] ok in %lldms", idx, eg_now_ms() - w0);
                     } else {
                         eg_hook_entry keep = *slot;   // 留一份带名字和地址的，用来记失败
                         memset(slot, 0, sizeof *slot);
@@ -844,6 +878,7 @@ int eg_of_install(int target, const char *names) {
                         g_stats_skipped++;
                         const char *why = EG_HOOK_FNS[idx] ? "slot-write-failed" : "no-hook-fn-for-index";
                         eg_fail_add(why, &keep, NULL);
+                        EG_I("slot write: [%d] FAILED (%s) %s", idx, why, line);
                         LOGW("slot replace failed (nothing written): %s", line);
                     }
                 } else if (!ok) {
@@ -876,7 +911,9 @@ int eg_of_uninstall(void) {
     pthread_mutex_lock(&g_install_lock);
     int n = 0;
     if (g_enc_hooked && g_enc_orig) {
-        eg_slot_restore((void *) ((uintptr_t) eg_find_base() + EG_ENC_OFFSET), (void *) g_enc_orig);
+        // 没基址就根本没挂过（也绝不拿 0 去算地址）
+        void *b = eg_find_base();
+        if (b) eg_slot_restore((void *) ((uintptr_t) b + EG_ENC_OFFSET), (void *) g_enc_orig);
         g_enc_hooked = 0;
         n++;
     }

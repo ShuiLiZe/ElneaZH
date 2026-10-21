@@ -95,4 +95,13 @@ static inline int eg_ilog_t(const char *thread, const char *fmt, ...) {
 
 #define EG_I(fmt, ...) eg_ilog(fmt, ##__VA_ARGS__)
 
+// 当前线程名（静态缓冲区，只在打日志时立刻用；不跨线程保存）
+static inline const char *eg_thread_tag(void) {
+    static __thread char buf[48];
+    return eg_thread_desc(buf, sizeof buf);
+}
+
+// 当前线程 tid（SYS_gettid，Linux 线程 id；等于 logcat 里 pid/tid 字段的 tid）
+static inline long eg_tid(void) { return (long) syscall(SYS_gettid); }
+
 #endif  // EG_LOG_H

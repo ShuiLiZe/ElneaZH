@@ -25,8 +25,23 @@ int eg_sym_bind(const char **names, void **out, int n, char *missing, size_t mis
 void *eg_lib(const char *soname);
 void *eg_dlopen_from_maps(const char *soname);
 
-// /proc/self/maps 里 soname 的加载基址（dlpi_addr）；先 dl_iterate_phdr 再退回 maps；找不到返回 0
+// libil2cpp.so 的加载基址（dlpi_addr）。
+//
+// **首选 dl_iterate_phdr**（不受 Android 链接器命名空间限制，也不读文件），
+// 拿不到才退回 /proc/self/maps；找到一次就缓存（库地址不会变，只会在还没 dlopen 时「暂时没有」）。
+// 找不到返回 0 —— 调用方**必须**检查 0，绝不能拿 0 + 偏移去读写（真机 SIGSEGV 就是这么来的：
+// x0=0，x25=0x18ad7e4，见 HANDOFF 17:17:21 那条）。
 uintptr_t eg_lib_base(const char *soname);
+
+// libil2cpp.so 是否已经在内存里映射（= 可以安全算 base+offset）。
+// 轮询用：只有 dl_iterate_phdr / maps，绝不 dlopen、绝不解析符号。
+int eg_lib_present(void);
+
+// 强制重新查一次（库可能刚刚才 dlopen）。成功返回基址，失败 0。
+uintptr_t eg_lib_base_refresh(void);
+
+// 缓存的基址（0 = 还没有）。名字闸门 / 单机闸门共享这一份，谁先解析谁写。
+uintptr_t eg_lib_base_cached(void);
 
 // 地址区间 [a, a+n) 是否在某个已映射区间里。
 //
