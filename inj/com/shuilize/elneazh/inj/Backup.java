@@ -524,13 +524,8 @@ final class Backup {
     //   PlayerPrefs 里的资源版本键：'assetbundle_version'(10436) 等 —— 只删登录键，不当整体清空。
     //
     // 存档 sv1_* 全删：它们存的是旧身份的存档（含旧 PlayerPrefs 之外的角色/家族/世界状态）。
-    static final Set<String> LOGIN_PREF_KEYS = new HashSet<>();
-    static {
-        for (String k : new String[]{
-                "uuid", "login_key", "althi_uniq", "token", "token_id",
-                "user_id", "user_uniq", "user_pass", "user_name", "user_rename",
-                "account", "session", "session_id", "device_id"}) LOGIN_PREF_KEYS.add(k);
-    }
+    static final Set<String> LOGIN_PREF_KEYS = IdentityKeys.LOGIN_PREF_KEYS;
+
     /** 这些 prefs 文件本身就是登录凭证（althi_uniq 有时单独存一个 xml）。 */
     private static final Set<String> LOGIN_PREF_FILES = new HashSet<>();
     static {
@@ -544,14 +539,11 @@ final class Backup {
     }
 
     /**
-     * 身份键的**唯一**判定入口 —— 换身份删除与「只恢复存档」跳过必须用同一套，
-     * 否则一处删了、一处又写回来，等于没换。
-     * 覆盖：LOGIN_PREF_KEYS 固定名单 + 宽匹配（WIDE_KEY_PARTS）
-     * + Unity 设备级指纹 unity.cloud_userid；KEEP_KEY_PARTS 里的设置键永远不算。
+     * 身份键的唯一判定入口 —— 换身份删除与「只恢复存档」跳过必须用同一套，
+     * 否则一处删了、一处又写回来，等于没换。实现在 {@link IdentityKeys}（纯逻辑，可离线单测）。
      */
     static boolean isIdentityKey(String key) {
-        if (key == null) return false;
-        return isLoginPrefKey(key, true) || isLoginPrefKey(android.net.Uri.decode(key), true);
+        return IdentityKeys.isIdentityKey(key);
     }
 
     /**
@@ -563,47 +555,18 @@ final class Backup {
     }
 
     private static boolean isLoginPrefKey(String k) {
-        return isLoginPrefKey(k, false);
+        return IdentityKeys.isLoginPrefKey(k, false);
     }
 
-    /**
-     * 登录键判定。{@code wide} 打开时按「宽匹配」再判一次 —— 上一个版本只认 14 个固定键名，
-     * 真机上仍然换不掉身份，说明服务器认的字段不止这些（见 HANDOFF 2026-10-21 12:10）：
-     *  - 键名里带 uuid / ulid / udid / login / uniq / token / session / account / migrant /
-     *    transfer / device / user_id … 任一段；
-     *  - Unity Analytics 的 {@code unity.cloud_userid} 是设备级匿名 id，服务器拿它当换身份指纹；
-     *  - 明确属于「资源版本 / 设置 / 我们自己的」键一律不删（KEEP_KEY_PARTS）。
-     */
+    /** 见 {@link IdentityKeys#isLoginPrefKey}。 */
     static boolean isLoginPrefKey(String k, boolean wide) {
-        if (k == null) return false;
-        String s = k.toLowerCase(Locale.US).trim();
-        if (s.startsWith("elneazh_")) return false;          // 我们自己的键永远不动
-        if (LOGIN_PREF_KEYS.contains(s)) return true;
-        if (!wide) return false;
-        for (String keep : KEEP_KEY_PARTS) if (s.contains(keep)) return false;
-        if (s.equals("unity.cloud_userid")) return true;
-        for (String hit : WIDE_KEY_PARTS) if (s.contains(hit)) return true;
-        return false;
+        return IdentityKeys.isLoginPrefKey(k, wide);
     }
 
-    /** 宽匹配时命中即删的键名片段（小写）。 */
-    private static final String[] WIDE_KEY_PARTS = {
-            "uuid", "ulid", "udid", "login", "uniq", "token", "session", "account",
-            "migrant", "migrate", "transfer", "first_launch", "firstlaunch",
-            "device", "user_id", "user_uniq", "user_pass", "user_name"};
     /** 宽匹配时命中即保留的键名片段 —— 资源版本、画面/音量设置、我们自己的表。
      *  注意：app 自己的「客户端版本/渠道」也带 version/chnl，但那是游戏写的，删了只会重算，
      *  所以只按整个键名保留 Unity 的 assetbundle_version，不用 'version' 这种大词兜。 */
-    private static final String[] KEEP_KEY_PARTS = {
-            "elneazh_", "assetbundle_version", "ab_version", "volume", "sound",
-            "bgm", "se_", "quality", "resolution", "language", "lang",
-            "brightness", "frame", "graphics", "shadow", "vsync", "fullscreen",
-            "notify", "save_path", "autosave", "font", "scale", "user_dict",
-            "user_skill", "user_item", "user_weapon", "user_mailbox", "user_sale",
-            "user_right", "user_group", "user_locale", "userdata",
-            "player_session"};
-
-    /**
+/**
      * 换身份：只删「明确属于登录凭证 / 旧存档」的东西，数据包与汉化表一概不碰。
      *  - files/ 与 ext files 下的 sv1_*（存档）、*.ntmp/*.rtmp（写了一半的临时文件）
      *  - PlayerPrefs 里的登录键（uuid / login_key / althi_uniq / token / user_* …）—— 逐键 remove，
@@ -717,10 +680,53 @@ final class Backup {
             }
         }
 
+        del += wipeWebStorage(ctx);
         Log.i(TAG, "identity wipe (wide): deleted " + del + "; UnityCache/tables/resource prefs kept");
+        Log.i(TAG, "identity wipe summary: prefs keys + save files + login dirs/files + databases + web storage");
     }
 
     /** 递归删一整棵目录（只用于登录目录这种明确目标）。 */
+    /**
+     * 换身份：清 WebView 的 cookie 与网页缓存。
+     * 依据：商店 / 恢复码之类页面走 WebView，CookieManager 把 uuid / session 存在
+     * /data/data/<pkg>/app_webview/ 里；只删 prefs 与存档、不动这份 cookie 时，
+     * 服务器仍能从 cookie 认出旧身份。CookieManager 必须在有 Looper 的线程调用，调用方在主线程。
+     */
+    static int wipeWebStorage(Context ctx) {
+        int n = 0;
+        try {
+            android.webkit.CookieManager cm = android.webkit.CookieManager.getInstance();
+            if (cm != null) {
+                cm.setAcceptCookie(true);
+                try { cm.removeAllCookies(null); n++; } catch (Throwable t) { Log.w(TAG, "cookie removeAllCookies", t); }
+                try { cm.flush(); } catch (Throwable ignored) {}
+                if (cm.hasCookies()) {
+                    // 有机型 flush 晚一拍，再清一次
+                    try { cm.removeAllCookies(null); n++; } catch (Throwable ignored) {}
+                }
+                Log.i(TAG, "identity: cookie manager cleared, hasCookies=" + cm.hasCookies());
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "identity: cookie clear failed", t);
+        }
+        File data = ctx.getFilesDir().getParentFile();
+        for (String nm : new String[]{"app_webview", "app_textures", "app_tmpdir",
+                "cache/WebView", "cache/org.chromium.android_webview"}) {
+            File f = new File(data, nm);
+            if (f.exists()) {
+                n += deleteTree(f);
+                Log.i(TAG, "identity: removed web storage " + nm);
+            }
+        }
+        File localStorage = new File(new File(data, "app_webview"), "Local Storage");
+        if (localStorage.exists()) {
+            n += deleteTree(localStorage);
+            Log.i(TAG, "identity: removed Local Storage");
+        }
+        Log.i(TAG, "identity: web storage cleared (" + n + " entries)");
+        return n;
+    }
+
     private static int deleteTree(File f) {
         int n = 0;
         if (f == null) return 0;
@@ -810,7 +816,7 @@ final class Backup {
      * 其余设置（画面 / 音量 / 资源版本）保留。判据与换身份删除是同一套
      * {@link #isIdentityKey}，不会出现「这边删那边留」。
      */
-    private static void stripIdentityKeys(Context ctx, File prefsXml) {
+    static void stripIdentityKeys(Context ctx, File prefsXml) {
         try {
             String xml = readText(prefsXml);
             if (xml == null) return;

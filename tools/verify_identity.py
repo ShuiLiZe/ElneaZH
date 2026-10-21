@@ -237,6 +237,20 @@ def main():
         check('identity-key', pref_key_action(k, 'jp.co.althi.elnea.en.v2.playerprefs.xml'),
                   'keep', f'设置键 {k} 保留（只恢复存档不能丢设置）')
 
+    # 身份键判定抽到 IdentityKeys（纯 JDK，单测直接测），Backup 只转发
+    ik = (ROOT / 'inj/com/shuilize/elneazh/inj/IdentityKeys.java').read_text(encoding='utf-8')
+    check('identity-key', 'has' if 'WIDE_KEY_PARTS' in ik else 'missing', 'has',
+          'IdentityKeys 集中列出宽匹配词根')
+    check('identity-key', 'has' if '"uid"' in ik else 'missing', 'has',
+          'uid 也算身份键（游戏 login.php 的 uid/pas 参数）')
+    check('identity-key', 'has' if 'filterIdentityKeys' in ik else 'missing', 'has',
+          'IdentityKeys.filterIdentityKeys 供批量筛选复用')
+    check('identity-key', 'has' if 'IdentityKeys.isLoginPrefKey' in bj else 'missing', 'has',
+          'Backup 的身份判定转发到 IdentityKeys')
+    pp = ROOT / 'tools/offline_test/com/shuilize/elneazh/inj/PlayerPrefsTest.java'
+    check('identity-key', 'has' if pp.exists() else 'missing', 'has',
+          'PlayerPrefsTest 纯 JDK 单测存在（CI 必跑）')
+
     print('identity wipe OK' if bad == 0 else f'identity wipe WRONG ({bad})')
     return 0 if bad == 0 else 1
 

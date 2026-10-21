@@ -2,6 +2,32 @@
 
 _最后更新：2026-10-21 13:05 CST_
 
+## 2026-10-21 14:10 身份判定抽成 IdentityKeys + 纯 JDK 单测
+
+换身份这一路的判定逻辑原来埋在 `Backup.java` 里（`isLoginPrefKey` / 宽匹配词根 / 白名单），
+改一个字就得靠真机试。现在抽到 `inj/com/shuilize/elneazh/inj/IdentityKeys.java`（无 android 依赖的纯静态类），
+`Backup.isLoginPrefKey()` 转发过去，判定口径只有一份。
+
+- `IdentityKeys.WIDE_KEY_PARTS` 补了 `uid`（游戏 `login.php` 发的是 `uid` / `pas` 这对参数，
+  之前 `uid` 既不命中固定名单也不命中词根，换身份时不会被清）。
+- 新增 `IdentityKeys.isIdentityKey(String)` / `filterIdentityKeys(Iterable)` / `decode(String)`：
+  「换身份删除」和「只恢复存档跳过」现在是同一个函数，不会再各写一套越走越偏。
+- 新增 `tools/offline_test/com/shuilize/elneazh/inj/PlayerPrefsTest.java`（58 项，纯 JDK 跑）：
+  23 个身份键必须命中、18 个设置/资源包/汉化键必须保留、大小写与空格、`%5F` 这类 URL 编码键名、
+  `elneazh_*` 前缀永不算身份、白名单优先于宽匹配、窄匹配（旧 14 键行为）必须漏掉 `cached_user_id`（回归证据）。
+- `.github/workflows/build-check.yml` 的单测步骤加上 `IdentityKeys.java` 与 `PlayerPrefsTest`。
+
+**不确定就保留**（宁可新身份还残留一点，也不误删存档/资源）：白名单词根
+`assetbundle_version` `ab_version` `volume` `sound` `bgm` `quality` `resolution` `language` `lang`
+`brightness` `frame` `graphics` `shadow` `vsync` `fullscreen` `notify` `save_path` `autosave` `font`
+`scale` `user_dict` `user_skill` `user_item` `user_weapon` `user_mailbox` `user_sale` `user_right`
+`user_group` `user_locale` `userdata` `player_session`，以及整包 `elneazh_*`。
+宽匹配只在这张名单之外生效。
+
+自测：`tools/ci_inj.py` javac OK 88 classes；`PlayerPrefsTest` 58 checks / 0 failed；
+`tools/verify_identity.py` `identity wipe OK`（新增 5 项 IdentityKeys 检查）；
+`tools/verify_offline.py` 255 项全过；`tools/verify_gate.py` PASS。
+
 ## 2026-10-21 13:05 恢复存档拆成两种：完整恢复 / 只恢复存档（保留当前身份）
 
 真机事故链（就是「换完身份还卡登录」的真正原因）：

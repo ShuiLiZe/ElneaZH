@@ -1,5 +1,11 @@
 ## 2026-10-21 13:35 ci: 单机单测 javac 加 -sourcepath inj（从根上杜绝漏编译兄弟类）
 
+
+## 2026-10-21
+
+- 身份判定抽成 `IdentityKeys`（纯 JDK）+ 补 `uid` 进宽匹配词根；
+  「换身份删除」与「只恢复存档跳过」共用 `isIdentityKey`。
+- 新增纯 JDK 单测 `PlayerPrefsTest`（58 项），build-check 必跑。
 - 现象：build-check 的 Offline unit test 步骤在 5d5b1de / a22e762 / 7733c94 / 489427c / 0c81eb5 上红，
   报 `NameFix.java:166: error: cannot find symbol / variable UploadNames`（#17 #18 #19 #20 #21）。
 - 0b77c16 已把 UploadNames.java 加进编译列表（#22 起该错误消失）；#22 的失败是另一原因
