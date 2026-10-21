@@ -72,6 +72,13 @@ final class NativeGuard {
         if (ctx == null) return;
         app = ctx.getApplicationContext() != null ? ctx.getApplicationContext() : ctx;
         strikes = readStrikes();
+        // 真机 23:19：玩家自己划掉游戏（o-stop / 强行停止）也被记成「没活下来」，连两次就停用 native。
+        // Android 11+ 能查上一轮进程为什么退出：不是崩溃 / ANR / 被信号杀，这一击就不算。
+        String exit = lastExit(app);
+        if (strikes > 0 && exit != null && exit.startsWith("benign")) {
+            strikes = strikes - 1;
+            Log.i(TAG, "boot guard: last exit " + exit + " — not counted");
+        }
         cleared = false;
         boolean boost = boostEnabled(app);
         if (!boost) {
@@ -93,6 +100,24 @@ final class NativeGuard {
             catch (Throwable ignored) {}
         }
         scheduleSurvive();
+    }
+
+    /** 上一轮进程的退出原因："benign:<n>" / "crash:<n>"；查不到返回 null（旧系统照旧计数）。 */
+    private static String lastExit(Context c) {
+        if (android.os.Build.VERSION.SDK_INT < 30) return null;
+        try {
+            android.app.ActivityManager am =
+                    (android.app.ActivityManager) c.getSystemService(Context.ACTIVITY_SERVICE);
+            java.util.List<android.app.ApplicationExitInfo> l =
+                    am.getHistoricalProcessExitReasons(c.getPackageName(), 0, 1);
+            if (l == null || l.isEmpty()) return null;
+            int r = l.get(0).getReason();
+            // SIGNALED(2) CRASH(4) CRASH_NATIVE(5) ANR(6) INITIALIZATION_FAILURE(7) 才算坏
+            boolean bad = r == 2 || r == 4 || r == 5 || r == 6 || r == 7;
+            return (bad ? "crash:" : "benign:") + r;
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     /** 这一轮允许加载 native 吗。启动后随时可问。 */
