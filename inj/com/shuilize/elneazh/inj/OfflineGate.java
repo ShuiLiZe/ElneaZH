@@ -56,7 +56,10 @@ final class OfflineGate {
     private static final String LIB = "elneagate";
 
     private static boolean loaded;
-    private static boolean loadTried;
+    /** 加载成功只打一次日志，失败每条都打（真机 logcat 才有东西可看）。 */
+    private static boolean loggedReady;
+    /** 安装结束后重写一次 selfcheck（安装前写的那份必然是 not loaded）。 */
+    private static volatile Context ctxRef;
     private static volatile int[] lastResults = new int[0];
     private static volatile boolean installedAny;
     private static volatile boolean workerRunning;
@@ -391,30 +394,26 @@ final class OfflineGate {
 
     static synchronized boolean load(Context ctx) {
         if (loaded) return true;
-        if (loadTried) return false;
-        loadTried = true;
-        // 与名字闸门共用同一个 libelneagate.so。进程里只能有一份：
-        // 这里先请 NameGate 装（它有自己的 assets 解包 + 失败日志），装上了就直接复用。
-        // 早先两边各自解包一份再 System.loadLibrary 同一个名字，谁先谁后都可能让后者拿到
-        // 一个「名字已占用但没真正加载」的状态，闸门就永远不会挂上。
-        try {
-            if (NameGate.load(ctx)) {
-                loaded = true;
-                Log.i(TAG, "libelneagate.so ready (shared with name gate)");
-                return true;
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "name gate load threw: " + t);
-        }
-        try {
-            unpack(ctx, LIB);
-            System.loadLibrary(LIB);
+        // 与名字闸门共用同一个 libelneagate.so，也共用同一个加载器（NativeLoad）：
+        // 解包到 files/lib 后走 System.load(绝对路径)，失败会重试（不再有 loadTried 一次性锁死）。
+        // 早先两边各自解包再 System.loadLibrary 同一个名字，谁先谁后都可能让后者拿到
+        // 一个「名字已占用但没真正加载」的状态，闸门就永远不会挂上 —— 真机 selfcheck 的
+        // `native: not loaded` 就是这么来的。
+        if (NativeLoad.tryLoad(ctx)) {
             loaded = true;
-            Log.i(TAG, "libelneagate.so loaded (offline gate, own copy)");
-        } catch (Throwable t) {
-            Log.w(TAG, "libelneagate.so not loaded (offline gate): " + t);
+            if (!loggedReady) {
+                loggedReady = true;
+                Log.i(TAG, "libelneagate.so ready (" + NativeLoad.describe() + ")");
+            }
+        } else {
+            Log.w(TAG, "libelneagate.so NOT loaded (offline gate): " + NativeLoad.describe());
         }
         return loaded;
+    }
+
+    /** 自检用：加载状态 + 上次 dlopen 错误串。 */
+    static String loadState() {
+        return NativeLoad.describe();
     }
 
     static boolean loaded() {
@@ -505,7 +504,12 @@ final class OfflineGate {
      * @return 上次已知的合计挂载数（后台还在装时可能是 0）
      */
     static int install(final Context ctx, int waitMs) {
-        if (!load(ctx)) return -100;
+        if (ctx != null) ctxRef = ctx.getApplicationContext() != null ? ctx.getApplicationContext() : ctx;
+        if (!load(ctx)) {
+            // 没加载上：照样把 selfcheck 重写一遍，把 dlopen 错误串写进去（用户一条命令就能看到原因）。
+            SelfCheck.rewriteAsync(ctxRef);
+            return -100;
+        }
         push(ctx);
         if (workerRunning) {
             Log.i(TAG, "install already running; push only");
@@ -564,6 +568,9 @@ final class OfflineGate {
         lastResults = results;
         installedAny = total() > 0;
         Log.i(TAG, "install done: " + describe());
+        // 进程刚起来时 ZhInit 里的 selfcheck 记的是「还没加载 / 还没挂」的状态；挂完这一轮再把
+        // 真实数字重写一遍，真机上 files/elneazh_selfcheck.txt 才是最终态。
+        SelfCheck.rewriteAsync(ctxRef);
     }
 
     /**
@@ -658,58 +665,16 @@ final class OfflineGate {
         }
     }
 
-    // ---------------- assets 里的 .so 解包 ----------------
+    // ---------------- assets 里的 .so 解包（已合并到 NativeLoad） ----------------
 
-    /**
-     * 把 {@code assets/elneagate/lib<abi>/lib<name>.so} 解到私有目录再加载。
-     * 逻辑与 {@link NameGate} 的一致（同一个 .so，同一份 assets），这里单独放一份是为了
-     * 让本类能在纯 JDK 环境里被测（不牵扯 NameGate 的其它依赖）。
-     */
+    /** 兼容旧调用点：解包并返回绝对路径。加载本身见 {@link NativeLoad}。 */
     static String unpack(Context ctx, String name) {
-        String abi = android.os.Build.SUPPORTED_ABIS.length > 0
-                ? android.os.Build.SUPPORTED_ABIS[0] : "arm64-v8a";
-        java.io.File dir = new java.io.File(ctx.getFilesDir(), "lib");
-        if (!dir.isDirectory() && !dir.mkdirs()) return null;
-        java.io.File out = new java.io.File(dir, "lib" + name + ".so");
-        String asset = "elneagate/lib" + abi + "/lib" + name + ".so";
-        try {
-            long want = -1;
-            android.content.res.AssetFileDescriptor fd = null;
-            try {
-                fd = ctx.getAssets().openFd(asset);
-                want = fd.getLength();
-            } finally {
-                if (fd != null) fd.close();
-            }
-            if (out.isFile() && out.length() == want && want > 0) return out.getAbsolutePath();
-            java.io.InputStream in = ctx.getAssets().open(asset);
-            try {
-                java.io.File tmp = new java.io.File(dir, "lib" + name + ".so.tmp");
-                java.io.FileOutputStream fo = new java.io.FileOutputStream(tmp);
-                try {
-                    byte[] buf = new byte[65536];
-                    int k;
-                    while ((k = in.read(buf)) > 0) fo.write(buf, 0, k);
-                    fo.getFD().sync();
-                } finally {
-                    fo.close();
-                }
-                if (out.exists() && !out.delete()) { /* 覆盖 rename */ }
-                if (!tmp.renameTo(out)) throw new java.io.IOException("rename " + tmp);
-            } finally {
-                in.close();
-            }
-            Log.i(TAG, "unpacked " + asset + " -> " + out + " (" + out.length() + " B)");
-            return out.getAbsolutePath();
-        } catch (Throwable t) {
-            Log.w(TAG, "unpack " + asset + " failed: " + t);
-            return null;
-        }
+        return NativeLoad.ensure(ctx, name);
     }
 
     static String describe() {
         int[] s = stats();
-        if (s == null) return "native: not loaded";
+        if (s == null) return "native: not loaded (" + NativeLoad.describe() + ")";
         List<String> parts = new ArrayList<>();
         parts.add("hooked=" + s[0]);
         parts.add("hidden=" + s[1]);

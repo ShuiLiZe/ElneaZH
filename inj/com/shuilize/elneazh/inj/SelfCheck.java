@@ -18,9 +18,43 @@ import java.io.StringWriter;
 final class SelfCheck {
     private static final String TAG = "ElneaZH-SELF";
 
+    /**
+     * 后台重写一遍 selfcheck（native 加载完 / 挂完之后调）。同一秒内的重复请求会合并。
+     * 绝不抛异常、绝不阻塞调用方（安装线程）。
+     */
+    static void rewriteAsync(final Context context) {
+        if (context == null) return;
+        try {
+            Thread t = new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        SelfCheck.run(context);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }, "ElneaZH-selfcheck");
+            t.setDaemon(true);
+            t.start();
+        } catch (Throwable ignored) {
+        }
+    }
+
     static void run(Context ctx) {
         StringBuilder r = new StringBuilder();
         try {
+            r.append("== native 加载（两个闸门共用 libelneagate.so） ==\n");
+            r.append("native load: ").append(NativeLoad.describe()).append('\n');
+            String e = NativeLoad.err();
+            if (!NativeLoad.loaded() && !e.isEmpty()) {
+                r.append("native load error: ").append(e).append('\n');
+            }
+            r.append("name gate: ").append(NameGate.loadState()).append('\n');
+            r.append("name gate hooked: ").append(NameGate.hooked()).append('\n');
+            r.append("offline gate: ").append(OfflineGate.loadState()).append('\n');
+            // 就地显示自检写入的时刻：知道这份报告是「加载前」还是「挂完之后」写的。
+            r.append("written: ").append(new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss",
+                    java.util.Locale.US).format(new java.util.Date())).append('\n');
+            r.append('\n');
             NameFix.load(ctx);
             r.append("names: ").append(NameFix.stats()).append('\n');
             r.append("pinyin table: ").append(Pinyin.tableSize()).append(" chars\n");
@@ -120,14 +154,20 @@ final class SelfCheck {
             }
             r.append("blob round trip: ").append(b64.length()).append(" -> ").append(b64b.length())
                     .append(round ? " OK" : " NOT-CHANGED-OR-BAD").append('\n');
-            // 3) 别名表规模（应随玩家取名增长，并随备份一起走）
-            r.append("aliases: ").append(NameFix.aliasSnapshot().size()).append('\n');
-            r.append("gate installed: ").append(NetGuard.installed()).append('\n');
         } catch (Throwable t) {
             StringWriter sw = new StringWriter();
             t.printStackTrace(new PrintWriter(sw));
             r.append("FAILED: ").append(sw).append('\n');
         }
+        // 汇总放在最后一行（前面是明细），用户 tail 一把也能看到关键三行。
+        r.append('\n');
+        r.append("native load: ").append(NativeLoad.describe()).append('\n');
+        if (!NativeLoad.loaded() && !NativeLoad.err().isEmpty()) {
+            r.append("native load error: ").append(NativeLoad.err()).append('\n');
+        }
+        r.append("gate installed: ").append(NetGuard.installed())
+                .append(" (native hooked=").append(NameGate.hooked()).append(")\n");
+        r.append("offline native: ").append(OfflineGate.describe()).append('\n');
         String text = r.toString();
         Log.i(TAG, "\n" + text);
         try (FileOutputStream o = new FileOutputStream(new File(ctx.getFilesDir(), "elneazh_selfcheck.txt"))) {

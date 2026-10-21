@@ -1,6 +1,39 @@
 # HANDOFF — 现状（只写当前状态；过程见 docs/CHANGELOG.md，规矩见 AGENTS.md）
 
-_最后更新：2026-10-21 13:05 CST_
+_最后更新：2026-10-21 15:10 CST_
+
+## 2026-10-21 15:10 native 闸门真的加载（.so 没进游戏 APK + loadLibrary 用错名字，两个根因一起修）
+
+真机 selfcheck 是 `gate installed: false` / `offline native: native: not loaded` / `offline native api: -1/5` /
+`hooked total: false`，`adb logcat -s ElneaOffline ElneaGate ElneaZH` 一条都没有 —— 也就是 `libelneagate.so`
+在游戏进程里**从来没被加载过**。两个独立根因，缺一个都还是加载不上：
+
+1. **`.so` 根本没进游戏 APK**：`app/src/main/assets/elneagate/lib<abi>/libelneagate.so` 是打在汉化器自己 APK 里的，
+   游戏进程读不到；`Pipeline.addZh` 只搬 `Contents/map/about/data/bundles` 五个子目录，
+   `MainViewModel.copyAssetDir` 也只搬 `elneazh` → 重打包出来的游戏 APK 里没有 `assets/elneagate/…`，
+   `Libs.ensure()` 取 asset 必失败。
+   修：`MainViewModel` 多搬一层 `assets/elneagate → payload/elneagate`，`Pipeline.addZh` 把
+   `elneagate/lib{arm64-v8a,armeabi-v7a}/libelneagate.so` 写进游戏 APK 的 `assets/elneagate/lib<abi>/`（常量 `GATE_DIR`/`GATE_LIB`）。
+2. **解包后调错了 API**：旧 `NameGate.load()` 解到 `files/lib/libelneagate.so` 之后调
+   `System.loadLibrary("elneagate")` —— 让 linker 去 APK 的 lib 目录找，那里没有这个 .so → `UnsatisfiedLinkError`；
+   又因为 `loadTried` 是一次性开关，**失败一次整个进程永不重试**，`OfflineGate` 各解一份再 loadLibrary 也一样失败。
+   修：新增 `NativeLoad.java`（两个闸门唯一的加载入口）：解包拿绝对路径 → `System.load(绝对路径)`，
+   失败后每 2s 允许重试，成功/失败都打 `android.util.Log`（tag `ElneaGate`），最后一次 dlopen 原文留在 `err()`。
+
+配套：
+- `SelfCheck` 顶部与末尾各加 `native load:` / `native load error:` / `written:`（写入时刻）/ `name gate:` /
+  `offline gate:` 行；`OfflineGate.installAll()` 挂完之后（以及 install 没加载上时）在后台线程
+  `SelfCheck.rewriteAsync()` 重写一遍 —— 真机上那份文件因此是「挂完之后」的最终态，不是启动前那份。
+- `tools/verify_native_load.py`（本机 + CI 必跑）：.so 双 ABI 在、是合法 ELF、导出两套 JNI 符号、含 `ElneaGate` 日志标签；
+  打包链路（MainViewModel 搬、Pipeline 写进 assets/elneagate/）；Java 侧只用 `System.load`、没有 `loadLibrary`、没有一次性 `loadTried`、
+  加载状态与错误串真的写进 selfcheck。CI 三个 workflow 在 build_gate 之后加了这一步（先把 .so 拷进 payload 再校验）。
+
+本地验证：`python tools/verify_native_load.py` → `native load OK`；`verify_offline.py` 255 项、`verify_identity.py`、
+`verify_upload_names.py`、`verify_gate.py` 全 PASS；`tools/ci_inj.py` → `javac OK, 90 classes`。
+
+未验证：真机。装上之后先看 `files/elneazh_selfcheck.txt` 头部的 `native load:` 行（成功会带绝对路径与字节数），
+失败会带 `native load error: System.load(...) -> java.lang.UnsatisfiedLinkError: dlopen failed: …` 原文；
+再看 `adb logcat -s ElneaGate` 的 `attempt#N …`。
 
 ## 2026-10-21 14:10 身份判定抽成 IdentityKeys + 纯 JDK 单测
 

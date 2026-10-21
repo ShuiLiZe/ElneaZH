@@ -33,7 +33,6 @@ final class NameGate {
     private static final String LIB = "elneagate";
 
     private static boolean loaded;
-    private static boolean loadTried;
     private static volatile int installResult = Integer.MIN_VALUE;
 
     private NameGate() {}
@@ -54,23 +53,30 @@ final class NameGate {
 
     // ---------------- 加载 ----------------
 
+    /**
+     * 加载 {@code libelneagate.so}。真正的加载在 {@link NativeLoad}（两个闸门共用一份），
+     * 失败**不锁死**：只要还有重试窗口，下一次调用会重新解包 + 重新 {@code System.load}。
+     *
+     * <p>真机事故就是这一步：旧代码 {@code Libs.ensure()} 解出 .so 之后调的是
+     * {@code System.loadLibrary("elneagate")}，linker 去 APK 的 lib 目录找（那里没有这个 .so），
+     * 必然 UnsatisfiedLinkError，而且 {@code loadTried} 一次性开关让整个进程再也不重试 ——
+     * selfcheck 里于是永远 `native: not loaded`、logcat 一条闸门日志都没有。
+     */
     static synchronized boolean load(Context ctx) {
         if (loaded) return true;
-        if (loadTried) return false;
-        loadTried = true;
-        try {
-            Libs.ensure(ctx, LIB);
-            System.loadLibrary(LIB);
+        if (NativeLoad.tryLoad(ctx)) {
             loaded = true;
-            Log.i(TAG, "libelneagate.so loaded");
-        } catch (Throwable t) {
-            Log.w(TAG, "libelneagate.so not loaded: " + t);
         }
         return loaded;
     }
 
     static boolean loaded() {
         return loaded;
+    }
+
+    /** 自检用：加载状态 + 上次失败的错误串（含 dlopen 原文）。 */
+    static String loadState() {
+        return NativeLoad.describe();
     }
 
     // ---------------- 名字表 ----------------
@@ -204,61 +210,20 @@ final class NameGate {
         }
     }
 
-    // ---------------- assets 里的 .so 解包 ----------------
+    // ---------------- assets 里的 .so 解包（已合并到 NativeLoad） ----------------
 
+    /** 兼容旧调用点：解包并返回绝对路径。加载本身见 {@link NativeLoad}。 */
     static final class Libs {
         private Libs() {}
 
-        /**
-         * 把 {@code assets/elneagate/lib<abi>/lib<name>.so} 解到私有目录，返回绝对路径；
-         * 已经解过且大小一致就直接返回。找不到返回 null。
-         */
         static String ensure(Context ctx, String name) {
-            String abi = android.os.Build.SUPPORTED_ABIS.length > 0
-                    ? android.os.Build.SUPPORTED_ABIS[0] : "arm64-v8a";
-            java.io.File dir = new java.io.File(ctx.getFilesDir(), "lib");
-            if (!dir.isDirectory() && !dir.mkdirs()) return null;
-            java.io.File out = new java.io.File(dir, "lib" + name + ".so");
-            String asset = "elneagate/lib" + abi + "/lib" + name + ".so";
-            try {
-                long want = -1;
-                android.content.res.AssetFileDescriptor fd = null;
-                try {
-                    fd = ctx.getAssets().openFd(asset);
-                    want = fd.getLength();
-                } finally {
-                    if (fd != null) fd.close();
-                }
-                if (out.isFile() && out.length() == want && want > 0) return out.getAbsolutePath();
-                java.io.InputStream in = ctx.getAssets().open(asset);
-                try {
-                    java.io.File tmp = new java.io.File(dir, "lib" + name + ".so.tmp");
-                    java.io.FileOutputStream fo = new java.io.FileOutputStream(tmp);
-                    try {
-                        byte[] buf = new byte[65536];
-                        int k;
-                        while ((k = in.read(buf)) > 0) fo.write(buf, 0, k);
-                        fo.getFD().sync();
-                    } finally {
-                        fo.close();
-                    }
-                    if (out.exists() && !out.delete()) { /* 覆盖 rename */ }
-                    if (!tmp.renameTo(out)) throw new java.io.IOException("rename " + tmp);
-                } finally {
-                    in.close();
-                }
-                Log.i(TAG, "unpacked " + asset + " -> " + out + " (" + out.length() + " B)");
-                return out.getAbsolutePath();
-            } catch (Throwable t) {
-                Log.w(TAG, "unpack " + asset + " failed: " + t);
-                return null;
-            }
+            return NativeLoad.ensure(ctx, name);
         }
     }
 
     static String describe() {
         int[] s = stats();
-        if (s == null) return "native: not loaded";
+        if (s == null) return "native: not loaded (" + NativeLoad.describe() + ")";
         List<String> parts = new ArrayList<>();
         parts.add("hooked=" + (s[2] != 0));
         parts.add("rewrites=" + s[0]);

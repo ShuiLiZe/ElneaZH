@@ -15,6 +15,9 @@ public final class Pipeline {
     public static final String SO_ENTRY = "lib/arm64-v8a/libil2cpp.so";
     public static final String MANIFEST_ENTRY = "AndroidManifest.xml";
     public static final String BASE_SHA256 = "dc1796ffac62ea29796772f320c4218a922216aa417c4689abaeb6c0e917a155";
+    /** native 闸门在汉化器 assets 里的位置：assets/elneagate/lib<abi>/libelneagate.so → 原样进游戏 APK。 */
+    public static final String GATE_DIR = "elneagate";
+    public static final String GATE_LIB = "elneagate";
 
     public interface Listener {
         /** step: 0 verify, 1 patch, 2 rebuild, 3 sign; fraction 0..1 within step */
@@ -190,6 +193,16 @@ public final class Pipeline {
             for (String sub : new String[]{"Contents", "map", "about", "data", "bundles"}) {
                 File[] fs = new File(zhDir, sub).listFiles();
                 if (fs != null) for (File f : fs) rep.put("assets/elneazh/" + sub + "/" + f.getName(), f);
+            }
+            // native 闸门 .so（libelneagate.so，arm64-v8a + armeabi-v7a）。
+            // 少了这一步游戏进程里根本没有 assets/elneagate/…：NameGate/OfflineGate 解包必然失败，
+            // selfcheck 里就是「native: not loaded」、logcat 一条闸门日志都没有 —— 真机事故的根因之一。
+            File gate = new File(zhDir, GATE_DIR);
+            for (String abi : new String[]{"arm64-v8a", "armeabi-v7a"}) {
+                File so = new File(gate, "lib" + abi + "/lib" + GATE_LIB + ".so");
+                if (so.isFile()) {
+                    rep.put("assets/" + GATE_DIR + "/lib" + abi + "/lib" + GATE_LIB + ".so", so);
+                }
             }
         }
     }

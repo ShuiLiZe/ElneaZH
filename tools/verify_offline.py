@@ -425,8 +425,8 @@ check(i >= 0, "install(Context,int) 签名存在")
 if i >= 0:
     seg = og[i: i + 900]
     check("Thread" in seg, "install 立即返回，真装在后台线程")
-check("name gate load threw" in og or "NameGate.load(ctx)" in og,
-      "先复用 NameGate 已加载的 .so（避免二次 System.load 抢名字）")
+check("NativeLoad.tryLoad" in og,
+      "与名字闸门共用同一个加载器 NativeLoad（避免两边各解一份 / 抢同一个库名）")
 check("installRetry" in og, "每族都带重试（il2cpp 未就绪就再等）")
 check("lastResults = results.clone()" in og, "每族结果一出来就对外可见（界面能看到真实数字）")
 

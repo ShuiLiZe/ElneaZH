@@ -136,6 +136,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val zhDir = File(outDir, "elneazh")
                 zhDir.deleteRecursively()
                 val hasZh = copyAssetDir(ctx.assets, "elneazh", zhDir)
+                // native 闸门 .so 也搬进 payload 目录（Pipeline.addZh 会放进游戏 APK 的 assets/elneagate/）。
+                // 之前没人搬 → 游戏 APK 里压根没有 assets/elneagate/…，NameGate/OfflineGate 解包失败，
+                // 真机 selfcheck 就是「native: not loaded」。
+                copyAssetDir(ctx.assets, "elneagate", File(zhDir, "elneagate"))
                 val outs = Pipeline(outDir, signer).setZhDir(if (hasZh) zhDir else null).run(
                     g.apks, patch, info?.optString("new_sha256"),
                     if (hasMeta) metaPatch else null, info?.optString("meta_new_sha256")

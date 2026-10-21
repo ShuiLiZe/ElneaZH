@@ -91,6 +91,11 @@ jobs:
           python tools/build_gate.py
           python tools/verify_gate.py
           ls -la app/src/main/assets/elneagate/*/
+      - name: Verify native .so is shipped into the game APK (payload chain + load path)
+        run: |
+          mkdir -p app/src/main/assets/elneazh/elneagate
+          cp -r app/src/main/assets/elneagate/lib* app/src/main/assets/elneazh/elneagate/
+          python tools/verify_native_load.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
