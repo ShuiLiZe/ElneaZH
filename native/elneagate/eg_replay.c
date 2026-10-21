@@ -268,6 +268,64 @@ void rp_learn(const char *rx, size_t n) {
 }
 
 
+// ---------------------------------------------------------- 换身份后的登录：user_uniq 对齐
+// 真机 10-22 00:14：换身份后游戏仍用旧游客账号（user_name/user_pass/login_key）登录，但 addUniqArg
+// 补的是新设备码 user_uniq，服务器不认 → 每 0.5s 重试 10 次后跳账号页。重放库里有这个账号上次
+// 成功登录的回包（含服务器记的 user_uniq），请求里同名账号就把 user_uniq 换回服务器认的那个。
+static char *rp_json_str(const char *j, const char *key);
+static char g_uniq_from[96], g_uniq_to[96];
+static char *rp_find_uniq_for(const char *name) {
+    char pat[160];
+    snprintf(pat, sizeof pat, "\"user_name\":\"%s\"", name);
+    char *best = NULL;
+    pthread_mutex_lock(&g_map_lock);
+    for (int b = 0; b < RP_BUCKETS && !best; b++)
+        for (rp_e *e = g_map[b]; e && !best; e = e->next) {
+            if (!e->val || !strstr(e->val, pat) || !strstr(e->val, "\"login_key\"")) continue;
+            const char *res = strstr(e->val, "\"result\"");
+            if (res) best = rp_json_str(res, "user_uniq");
+        }
+    pthread_mutex_unlock(&g_map_lock);
+    return best;
+}
+static char *rp_replace(const char *s, const char *from, const char *to) {
+    const char *h = strstr(s, from);
+    if (!h) return NULL;
+    size_t a = (size_t) (h - s), fl = strlen(from), tl = strlen(to), n = strlen(s);
+    char *o = (char *) malloc(n - fl + tl + 1);
+    if (!o) return NULL;
+    memcpy(o, s, a); memcpy(o + a, to, tl); memcpy(o + a + tl, h + fl, n - a - fl + 1);
+    return o;
+}
+// 返回改写后的请求明文（malloc），不需要改返回 NULL
+char *eg_rp_fix_uniq(const char *tx) {
+    if (!tx || eg_of_is_off() || !strstr(tx, "\"user_uniq\":\"")) return NULL;
+    char *cur = rp_json_str(tx, "user_uniq");
+    if (!cur) return NULL;
+    char *name = rp_json_str(tx, "user_name");
+    if (name && strstr(tx, "\"login_key\"")) {
+        rp_load();
+        char *srv = rp_find_uniq_for(name);
+        if (srv && strcmp(srv, cur) != 0 && strlen(srv) < sizeof g_uniq_to && strlen(cur) < sizeof g_uniq_from) {
+            if (strcmp(g_uniq_to, srv) != 0 || strcmp(g_uniq_from, cur) != 0)
+                RPW("登录设备码对齐：账号 %s 服务器记的 user_uniq=%.6s…，本机=%.6s… → 发服务器记的", name, srv, cur);
+            snprintf(g_uniq_from, sizeof g_uniq_from, "%s", cur);
+            snprintf(g_uniq_to, sizeof g_uniq_to, "%s", srv);
+        }
+        free(srv);
+    }
+    free(name);
+    char *out = NULL;
+    if (g_uniq_to[0] && strcmp(cur, g_uniq_from) == 0) {
+        char f[128], t[128];
+        snprintf(f, sizeof f, "\"user_uniq\":\"%s\"", g_uniq_from);
+        snprintf(t, sizeof t, "\"user_uniq\":\"%s\"", g_uniq_to);
+        out = rp_replace(tx, f, t);
+    }
+    free(cur);
+    return out;
+}
+
 // ---------------------------------------------------------- 首次：从录制日志生成重放库
 static void rp_seed_from_netrec(void) {
     struct stat st;
@@ -434,7 +492,11 @@ static void rp_parse_hook(void *self, void *www, void *mi) {
     if (www || !eg_of_is_off() || !g_rp_ready || !self) {
         g_parse_orig(self, www, mi);
         // 联网出错时把游戏自己记下的错误写进 native.log（www.error 或服务端 "." 开头的明文错误）
-        if (self && !eg_of_is_off() && *(int32_t *) ((char *) self + 0x10) == 3) {
+        const char *pc = self ? rp_cls(self) : "?";
+        int cond = self ? *(int32_t *) ((char *) self + 0x10) : -1;
+        if (self && !eg_of_is_off() && (strstr(pc, "Login") || strstr(pc, "Recov")))
+            RPI("联网 Parse %s cond=%d www=%s", pc, cond, www ? "有" : "空");
+        if (self && !eg_of_is_off() && cond == 3) {
             size_t a = 0, b = 0;
             char *em = eg_rec_str(*(void **) ((char *) self + 0x20), &a);
             char *rc = eg_rec_str(*(void **) ((char *) self + 0x30), &b);

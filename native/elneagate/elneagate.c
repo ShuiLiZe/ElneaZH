@@ -277,6 +277,7 @@ static char *eg_string_to_utf8(void *s, size_t *out_len) {
     return buf;
 }
 
+char *eg_rp_fix_uniq(const char *tx);
 #if defined(__aarch64__)
 static void *eg_hook(void *plain_str) {
     g_stats_calls++;
@@ -291,11 +292,16 @@ static void *eg_hook(void *plain_str) {
     char *plain = NULL;
     char *fixed = NULL;
     size_t plain_len = 0, fixed_len = 0;
+    int uniq_fixed = 0;
     eg_filter_ctx ctx;
     memset(&ctx, 0, sizeof ctx);
     ctx.map = eg_map;
 
     plain = eg_string_to_utf8(plain_str, &plain_len);
+    {
+        char *u = eg_rp_fix_uniq(plain);   // 换身份后登录：user_uniq 换回服务器认的
+        if (u) { free(plain); plain = u; plain_len = strlen(u); ctx.hits += 0; uniq_fixed = 1; }
+    }
     if (plain && plain_len > 0) {
         fixed = eg_filter_json(&ctx, plain, plain_len, &fixed_len);
     }
@@ -310,6 +316,9 @@ static void *eg_hook(void *plain_str) {
             LOGW("il2cpp_string_new failed, passing original");
             ret = g_orig_enc(plain_str);
         }
+    } else if (uniq_fixed && plain) {
+        void *ns = g_string_new(plain);
+        ret = g_orig_enc(ns ? ns : plain_str);
     } else {
         ret = g_orig_enc(plain_str);
     }
