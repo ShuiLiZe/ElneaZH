@@ -167,7 +167,7 @@ final class Support {
                 }
             }
         }));
-        smallLine(a, d, card, "启动时也会自动备份，卸载游戏也不丢。备份成功后可以「分享到…」发给别人。");
+        smallLine(a, d, card, "启动时也会自动备份（含身份），卸载游戏也不丢。发给别人请选「不含身份」。");
 
         // 存档管理：列出全部备份，每份都有「读取 / 删除」，底下还有「从文件导入」。
         LinearLayout.LayoutParams impLp = new LinearLayout.LayoutParams(-1, (int) (46 * d));
@@ -183,7 +183,7 @@ final class Support {
             }
         });
         card.addView(imp, impLp);
-        smallLine(a, d, card, "联网和单机共用同一套备份。读取时可只恢复存档、保留当前身份；单机模式请选这一项。");
+        smallLine(a, d, card, "备份可选含身份（自己留底、卡维护的号先存着）或不含身份（发给别人）。读取时可只恢复存档、保留当前身份。");
 
         // 小文字链接：导出名字对照表
         TextView names = link(a, d, "导出名字对照表（NPC 中文名 ↔ 上传用英文）");
@@ -201,19 +201,44 @@ final class Support {
         nlp.topMargin = (int) (4 * d);
         card.addView(names, nlp);
 
-        // ---------------- 单机模式 ----------------
+        // ---------------- 测试功能（默认收起）：单机模式 + 原生加速 ----------------
+        // 2026-10-22 用户要求：单机模式还没调通，先藏进测试功能。单机正开着时自动展开，免得关不掉。
+        final LinearLayout lab = new LinearLayout(a);
+        lab.setOrientation(LinearLayout.VERTICAL);
+        boolean offOn = false;
+        try { offOn = Offline.isOn(a); } catch (Throwable ignored) {}
         try {
-            addOfflineSection(a, d, card);
+            addOfflineSection(a, d, lab);
         } catch (Throwable t) {
             Log.w(TAG, "offline section", t);   // 这一段画不出来也不影响其它按钮
         }
-
-        // ---------------- 原生加速（实验） ----------------
         try {
-            addNativeSection(a, d, card);
+            addNativeSection(a, d, lab);
         } catch (Throwable t) {
             Log.w(TAG, "native section", t);
         }
+        // 用户要求：连点标题「交流与支持」8 次才出现（单机正开着时直接显示，免得关不掉）。
+        final LinearLayout labWrap = new LinearLayout(a);
+        labWrap.setOrientation(LinearLayout.VERTICAL);
+        addSep(a, d, labWrap, 12);
+        caption(a, d, labWrap, "测试功能（未完成）");
+        labWrap.addView(lab);
+        labWrap.setVisibility(offOn ? View.VISIBLE : View.GONE);
+        card.addView(labWrap);
+        final int[] taps = {0};
+        title.setClickable(true);
+        title.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (labWrap.getVisibility() == View.VISIBLE) return;
+                taps[0]++;
+                if (taps[0] >= 8) {
+                    labWrap.setVisibility(View.VISIBLE);
+                    Toast.makeText(a, "已打开测试功能", Toast.LENGTH_SHORT).show();
+                } else if (taps[0] >= 5) {
+                    Toast.makeText(a, "再点 " + (8 - taps[0]) + " 次", Toast.LENGTH_SHORT).show();
+                }
+            }
+        });
 
         // ---------------- 账号 ----------------
         addSep(a, d, card, 12);
