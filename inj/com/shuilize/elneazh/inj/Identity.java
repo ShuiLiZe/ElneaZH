@@ -34,10 +34,13 @@ final class Identity {
     static final String KEY = "uuid";
 
     /** Confirmation drawn in the same game-popup style as {@link Support} (cream panel, brown frame, orange buttons). */
-    static void confirm(final Activity a, final Runnable onCancel) { confirm(a, onCancel, true); }
+    static void confirm(final Activity a, final Runnable onCancel) { confirm(a, onCancel, "smart"); }
 
-    /** full=true 更换身份（清数据）；false 只更换身份（保留存档，测试功能）。 */
-    static void confirm(final Activity a, final Runnable onCancel, final boolean full) {
+    static void confirm(final Activity a, final Runnable onCancel, final boolean full) { confirm(a, onCancel, full ? "full" : "id"); }
+
+    /** mode: smart=更换身份（只清身份+账号+存档，保留资源）；full=完全清除（同系统清除数据）；id=只换身份保留存档。 */
+    static void confirm(final Activity a, final Runnable onCancel, final String mode) {
+        final boolean full = !"id".equals(mode);
         try {
             final float d = a.getResources().getDisplayMetrics().density;
             final Dialog dlg = new Dialog(a);
@@ -53,7 +56,7 @@ final class Identity {
             card.setPadding(pad, (int) (14 * d), pad, (int) (16 * d));
 
             TextView title = new TextView(a);
-            title.setText(full ? "更换身份（清数据）" : "只更换身份（保留存档）");
+            title.setText("smart".equals(mode) ? "更换身份" : "full".equals(mode) ? "更换身份（完全清除）" : "只更换身份（保留存档）");
             title.setTextColor(Support.BROWN);
             title.setTextSize(19);
             title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -71,13 +74,15 @@ final class Identity {
             tv.setTextColor(Support.BROWN_TEXT);
             tv.setTextSize(14);
             tv.setLineSpacing(0, 1.25f);
-            tv.setText(full
-                    ? "只在游戏一直卡「维护中」或强制要求输入账号时使用。\n\n"
-                    + "点「确定更换」后会先把当前存档（含游戏身份）备份成一份「换身份前」，"
-                    + "成功后游戏关闭；重新打开时会像系统「清除数据」一样把本地数据清干净"
-                    + "（汉化和已下载的资源包保留，不用重下），相当于一个全新账号。\n\n"
-                    + "旧存档不会丢：在「存档管理」里恢复那份「换身份前」备份，就会连原来的身份一起回去。\n\n"
-                    + "更换后游戏会自动关闭，请重新打开（第一次打开会稍慢）。"
+            tv.setText("smart".equals(mode)
+                    ? "卡「维护中」或卡登录时用。\n\n"
+                    + "卡维护/卡登录都是「账号和设备码配不上」。更换身份会把设备码、账号、存档一起换新，"
+                    + "汉化和已下载的资源包、数据表都保留，不用重下。\n\n"
+                    + "会先自动备份一份「换身份前」（含身份），想回来就在「存档管理」完整恢复它。\n\n"
+                    + "确定后游戏会关闭，重新打开即生效。"
+                    : "full".equals(mode)
+                    ? "测试用：和系统「清除数据」一样全部清掉（只留汉化和资源缓存），用来对比。\n\n"
+                    + "会先自动备份一份「换身份前」（含身份）。确定后游戏关闭，重新打开即生效。"
                     : "测试用：只换掉设备码 / uuid / login_key / 账号块等身份，存档原样保留。\n\n"
                     + "先自动备份一份「换身份前」（含身份），然后游戏关闭；重新打开时在游戏启动前清掉身份。\n\n"
                     + "注意：存档和旧设备码是绑在一起的，保留存档换身份很可能仍然卡登录 —— 这正是要测的。"
@@ -88,7 +93,7 @@ final class Identity {
                 @Override public void onClick(View v) {
                     ok[0] = true;
                     try { dlg.dismiss(); } catch (Throwable ignored) {}
-                    reset(a, full);
+                    reset(a, mode);
                 }
             }));
             card.addView(Support.button(a, d, "取消", Support.BROWN, Color.rgb(0x4E, 0x2F, 0x14), Color.WHITE, new View.OnClickListener() {
@@ -119,9 +124,12 @@ final class Identity {
      * 备份 → 校验身份 → 清空本地数据 → 结束进程。备份失败就不动任何数据（只提示）。
      * 整个过程在后台线程跑，UI 线程只弹提示。
      */
-    static void reset(final Activity a) { reset(a, true); }
+    static void reset(final Activity a) { reset(a, "smart"); }
 
-    static void reset(final Activity a, final boolean full) {
+    static void reset(final Activity a, final boolean full) { reset(a, full ? "full" : "id"); }
+
+    static void reset(final Activity a, final String mode) {
+        final boolean full = !"id".equals(mode);
         Backup.toast(a, "正在备份当前存档…");
         final Activity act = a;
         new Thread(new Runnable() { @Override public void run() {
@@ -144,7 +152,7 @@ final class Identity {
                 return;
             }
             try {
-                Backup.scheduleIdentityWipe(act, full);
+                Backup.scheduleIdentityWipe(act, mode);
                 Log.i(Support.TAG, "identity: wipe scheduled for next start, killing now");
             } catch (Throwable t) {
                 Log.e(Support.TAG, "identity schedule", t);
