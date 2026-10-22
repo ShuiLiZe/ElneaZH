@@ -29,7 +29,9 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // 混淆 + 压缩：汉化器自己的代码改名，第三方库（apksig / commons-compress）保持原样防出错
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("release")
         }
         debug {

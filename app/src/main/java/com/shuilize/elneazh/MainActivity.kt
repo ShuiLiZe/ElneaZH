@@ -10,6 +10,12 @@ import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -37,7 +43,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -54,17 +60,21 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
-private val Cream = Color(0xFFF6F3EE)
-private val CardWhite = Color(0xFFFFFFFF)
-private val Ink = Color(0xFF1C1B19)
-private val Muted = Color(0xFF6E6860)
-private val Hairline = Color(0xFFE6DFD4)
-private val WarnBg = Color(0xFFFFF4E2)
-private val WarnInk = Color(0xFF7A4E0E)
-private val ErrBg = Color(0xFFFBEAE7)
-private val ErrInk = Color(0xFF9A2B1F)
-private val OkInk = Color(0xFF2F6B3A)
-private val OkBg = Color(0xFFE8F4EA)
+// ---- 拟态玻璃主题：深蓝紫夜空 + 金色点缀 + 半透明磨砂卡片 ----
+private val BgTop = Color(0xFF141A3D)
+private val BgBottom = Color(0xFF2A1F52)
+private val Ink = Color(0xFFF4F1FA)          // 主文字（浅）
+private val Muted = Color(0xFFB9B4CF)        // 次要文字
+private val Hairline = Color(0x33FFFFFF)
+private val Gold = Color(0xFFE9C46A)
+private val GoldDeep = Color(0xFFC9973A)
+private val WarnBg = Color(0x33E9C46A)
+private val WarnInk = Color(0xFFFBE7B5)
+private val ErrBg = Color(0x40E5554A)
+private val ErrInk = Color(0xFFFFD2CC)
+private val OkInk = Color(0xFF9BE3AE)
+private val OkBg = Color(0x334CC777)
+private const val QQ_LINK = "https://qun.qq.com/universal-share/share?ac=1&authKey=2oXkeJiLXvUlnYoZp%2FCWwlD%2Fkvb3f69RpT6%2BePF8jahMWgvsuOZr5BW53OFi%2FX9j&busi_data=eyJncm91cENvZGUiOiI3OTAxODQ4NTIiLCJ0b2tlbiI6IkcvckZJRVFKWnZGanZ6YlhZRkNXbHJRM3kwb21kc1hWZzlOd21yYlA1dlI1UnRxWGthdzVqRnBRUFZhRVRlTDgiLCJ1aW4iOiIyNzcwMjEzOTE2In0%3D&data=sWsjEEx2_zevFLauPt59ifUwPK3xkIuZdmdJBr4RNbJzma9BghIQ407l-FwVZUGo53DJDh98NYQO90mOdeJjoA&svctype=4&tempid=h5_group_info"
 
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
@@ -73,8 +83,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             MaterialTheme(
-                colorScheme = lightColorScheme(
-                    primary = Ink, onPrimary = Color.White, background = Cream, surface = CardWhite,
+                colorScheme = darkColorScheme(
+                    primary = Gold, onPrimary = Color(0xFF2A1F0A), background = BgTop, surface = BgTop,
                     onSurface = Ink, onBackground = Ink,
                 )
             ) {
@@ -89,6 +99,36 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** 背景：深色渐变 + 几团柔光，让上面的玻璃卡片有东西可「透」。 */
+@Composable
+private fun GlassBackdrop() {
+    Canvas(Modifier.fillMaxSize()) {
+        drawRect(Brush.verticalGradient(listOf(BgTop, Color(0xFF1E2458), BgBottom)))
+        fun glow(c: Color, x: Float, y: Float, r: Float) =
+            drawCircle(Brush.radialGradient(listOf(c, Color.Transparent), center = Offset(x, y), radius = r), r, Offset(x, y))
+        glow(Color(0x667B5CFF), size.width * 0.12f, size.height * 0.10f, size.width * 0.75f)
+        glow(Color(0x55E9C46A), size.width * 0.95f, size.height * 0.32f, size.width * 0.65f)
+        glow(Color(0x553DA5FF), size.width * 0.05f, size.height * 0.68f, size.width * 0.70f)
+        glow(Color(0x44C86BFF), size.width * 0.85f, size.height * 0.95f, size.width * 0.70f)
+    }
+}
+
+/** 玻璃卡片：半透明白 + 亮边 + 柔和投影。 */
+@Composable
+private fun Glass(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    val shape = RoundedCornerShape(28.dp)
+    Column(
+        modifier
+            .fillMaxWidth()
+            .shadow(24.dp, shape, ambientColor = Color(0x40000000), spotColor = Color(0x55000000))
+            .clip(shape)
+            .background(Brush.linearGradient(listOf(Color(0x2EFFFFFF), Color(0x10FFFFFF))))
+            .border(1.dp, Brush.linearGradient(listOf(Color(0x80FFFFFF), Color(0x14FFFFFF), Color(0x40FFFFFF))), shape)
+            .padding(22.dp),
+        content = content,
+    )
+}
+
 @Composable
 private fun App(vm: MainViewModel) {
     val s by vm.state.collectAsStateWithLifecycle()
@@ -100,10 +140,11 @@ private fun App(vm: MainViewModel) {
         if (uri != null) vm.onFilePicked(uri)
     }
 
+    Box(Modifier.fillMaxSize()) {
+    GlassBackdrop()
     Column(
         Modifier
             .fillMaxSize()
-            .background(Cream)
             .verticalScroll(rememberScrollState())
             .statusBarsPadding()
             .navigationBarsPadding()
@@ -111,9 +152,19 @@ private fun App(vm: MainViewModel) {
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
         // Header
-        Column(Modifier.padding(horizontal = 4.dp, vertical = 8.dp)) {
-            Text("艾尔尼亚汉化器", fontSize = 30.sp, fontWeight = FontWeight.SemiBold, color = Ink)
-            Spacer(Modifier.height(8.dp))
+        Row(Modifier.padding(horizontal = 4.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Image(
+                painterResource(R.drawable.ic_launcher_art), contentDescription = null,
+                modifier = Modifier.size(64.dp).clip(RoundedCornerShape(18.dp))
+                    .border(1.dp, Color(0x66FFFFFF), RoundedCornerShape(18.dp)),
+            )
+            Spacer(Modifier.width(14.dp))
+            Column {
+                Text("艾尔尼亚汉化器", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Ink)
+                Text("ELNEA KINGDOM · 中文版", fontSize = 12.sp, color = Gold, letterSpacing = 2.sp)
+            }
+        }
+        Column(Modifier.padding(horizontal = 4.dp)) {
             Text(
                 "一键把 Elnea Kingdom 变成中文版。全程在手机上完成，不需要电脑。",
                 fontSize = 15.sp, color = Muted, lineHeight = 22.sp,
@@ -192,7 +243,7 @@ private fun App(vm: MainViewModel) {
                     LinearProgressIndicator(
                         progress = { s.progress },
                         modifier = Modifier.fillMaxWidth().height(6.dp),
-                        color = Ink, trackColor = Hairline,
+                        color = Gold, trackColor = Hairline,
                         strokeCap = androidx.compose.ui.graphics.StrokeCap.Round,
                     )
                     Spacer(Modifier.height(8.dp))
@@ -268,42 +319,89 @@ private fun App(vm: MainViewModel) {
             modifier = Modifier.padding(horizontal = 4.dp),
         )
     }
+    }
 }
 
 @Composable
 private fun SupportCard() {
     val ctx = LocalContext.current
-    val clip = LocalClipboardManager.current
-    val shape = RoundedCornerShape(24.dp)
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .shadow(14.dp, shape, ambientColor = Color(0x14000000), spotColor = Color(0x1F000000))
-            .background(CardWhite, shape)
-            .padding(22.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text("完全免费 · 交流与支持", fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = Ink,
-            modifier = Modifier.fillMaxWidth())
-        Spacer(Modifier.height(10.dp))
+    Glass {
+        Text("交流与支持", fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+        Spacer(Modifier.height(8.dp))
         Text(
-            "本汉化完全免费，禁止倒卖。汉化交流 QQ 群 790184852：反馈没汉化的地方、获取新版都来群里。" +
-                "觉得好玩，可以微信扫码请汉化作者喝杯奶茶，全凭自愿，不捐也一样能用。",
-            fontSize = 14.sp, color = Muted, lineHeight = 21.sp, modifier = Modifier.fillMaxWidth(),
+            "本汉化完全免费，禁止倒卖。反馈没汉化的地方、获取新版，来汉化交流群。",
+            fontSize = 14.sp, color = Muted, lineHeight = 21.sp,
         )
         Spacer(Modifier.height(14.dp))
-        Image(painterResource(R.drawable.donate_qr), contentDescription = "微信收款码", modifier = Modifier.size(200.dp))
-        Spacer(Modifier.height(12.dp))
-        OutlinedButton(onClick = {
-            clip.setText(AnnotatedString("790184852"))
-            Toast.makeText(ctx, "已复制 QQ 群号 790184852", Toast.LENGTH_SHORT).show()
-        }) { Text("复制 QQ 群号", color = Ink) }
+        PrimaryButton("加入汉化交流 QQ 群") { openQQ(ctx) }
+    }
+    Glass {
+        Text("赞赏作者", fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = Ink)
         Spacer(Modifier.height(8.dp))
-        OutlinedButton(onClick = { openIdentityReset(ctx) }) { Text("更换游戏身份", color = Ink) }
+        Text("觉得好玩，可以微信扫码请汉化作者喝杯奶茶。全凭自愿，不赞赏也一样能用。",
+            fontSize = 14.sp, color = Muted, lineHeight = 21.sp)
+        Spacer(Modifier.height(16.dp))
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Box(
+                Modifier
+                    .shadow(18.dp, RoundedCornerShape(24.dp), spotColor = Color(0x66E9C46A))
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(Brush.linearGradient(listOf(Gold, GoldDeep)))
+                    .padding(3.dp)
+                    .clip(RoundedCornerShape(21.dp))
+                    .background(Color.White)
+                    .padding(14.dp),
+            ) {
+                Image(painterResource(R.drawable.donate_qr), contentDescription = "微信赞赏码", modifier = Modifier.size(196.dp))
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        SecondaryButton("保存赞赏码到相册", modifier = Modifier.fillMaxWidth()) { saveQr(ctx) }
+    }
+    Glass {
+        Text("卡「维护中」/ 卡登录？", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+        Spacer(Modifier.height(6.dp))
         Text(
-            "游戏一直卡「维护中」或强制输入账号时用：会在游戏里弹出确认，换成新身份，不用清除数据。",
-            fontSize = 12.sp, color = Muted, lineHeight = 18.sp, modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+            "两种都是账号和设备码配不上。汉化版已默认开启「防卡维护」；已经卡住的，点下面在游戏里更换身份：" +
+                "设备码、账号、存档一起换新（会先自动备份），资源包保留不用重下。",
+            fontSize = 13.sp, color = Muted, lineHeight = 20.sp,
         )
+        Spacer(Modifier.height(12.dp))
+        SecondaryButton("更换游戏身份", modifier = Modifier.fillMaxWidth()) { openIdentityReset(ctx) }
+    }
+}
+
+private fun openQQ(ctx: android.content.Context) {
+    try {
+        ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(QQ_LINK))
+            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+    } catch (e: Exception) {
+        Toast.makeText(ctx, "打不开链接，请安装 QQ 或浏览器", Toast.LENGTH_LONG).show()
+    }
+}
+
+private fun saveQr(ctx: android.content.Context) {
+    try {
+        val bmp = android.graphics.BitmapFactory.decodeResource(ctx.resources, R.drawable.donate_qr)
+        val name = "艾尔尼亚汉化_赞赏码.png"
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            val v = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png")
+                put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/ElneaZH")
+            }
+            val uri = ctx.contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v)
+                ?: throw IllegalStateException("insert")
+            ctx.contentResolver.openOutputStream(uri)!!.use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        } else {
+            @Suppress("DEPRECATION")
+            val dir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_PICTURES), "ElneaZH")
+            dir.mkdirs()
+            java.io.FileOutputStream(java.io.File(dir, name)).use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        }
+        Toast.makeText(ctx, "已保存到相册，打开微信扫一扫 → 相册选择即可", Toast.LENGTH_LONG).show()
+    } catch (e: Exception) {
+        Toast.makeText(ctx, "保存失败，可以直接截图", Toast.LENGTH_LONG).show()
     }
 }
 
@@ -324,20 +422,15 @@ private fun openIdentityReset(ctx: android.content.Context) {
 
 @Composable
 private fun StepCard(number: Int, title: String, done: Boolean, content: @Composable ColumnScope.() -> Unit) {
-    val shape = RoundedCornerShape(24.dp)
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .shadow(14.dp, shape, ambientColor = Color(0x14000000), spotColor = Color(0x1F000000))
-            .background(CardWhite, shape)
-            .padding(22.dp)
-    ) {
+    Glass {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
-                Modifier.size(28.dp).background(if (done) Ink else Cream, CircleShape),
+                Modifier.size(30.dp).clip(CircleShape)
+                    .background(if (done) Brush.linearGradient(listOf(Gold, GoldDeep)) else Brush.linearGradient(listOf(Color(0x33FFFFFF), Color(0x14FFFFFF))))
+                    .border(1.dp, Color(0x55FFFFFF), CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(if (done) "✓" else number.toString(), color = if (done) Color.White else Ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(if (done) "✓" else number.toString(), color = if (done) Color(0xFF2A1F0A) else Ink, fontSize = 14.sp, fontWeight = FontWeight.Bold)
             }
             Spacer(Modifier.width(12.dp))
             Text(title, fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = Ink)
@@ -375,32 +468,37 @@ private fun Notice(text: String, bg: Color, ink: Color) {
 
 @Composable
 private fun PrimaryButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
-    Button(
-        onClick = onClick,
-        enabled = enabled,
-        shape = CircleShape,
-        colors = ButtonDefaults.buttonColors(
-            containerColor = Ink, contentColor = Color.White,
-            disabledContainerColor = Color(0xFFD9D3C9), disabledContentColor = Color(0xFF8C867D),
-        ),
-        contentPadding = PaddingValues(vertical = 16.dp),
-        modifier = Modifier.fillMaxWidth(),
+    val shape = CircleShape
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .shadow(if (enabled) 14.dp else 0.dp, shape, spotColor = Color(0x88E9C46A))
+            .clip(shape)
+            .background(
+                if (enabled) Brush.linearGradient(listOf(Color(0xFFF6DC8E), Gold, GoldDeep))
+                else Brush.linearGradient(listOf(Color(0x26FFFFFF), Color(0x1AFFFFFF)))
+            )
+            .border(1.dp, if (enabled) Color(0x99FFF3CF) else Hairline, shape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 16.dp),
+        contentAlignment = Alignment.Center,
     ) {
-        Text(text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Text(text, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = if (enabled) Color(0xFF2A1F0A) else Muted)
     }
 }
 
 @Composable
 private fun SecondaryButton(text: String, enabled: Boolean = true, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    OutlinedButton(
-        onClick = onClick,
-        enabled = enabled,
-        shape = CircleShape,
-        border = BorderStroke(1.dp, Hairline),
-        colors = ButtonDefaults.outlinedButtonColors(contentColor = Ink, containerColor = Cream),
-        contentPadding = PaddingValues(vertical = 13.dp, horizontal = 12.dp),
-        modifier = modifier,
+    val shape = CircleShape
+    Box(
+        modifier
+            .clip(shape)
+            .background(Brush.linearGradient(listOf(Color(0x24FFFFFF), Color(0x0FFFFFFF))))
+            .border(1.dp, Color(0x40FFFFFF), shape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 13.dp, horizontal = 12.dp),
+        contentAlignment = Alignment.Center,
     ) {
-        Text(text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        Text(text, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = if (enabled) Ink else Muted)
     }
 }
