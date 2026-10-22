@@ -167,7 +167,7 @@ final class Support {
                 }
             }
         }));
-        smallLine(a, d, card, "启动时也会自动备份（含身份），卸载游戏也不丢。含身份的备份能登你的号，只发给汉化作者。");
+        smallLine(a, d, card, "启动时也会自动备份，卸载游戏也不丢。备份能登你的号，别乱发。");
 
         // 存档管理：列出全部备份，每份都有「读取 / 删除」，底下还有「从文件导入」。
         LinearLayout.LayoutParams impLp = new LinearLayout.LayoutParams(-1, (int) (46 * d));
@@ -183,7 +183,7 @@ final class Support {
             }
         });
         card.addView(imp, impLp);
-        smallLine(a, d, card, "卡维护/卡登录：备份时选「含身份」，把 zip 发给汉化作者排查。读取时可只恢复存档、保留当前身份。");
+        smallLine(a, d, card, "备份都含身份（存档和设备码绑定）。卡维护/卡登录时把 zip 发给汉化作者排查，只发给作者。");
 
         // 小文字链接：导出名字对照表
         TextView names = link(a, d, "导出名字对照表（NPC 中文名 ↔ 上传用英文）");
@@ -217,13 +217,29 @@ final class Support {
         } catch (Throwable t) {
             Log.w(TAG, "native section", t);
         }
-        // 用户要求：连点标题「交流与支持」8 次才出现（单机正开着时直接显示，免得关不掉）。
+        // 测试功能里的其它按钮：备份含/不含身份、只更换身份（保留存档）
+        try { addLabExtras(a, d, lab); } catch (Throwable t) { Log.w(TAG, "lab extras", t); }
+        // 用户要求：连点标题「交流与支持」8 次才出现；打开后一直显示（重启游戏也是），直到点「关闭测试功能」。
+        // 单机正开着时也直接显示，免得关不掉。
+        final android.content.SharedPreferences labSp = a.getSharedPreferences("elneazh_settings", Context.MODE_PRIVATE);
         final LinearLayout labWrap = new LinearLayout(a);
         labWrap.setOrientation(LinearLayout.VERTICAL);
         addSep(a, d, labWrap, 12);
         caption(a, d, labWrap, "测试功能（未完成）");
         labWrap.addView(lab);
-        labWrap.setVisibility(offOn ? View.VISIBLE : View.GONE);
+        TextView labOff = link(a, d, "关闭测试功能（之后要再连点标题 8 次）");
+        labOff.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                labSp.edit().putBoolean("lab_on", false).apply();
+                labWrap.setVisibility(View.GONE);
+                Toast.makeText(a, "已关闭测试功能", Toast.LENGTH_SHORT).show();
+            }
+        });
+        LinearLayout.LayoutParams olp = new LinearLayout.LayoutParams(-1, -2);
+        olp.topMargin = (int) (8 * d);
+        labWrap.addView(labOff, olp);
+        boolean labOn = offOn || labSp.getBoolean("lab_on", false);
+        labWrap.setVisibility(labOn ? View.VISIBLE : View.GONE);
         card.addView(labWrap);
         final int[] taps = {0};
         title.setClickable(true);
@@ -232,6 +248,7 @@ final class Support {
                 if (labWrap.getVisibility() == View.VISIBLE) return;
                 taps[0]++;
                 if (taps[0] >= 8) {
+                    labSp.edit().putBoolean("lab_on", true).apply();
                     labWrap.setVisibility(View.VISIBLE);
                     Toast.makeText(a, "已打开测试功能", Toast.LENGTH_SHORT).show();
                 } else if (taps[0] >= 5) {
@@ -243,7 +260,7 @@ final class Support {
         // ---------------- 账号 ----------------
         addSep(a, d, card, 12);
         caption(a, d, card, "账号");
-        card.addView(button(a, d, "更换游戏身份", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
+        card.addView(button(a, d, "更换身份（清数据）", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
             @Override public void onClick(View v) {
                 try {
                     Identity.confirm(a, null);
@@ -252,7 +269,7 @@ final class Support {
                 }
             }
         }));
-        smallLine(a, d, card, "一直卡「维护中」时用，不用清除数据。");
+        smallLine(a, d, card, "一直卡「维护中」时用：先备份，再像系统「清除数据」一样清干净，不用自己去设置里清。");
 
         // ---------------- 底部 ----------------
         addSep(a, d, card, 12);
@@ -340,6 +357,32 @@ final class Support {
         t.setPadding(0, (int) (6 * d), 0, (int) (6 * d));
         t.setLayoutParams(new LinearLayout.LayoutParams(-1, -2));
         return t;
+    }
+
+    /** 测试功能：备份含/不含身份、只更换身份（保留存档）。 */
+    private static void addLabExtras(final Activity a, final float d, LinearLayout lab) {
+        addSep(a, d, lab, 12);
+        caption(a, d, lab, "身份测试");
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.topMargin = (int) (8 * d);
+        lab.addView(button(a, d, "备份（含身份）", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
+            @Override public void onClick(View v) { Backup.doBackup(a, true); }
+        }), lp);
+        smallLine(a, d, lab, "存档 + 设备码 / uuid / login_key 全部保存。卡维护时发给汉化作者用这个。");
+        LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(-1, -2);
+        lp2.topMargin = (int) (8 * d);
+        lab.addView(button(a, d, "备份（不含身份）", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
+            @Override public void onClick(View v) { Backup.doBackup(a, false); }
+        }), lp2);
+        smallLine(a, d, lab, "只留存档。存档和设备码绑定，发给别人会卡登录，测试用。");
+        LinearLayout.LayoutParams lp3 = new LinearLayout.LayoutParams(-1, -2);
+        lp3.topMargin = (int) (8 * d);
+        lab.addView(button(a, d, "只更换身份（保留存档）", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                try { Identity.confirm(a, null, false); } catch (Throwable t) { Log.w(TAG, "identity-only", t); }
+            }
+        }), lp3);
+        smallLine(a, d, lab, "只换设备码等身份，不清存档，用来测是不是存档绑着旧身份。");
     }
 
     /**
