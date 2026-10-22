@@ -359,16 +359,10 @@ final class Support {
         return t;
     }
 
-    /** 测试功能：备份含/不含身份、只更换身份（保留存档）。 */
+    /** 测试功能：备份（不含身份）、只更换身份（保留存档）。常规备份本来就含身份。 */
     private static void addLabExtras(final Activity a, final float d, LinearLayout lab) {
         addSep(a, d, lab, 12);
         caption(a, d, lab, "身份测试");
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.topMargin = (int) (8 * d);
-        lab.addView(button(a, d, "备份（含身份）", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
-            @Override public void onClick(View v) { Backup.doBackup(a, true); }
-        }), lp);
-        smallLine(a, d, lab, "存档 + 设备码 / uuid / login_key 全部保存。卡维护时发给汉化作者用这个。");
         LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(-1, -2);
         lp2.topMargin = (int) (8 * d);
         lab.addView(button(a, d, "备份（不含身份）", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
