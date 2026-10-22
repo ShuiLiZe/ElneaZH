@@ -1,0 +1,226 @@
+package com.shuilize.elneazh.inj;
+
+import android.content.Context;
+import android.util.Log;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+
+/**
+ * 自检：把只在设备上能验的东西（名字表解析、拼音覆盖、上传方向的恒定性与兜底闸）写成一份报告，
+ * 存进 app 私有目录 elneazh_selfcheck.txt，也从 logcat（tag ElneaZH-SELF）打一遍。
+ *
+ * 为什么需要它：这些代码跑在游戏进程里，CI 只能证明它编译通过；名字/拼音/替换的真实行为必须上机看。
+ *   adb logcat -d -s ElneaZH-SELF ElneaZH-NET
+ */
+final class SelfCheck {
+    private static final String TAG = "ElneaZH-SELF";
+
+    /**
+     * 后台重写一遍 selfcheck（native 加载完 / 挂完之后调）。同一秒内的重复请求会合并。
+     * 绝不抛异常、绝不阻塞调用方（安装线程）。
+     *
+     * <p>真机黑屏事故之后加了「同一秒合并」：旧版每次调用都起一个新线程，启动路径上连着几个
+     * 调用点（ZhInit / NameGate / OfflineGate），而且 60s 内反复触发，会同时跑好几份自检
+     * （每份都要完整计算拼音与分类器）。现在只认一秒一次。
+     */
+    private static volatile long lastRunAt;
+
+    static void rewriteAsync(final Context context) {
+        if (context == null) return;
+        long now = System.currentTimeMillis();
+        if (now - lastRunAt < 1000) return;
+        lastRunAt = now;
+        try {
+            Thread t = new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        SelfCheck.run(context);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }, "ElneaZH-selfcheck");
+            t.setDaemon(true);
+            t.start();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    static void run(Context ctx) {
+        String text = render(ctx);
+        Log.i(TAG, "\n" + text);
+        try (FileOutputStream o = new FileOutputStream(new File(ctx.getFilesDir(), "elneazh_selfcheck.txt"))) {
+            o.write(text.getBytes("UTF-8"));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 只生成报告正文（不落盘、不打日志）：给纯 JDK 单测用。 */
+    static String render(Context ctx) {
+        StringBuilder r = new StringBuilder();
+        try {
+            r.append("== native 加载（两个闸门共用 libelneagate.so） ==\n");
+            // 崩溃保护必须写在最前面：native 没加载时，这一行解释「为什么没加载」。
+            r.append("native guard: ").append(NativeGuard.describe()).append('\n');
+            if (!NativeGuard.allowed()) {
+                r.append("native disabled by crash guard: ").append(NativeGuard.reason()).append('\n');
+                r.append("native note: 拼音闸门与单机 native 闸门本轮全部跳过；Java 层拦截（NetGuard / "
+                        + "NetBlocker）照旧生效。自愈办法：进 Support 打开「原生加速（实验）」或清一次"
+                        + " files/elneazh_native_boot\n");
+            }
+            r.append("native load: ").append(NativeLoad.describe()).append('\n');
+            String e = NativeLoad.err();
+            if (!NativeLoad.loaded() && !e.isEmpty()) {
+                r.append("native load error: ").append(e).append('\n');
+            }
+            r.append("name gate: ").append(NameGate.loadState()).append('\n');
+            r.append("name gate hooked: ").append(NameGate.hooked()).append('\n');
+            if (!NameGate.hooked()) {
+                // 没挂上时把 native 自己的结论写进来：解析方式 / 基址 / 校验第一处不匹配的字节
+                r.append("name gate diag: ").append(NameGate.diag()).append('\n');
+            }
+            r.append("offline gate: ").append(OfflineGate.loadState()).append('\n');
+            // 就地显示自检写入的时刻：知道这份报告是「加载前」还是「挂完之后」写的。
+            r.append("written: ").append(new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss",
+                    java.util.Locale.US).format(new java.util.Date())).append('\n');
+            r.append('\n');
+            NameFix.load(ctx);
+            r.append("names: ").append(NameFix.stats()).append('\n');
+            r.append("pinyin table: ").append(Pinyin.tableSize()).append(" chars\n");
+
+            // 1) 中文名 -> 拼音（上传方向），并验证「同一中文名恒定同一拼音」
+            String[] zhs = {"铁蛋", "王小明", "李雷", "张三"};
+            for (String z : zhs) {
+                String a = NameFix.ascii(ctx, z);
+                String b = NameFix.ascii(ctx, z);
+                r.append("ascii ").append(z).append(" -> ").append(a)
+                        .append(" (stable=").append(a != null && a.equals(b)).append(")\n");
+            }
+
+            // 2) 兜底闸：请求体值里的中文被换掉，纯 ASCII 原样返回
+            String body = "acc=" + "中文名" + "&lang=en";
+            r.append("gate: ").append(NetGuard.body(body)).append('\n');
+            String plain = "acc=abcd&lang=en";
+            r.append("gate passthrough: ").append(NetGuard.body(plain).equals(plain)).append('\n');
+
+            // 3) 别名表规模（应随玩家取名增长，并随备份一起走）
+            r.append("aliases: ").append(NameFix.aliasSnapshot().size()).append('\n');
+            r.append("gate installed: ").append(NetGuard.installed()).append('\n');
+
+            // 4) 单机模式：开关状态 + 分类器对几个真实接口的判断 + 闸门计数 + 分享链路
+            r.append("offline: on=").append(Offline.isOn(ctx))
+                    .append(" pref=").append(Offline.PREF).append('/').append(Offline.KEY).append('\n');
+            String[] probes = {
+                    "https://app-elnea.althi.co.jp/sns04/save2.php",
+                    "https://app-elnea.althi.co.jp/sns04/savekpi.php",
+                    "https://app-elnea.althi.co.jp/sns04/kpi.php",
+                    "https://app-elnea.althi.co.jp/sns04/read.php",
+                    "https://app-elnea.althi.co.jp/sns04/login.php",
+                    "https://app-elnea.althi.co.jp/sns04/version.php",
+                    "https://app-elnea.althi.co.jp/sns04/some_new_api.php",
+                    "https://res-elnea.althi.co.jp/sns04/pack/asset.bundle",
+                    "https://cdn-elnea.althi.co.jp/sns04/bundle/AssetBundle",
+                    "https://cdn.example.com/x.zip",
+            };
+            for (String u : probes) {
+                r.append("  classify ").append(Offline.describe(u))
+                        .append(" write=").append(Offline.isWriteRequest(u))
+                        .append(" asset=").append(Offline.isAssetDownload(u))
+                        .append(" blockedWhenOffline=").append(!NetBlocker.allow(u, true))
+                        .append(" allowedWhenOnline=").append(NetBlocker.allow(u, false))
+                        .append('\n');
+            }
+            r.append("offline gate installed: ").append(NetBlocker.installed()).append('\n');
+            r.append("offline blocked so far: ").append(NetBlocker.hits()).append('\n');
+            r.append("offline asset downloads blocked: ").append(NetBlocker.assetHits()).append('\n');
+            r.append("offline asset downloads allowed: ").append(NetBlocker.assetAllowed()).append('\n');
+            r.append("offline download hint: ").append(Offline.downloadHint()).append('\n');
+            // 5) 原生单机闸门：il2cpp API 能拿到几个、六族 hook 各挂了多少。
+            //    本机若拿不到 il2cpp（示例进程里就是这样），probe 会是 0，属正常 —— 只有真机跑游戏时才有值。
+            r.append("offline native: ").append(OfflineGate.describe()).append('\n');
+            r.append("offline native api: ").append(OfflineGate.probe()).append("/5\n");
+            r.append("offline native hooked total: ").append(OfflineGate.installedAny()).append('\n');
+            r.append("offline native per target: ")
+                    .append(java.util.Arrays.toString(OfflineGate.results())).append('\n');
+            r.append("offline native button entries: ").append(OfflineGate.countLines(OfflineGate.buttonTable())).append('\n');
+            r.append("offline native gate entries: ").append(OfflineGate.countLines(OfflineGate.gateTable())).append('\n');
+            r.append("offline native panel entries: ").append(OfflineGate.countLines(OfflineGate.panelTable())).append('\n');
+            r.append("offline native http entries: ").append(OfflineGate.countLines(OfflineGate.httpTable())).append('\n');
+            r.append("offline native hide entries: ").append(OfflineGate.countLines(OfflineGate.hideTable())).append('\n');
+            r.append("offline native mask entries: ").append(OfflineGate.countLines(OfflineGate.masksTable())).append('\n');
+            // 5b) 逐条 hook 台账：名字 / 解析到的地址 / 挂的方式 / 成功或失败原因。
+            r.append("offline native hook report:\n").append(OfflineGate.hookReport()).append('\n');
+            r.append("share: ").append(Share.describe()).append('\n');
+            r.append("name table lines: ").append(Share.nameTableText(NameFix.aliasSnapshot()).split("\n").length).append('\n');
+            // 2b) 存档区块名字槽：0x01 + 长度 + UTF-8 —— 中文名换拼音，其它字节必须不动
+            byte[] raw = UploadNamesSample.hex(UploadNamesSample.RAW_HEX);
+            byte[] want = UploadNamesSample.hex(UploadNamesSample.EXPECT_HEX);
+            byte[] got = UploadNames.filterNames(raw, new UploadNames.Mapper() {
+                @Override public String ascii(String zh) {
+                    for (int i = 0; i < UploadNamesSample.ZH.length; i++) {
+                        if (UploadNamesSample.ZH[i].equals(zh)) return UploadNamesSample.ASCII[i];
+                    }
+                    return null;
+                }
+            });
+            r.append("names slots: ").append(UploadNames.countNames(raw))
+                    .append(" -> filtered crc ").append(UploadNamesSample.crc(got))
+                    .append(want.length == got.length && java.util.Arrays.equals(want, got) ? " OK" : " MISMATCH")
+                    .append('\n');
+            // 2c) 整段 ws_* 区块：base64(zlib) 往返 + 长度只许变短
+            byte[] packed = UploadNames.deflate(raw);
+            String b64 = UploadNames.Base64.encode(packed);
+            String b64b = UploadNames.filterOne(b64, new UploadNames.Mapper() {
+                @Override public String ascii(String zh) {
+                    for (int i = 0; i < UploadNamesSample.ZH.length; i++) {
+                        if (UploadNamesSample.ZH[i].equals(zh)) return UploadNamesSample.ASCII[i];
+                    }
+                    return null;
+                }
+            });
+            boolean round = false;
+            if (!b64b.equals(b64)) {
+                byte[] back = UploadNames.inflate(UploadNames.Base64.decode(b64b));
+                round = back != null && java.util.Arrays.equals(back, want) && b64b.length() <= b64.length();
+            }
+            r.append("blob round trip: ").append(b64.length()).append(" -> ").append(b64b.length())
+                    .append(round ? " OK" : " NOT-CHANGED-OR-BAD").append('\n');
+        } catch (Throwable t) {
+            StringWriter sw = new StringWriter();
+            t.printStackTrace(new PrintWriter(sw));
+            r.append("FAILED: ").append(sw).append('\n');
+        }
+        // 汇总放在最后一行（前面是明细），用户 tail 一把也能看到关键三行。
+        r.append('\n');
+        r.append("native guard: ").append(NativeGuard.describe()).append('\n');
+        r.append("native load: ").append(NativeLoad.describe()).append('\n');
+        if (!NativeLoad.loaded() && !NativeLoad.err().isEmpty()) {
+            r.append("native load error: ").append(NativeLoad.err()).append('\n');
+        }
+        r.append("gate installed: ").append(NetGuard.installed())
+                .append(" (native hooked=").append(NameGate.hooked()).append(")\n");
+        r.append("offline native: ").append(OfflineGate.describe()).append('\n');
+        if (Offline.isOn(ctx)) {
+            // 单机开着时，native 一个 hook 都没挂上就等于界面/面板那几族没生效：
+            // Java 层的请求拦截还在兜底，但这里必须自己说明白，别让人以为已经全拦住了。
+            boolean nativeOk = OfflineGate.installedAny() || OfflineGate.encState() == 1;
+            r.append("offline native effective: ").append(nativeOk ? "yes" : "no").append('\n');
+            if (!nativeOk) {
+                r.append("offline native note: 单机未完全生效（native 未挂上任何 hook；"
+                        + "请求仍由 Java 层拦截兜底，界面/面板族未生效）\n");
+                r.append("offline native hook report:\n").append(OfflineGate.hookReport()).append('\n');
+            }
+        }
+        String text = r.toString();
+        Log.i(TAG, "\n" + text);
+        try (FileOutputStream o = new FileOutputStream(new File(ctx.getFilesDir(), "elneazh_selfcheck.txt"))) {
+            o.write(text.getBytes("UTF-8"));
+        } catch (Throwable ignored) {
+        }
+        return text;
+    }
+
+    private SelfCheck() {}
+}

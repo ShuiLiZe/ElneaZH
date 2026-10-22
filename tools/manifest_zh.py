@@ -20,9 +20,39 @@ act = etree.SubElement(app, 'activity')
 act.set(A + 'theme', '@1030010')  # android:style/Theme.Translucent.NoTitleBar (same as ProxyBillingActivity)
 act.set(A + 'name', 'com.shuilize.elneazh.inj.SupportActivity')
 act.set(A + 'exported', 'true')  # targetSdk 36: implicit intents only reach exported components
+# 导入存档也要从文件选择器进来（ActionOpenDocument，不依赖 SupportActivity 的恢复入口）
+act.set(A + 'noHistory', 'true')
 act.set(A + 'excludeFromRecents', 'true')
 act.set(A + 'configChanges', '0x40003fff')
 act.set(A + 'screenOrientation', '1')
+# 「导出存档 / 导出名字对照表」用系统分享面板发文件：游戏自带 androidx.core（classes.dex 里有
+# androidx/core/content/FileProvider），直接复用它，不必再往 classes3.dex 里塞 implementation。
+# 1.5MB 的 classes3.dex 里塞 FileProvider 会同时把 androidx.core 的依赖面拉进来，风险大于收益。
+fp = etree.SubElement(app, 'provider')
+fp.set(A + 'name', 'androidx.core.content.FileProvider')
+fp.set(A + 'exported', 'false')
+fp.set(A + 'authorities', 'jp.co.althi.elnea.en.zhfiles')
+fp.set(A + 'grantUriPermissions', 'true')
+md = etree.SubElement(fp, 'meta-data')
+md.set(A + 'name', 'android.support.FILE_PROVIDER_PATHS')
+# 原 APK 里现成的 xml 资源只有这三张（aapt2 dump resources 核实：7f100000 backup_rules、
+# 7f100001 billingclient_phenotype、7f100002 image_share_filepaths），没有 file_paths，所以复用
+# image_share_filepaths：<paths><files-path name="image_provider_images" path="image_provider/"/></paths>。
+# 也就是说分享文件必须放在 filesDir/image_provider/ 下才能出 uri（见 Share.outDir）。
+md.set(A + 'resource', '@7f100002')
+app.set(A + 'requestLegacyExternalStorage', 'true')
+
+# 「导出到文件」：分享面板一个目标都没有时的接管页（系统保存器 ACTION_CREATE_DOCUMENT）。
+# 只给自己进程起（ACTION_SAVE_AS 用 setClass 走显式 Intent），所以 exported=false ——
+# 外部 App 调不到它，也就不算给游戏多开一个入口。
+sa = etree.SubElement(app, 'activity')
+sa.set(A + 'name', 'com.shuilize.elneazh.inj.SaveAsActivity')
+sa.set(A + 'exported', 'false')
+sa.set(A + 'theme', '@1030010')
+sa.set(A + 'noHistory', 'true')
+sa.set(A + 'excludeFromRecents', 'true')
+sa.set(A + 'configChanges', '0x40003fff')
+sa.set(A + 'screenOrientation', '1')
 f = etree.SubElement(act, 'intent-filter')
 for tag, val in (('action', 'android.intent.action.VIEW'), ('category', 'android.intent.category.DEFAULT'),
                  ('category', 'android.intent.category.BROWSABLE')):
@@ -33,5 +63,8 @@ out = ax2.pack()
 chk, _ = pyaxml.AXML.from_axml(out)
 _t = etree.tostring(chk.to_xml())
 assert b'MANAGE_EXTERNAL_STORAGE' in _t and b'zhinit' in _t and b'SupportActivity' in _t and b'elneazh' in _t
+assert b'FileProvider' in _t and b'zhfiles' in _t and b'FILE_PROVIDER_PATHS' in _t, 'share provider missing'
+assert b'requestLegacyExternalStorage' in _t, 'legacy storage flag missing'
+assert b'SaveAsActivity' in _t, 'save-as activity missing'
 open(sys.argv[2], 'wb').write(out)
 print('manifest ok', len(out))

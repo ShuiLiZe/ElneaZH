@@ -51,6 +51,29 @@ def is_han(c):
     return 0x3400 <= o <= 0x4DBF or 0x4E00 <= o <= 0x9FFF or 0xF900 <= o <= 0xFAFF or 0x20000 <= o <= 0x2FFFF
 
 
+# 名字字体要带的字：tools/names.txt 第一行（NPC 全名表 + 常见人名用字）。
+# 只补这一撮，不把 GB2312 全塞进 Name 字体（图集空间有限）。
+NAME_CHARS = set()
+
+
+def load_name_chars(path=None):
+    """读 tools/names.txt 第一行（'#' 开头是注释）。读不到就返回空集：名字字体不加字，仅显示层退化。"""
+    p = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'names.txt')
+    try:
+        with open(p, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    NAME_CHARS.update(ord(c) for c in line if is_han(c))   # 存码位，和 area_ids 的键对得上
+                    break
+    except OSError:
+        pass
+    return NAME_CHARS
+
+
+load_name_chars()
+
+
 def gb2312_hanzi():
     out = []
     for hi in range(0xB0, 0xF8):
@@ -286,7 +309,11 @@ def apply(env_file, ttf_path, extra_chars=(), log=print):
 
     area_glyphs = [glyph(i, gid) for gid, i in area_ids.items()]
     name_glyphs = [glyph(i, gid) for gid, i in name_ids.items()]
-    name_glyphs += [glyph(i, gid) for gid, i in area_ids.items() if is_han(chr(gid)) and gid not in name_ids]
+    # 名字字体 = 游戏取名时的合法字符集（不在 Name 字体里的字会提示“含无效字符”）。
+    # 必须和 main 一样带上全部汉字（GB2312 + names.txt），只补 names.txt 那一撮会让玩家打不出大部分中文名。
+    # 上传时再换回英文原名 / 拼音（NameFix.filterNames），本地不妥协。
+    name_glyphs += [glyph(i, gid) for gid, i in area_ids.items()
+                    if (is_han(chr(gid)) or gid in NAME_CHARS) and gid not in name_ids]
 
     # ----- write objects -----
     vw, vh = W, RH                                    # virtual font texture = the sheet itself

@@ -1,6 +1,477 @@
-# HANDOFF — 现状（只写当前状态；过程见 docs/CHANGELOG.md，规矩见 AGENTS.md）
+# HANDOFF —— 现状（只写当前状态；过程见 docs/CHANGELOG.md，规则见 AGENTS.md）
 
-_最后更新：2026-10-20 12:45 CST_
+_最后更新：2026-10-21 18:55 CST_
+
+## 2026-10-21 18:55 第二轮：按真机完整 logcat 定位的两条硬伤（c209de4 / ac590bd / 0e01a45）
+
+第一轮（17:45 那节）改的是「主线程被拖住」的结构，但真机仍然黑屏。拿到完整 logcat 后，
+病根被钉死在两处 —— 两处都在下面这节里写清楚，**别再改回去**。
+
+### 真机时间线（pid 8974，OnePlus Android 16 arm64）
+
+| 时刻 | 事件 |
+|------|------|
+| 17:17:00.427 | 进程启动，**之后主线程 20 秒没有任何日志** |
+| 17:17:06 | 系统 `Requested dump` —— 这就是黑屏（ANR 预警） |
+| 17:17:20.184 | `ElneaGate: il2cpp_string_new unresolved after 40 tries (stage=no-libil2cpp, base=0x0); giving up` |
+| 17:17:21.072 | Unity 才打出 `Context Type`（UnityPlayerActivity 创建，libil2cpp 这刻才 dlopen） |
+| 17:17:20.707 | `ElneaOffline: install started in background` |
+| 17:17:21.219 | Unity 崩溃处理器抓到线程 `ElneaOffline-in`：**SIGSEGV / SEGV_MAPERR**，x0=0，x25=`0x18ad7e4`（= EncryptRJ256 偏移） |
+
+两条结论：
+1. **40×500ms = 20s 刚好差一秒**。旧循环 20.18 秒放弃，库 21.07 秒才出现 —— 既白等满 20 秒
+   （主线程黑屏 / ANR），又永远等不到库。等待方式本身是错的。
+2. `x25 = base + 0x18ad7e4` 且 `x0 = 0`：**base 为 0 时仍去算地址并解引用**。
+   Unity 自带崩溃处理器接住了，所以没有 tombstone。
+
+### 改法（对应上面两条）
+
+- 等待改成「**等到 libil2cpp 出现为止**」：`NameGate.WAIT_IL2CPP_MS = 120_000L`、
+  `RETRY_MS = 200`、`MAX_TRIES = 600`；`OfflineGate.INSTALL_WINDOW_MS = 30s`。
+  **全程在后台线程**（`ElneaGate-install` / `ElneaOffline-install`），主线程一秒不等。
+- 基址**全仓只解析一份**：`eg_sym.c` 的 `eg_lib_base()`，首选 `dl_iterate_phdr`（按
+  `libil2cpp.so` 匹配，不受命名空间影响），maps 只做兜底，结果缓存。`eg_offline.c`
+  不再自己读 maps。
+- 所有 `base + offset` 之前先判：`eg_lib_present()` / `eg_find_base()==0` / 槽位 NULL →
+  **直接 return 并记日志，绝不解引用**；`eg_mem_ok()` 再确认目标落在本进程可读映射内。
+- 日志：`nativeInstall` 入口、每个 class/method 解析前后、每个 hook 写槽前后与耗时、
+  等库每次轮询结果、fallback 因 base 缺失而跳过 —— 全在 `adb logcat -s ElneaGate`。
+
+### 「关单机」= 只做拼音闸门（可本地复现，已钉成断言）
+
+- `OfflineGate.table(target)` 在单机关着时**一律返回空串**：native 拿不到任何 UI/Http
+  hook 名字；单机开着时同一份表里 4 张有 3 张非空（对照）。
+- `OfflineGate.encGateOnly()`：单机开关关 + 七张表全空 = 只做拼音闸门 / 兜底闸。
+- `NativeGateTest` 40 项真跑（JDK）：主线程 `NameGate.install` 0ms 返回、`OfflineGate.install`
+  14ms 返回、单机关着 `installedAny=false` / `total()==0` / `table(0..3)` 全空 /
+  `encGateOnly=true`，crash guard 连击 2 → 第三轮不加载 + selfcheck 写明
+  `native disabled by crash guard`，「原生加速（实验）」关掉 = 永不加载。
+- `ci_inj.py`（android.jar 真编译）暴露过一个只有全量 javac 才报的错：`NameGate` 常量
+  前向引用（`MAX_TRIES` 用了后面才声明的 `WAIT_IL2CPP_MS`）。**改 NameGate 常量顺序后
+  必须跑 `python tools/ci_inj.py`**，JDK 单测那条链路照不出来。
+
+### 真机验证（拿这版 APK 先跑这三条）
+
+```
+adb shell run-as <pkg> cat files/elneazh_selfcheck.txt | head -8   # native guard / native load 两行
+adb logcat -d -s ElneaGate | tail -60                              # 等库到最后一条 #N
+adb shell run-as <pkg> ls files/elneazh_native_boot                # 进游戏后应该「不存在」
+```
+
+判断标准：主线程在 17:17:06 那种空档**不该再有**；`ElneaGate` 里应看到
+`JNI_OnLoad enter/exit` → `installer thread started` → 多轮 `waiting for libil2cpp (poll …)`
+→ `name gate: base=0x…`（**非 0**）→ `name gate: hooked …`。若仍是黑屏，把 ElneaGate 最后
+60 行发回来，最后一条 #N 就是卡住的位置。
+
+## 2026-10-21 17:45 第一轮：主线程被 native 链卡住（历史，已并入上面）
+
+真机（OnePlus Android 16 arm64 PAC，17:13 selfcheck）：**单机开、单机关都黑屏**，
+过一会儿进程退出。crash 缓冲区 15:57 之后没有新 tombstone、没有 AndroidRuntime 异常，
+db logcat -s ElneaGate ElneaOffline 一条都没有 —— 不是崩溃，是**主线程被卡住**
+（ANR / Unity 看门狗杀进程）。31dc707 之前（.so 根本没加载）关单机能正常进游戏，
+所以回归来自身 f488ec5 之后真正开始加载的 native 这条链。
+
+### 四条根因（都已改）
+
+| # | 根因 | 位置 | 改法 |
+|---|------|------|------|
+| 1 | 安装线程起完 done.await() **同步等最长 20s**，调用方是 ZhInit.onCreate（主线程） | NameGate.install | 立刻返回；加载/解析/写槽全在后台 ElneaGate-install，40 次 x 500ms 上限 |
+| 2 | 每个符号 open(/proc/self/maps) 全扫，dynsym_lookup 里几十次 → O(n^2) | eg_sym.c | maps 一次读成区间表 + 200ms TTL；mem_ok 查表；eg_lib_base 先 dl_iterate_phdr |
+| 3 | 等待 probe()>=5 最长 **90s** 再逐族装；单机**关**时也照装六族 | OfflineGate.installAll / eg_of_install | 窗口 90s -> 30s；单机关着直接返回（只留 EncryptRJ256 兜底闸）；中途关单机即时停手 |
+| 4 | SelfCheck.run 同步跑在 onCreate（拼音表 + 分类器 + native 状态），每次启动一遍 | ZhInit.onCreate | 挪到后台线程，1s 内合并 |
+
+顺带修掉一个**真 bug**：eg_offline.c 的 eg_find_base() 把 dlopen() 返回的
+**handle 当基址**用（handle + 0x18ad7e4 从来不是那个函数）。现在统一 eg_lib_base()，
+按 16KB 页对齐并缓存。
+
+### 现在的结构（别再退回）
+
+- JNI_OnLoad（eg_boot.c）只做 O(1)：记 JavaVM + 打 enter/exit 日志。不 dlsym、不读
+  /proc、不起线程、不加锁、不调 il2cpp。全仓**没有** __attribute__((constructor))。
+- 主线程（ZhInit.onCreate）只做本地小文件 + 装 Java 闸门 + 起线程；native 的一切都在
+  后台线程 ElneaGate-install / ElneaOffline-install 里，且都有上限。
+- 阶段日志（eg_log.h）：`#阶段号 [线程名(tid) t=单调ms] 消息`，全 I 级，标签 ElneaGate。
+  真机一条命令 `adb logcat -s ElneaGate` —— **最后一条的 #N 就是卡住的位置**。
+
+### crash guard（连续 2 次启动没活下来 → 不加载 native）
+
+- 启动写 files/elneazh_native_boot（第一行 = 累积连击数）；进主界面（Activity onResumed）
+  或运行满 60s 清掉。
+- 连续 2 次没清 → 下一轮 NativeGuard.allowed()==false：libelneagate.so **一次都不 load**，
+  拼音闸门与单机 native 全跳过，NetGuard / NetBlocker 的 Java 兜底照旧；
+  selfcheck 顶部写 `native disabled by crash guard: …`。
+- Support 新增「原生加速（实验）」开关（elneazh_settings/native_boost，默认开）：
+  关掉 = 永不加载 native。改完要重开游戏彻底生效。
+- 自愈：Support 里把开关关了再开（会清连击），或删一次 files/elneazh_native_boot。
+
+### 真机验证清单（拿到 APK 先跑这三条）
+
+```
+adb shell run-as <pkg> cat files/elneazh_selfcheck.txt | head -8   # native guard / native load 两行
+adb logcat -d -s ElneaGate | tail -40                              # 最后一条 #N 在哪一步
+adb shell run-as <pkg> ls files/elneazh_native_boot                # 进游戏后应该「不存在」
+```
+
+看到 `native guard: … allowed=true … survived=true` + ElneaGate 里
+`JNI_OnLoad enter/exit` → `installer thread started` → `name gate: base=…` → `name gate: hooked …`
+就说明整条链通了。若仍黑屏：把 ElneaGate 最后 40 行发回来，#N 一眼定位。
+
+### 守门（CI 会跑）
+
+- `python tools/verify_native_nonblock.py`：静态守 JNI_OnLoad 不阻塞、无 constructor、
+  maps 只读一次、Java 侧不再 await、单机关着不装六族、日志齐全（50 项）。
+- `java com.shuilize.elneazh.inj.NativeGateTest`：真跑 NativeGuard / NativeLoad /
+  OfflineGate（JDK，31 项）—— install 立刻返回、crash guard 连击停用、开关、标记清除、自检文案。
+
+-- 历史（按时间倒序，详细过程见 docs/CHANGELOG.md） --
+
+## 2026-10-21 15:10 native 闸门真的加载（.so 没进游戏 APK + loadLibrary 用错名字，两个根因一起修）
+
+真机 selfcheck 是 `gate installed: false` / `offline native: native: not loaded` / `offline native api: -1/5` /
+`hooked total: false`，`adb logcat -s ElneaOffline ElneaGate ElneaZH` 一条都没有 —— 也就是 `libelneagate.so`
+在游戏进程里**从来没被加载过**。两个独立根因，缺一个都还是加载不上：
+
+1. **`.so` 根本没进游戏 APK**：`app/src/main/assets/elneagate/lib<abi>/libelneagate.so` 是打在汉化器自己 APK 里的，
+   游戏进程读不到；`Pipeline.addZh` 只搬 `Contents/map/about/data/bundles` 五个子目录，
+   `MainViewModel.copyAssetDir` 也只搬 `elneazh` → 重打包出来的游戏 APK 里没有 `assets/elneagate/…`，
+   `Libs.ensure()` 取 asset 必失败。
+   修：`MainViewModel` 多搬一层 `assets/elneagate → payload/elneagate`，`Pipeline.addZh` 把
+   `elneagate/lib{arm64-v8a,armeabi-v7a}/libelneagate.so` 写进游戏 APK 的 `assets/elneagate/lib<abi>/`（常量 `GATE_DIR`/`GATE_LIB`）。
+2. **解包后调错了 API**：旧 `NameGate.load()` 解到 `files/lib/libelneagate.so` 之后调
+   `System.loadLibrary("elneagate")` —— 让 linker 去 APK 的 lib 目录找，那里没有这个 .so → `UnsatisfiedLinkError`；
+   又因为 `loadTried` 是一次性开关，**失败一次整个进程永不重试**，`OfflineGate` 各解一份再 loadLibrary 也一样失败。
+   修：新增 `NativeLoad.java`（两个闸门唯一的加载入口）：解包拿绝对路径 → `System.load(绝对路径)`，
+   失败后每 2s 允许重试，成功/失败都打 `android.util.Log`（tag `ElneaGate`），最后一次 dlopen 原文留在 `err()`。
+
+配套：
+- `SelfCheck` 顶部与末尾各加 `native load:` / `native load error:` / `written:`（写入时刻）/ `name gate:` /
+  `offline gate:` 行；`OfflineGate.installAll()` 挂完之后（以及 install 没加载上时）在后台线程
+  `SelfCheck.rewriteAsync()` 重写一遍 —— 真机上那份文件因此是「挂完之后」的最终态，不是启动前那份。
+- `tools/verify_native_load.py`（本机 + CI 必跑）：.so 双 ABI 在、是合法 ELF、导出两套 JNI 符号、含 `ElneaGate` 日志标签；
+  打包链路（MainViewModel 搬、Pipeline 写进 assets/elneagate/）；Java 侧只用 `System.load`、没有 `loadLibrary`、没有一次性 `loadTried`、
+  加载状态与错误串真的写进 selfcheck。CI 三个 workflow 在 build_gate 之后加了这一步（先把 .so 拷进 payload 再校验）。
+
+本地验证：`python tools/verify_native_load.py` → `native load OK`；`verify_offline.py` 255 项、`verify_identity.py`、
+`verify_upload_names.py`、`verify_gate.py` 全 PASS；`tools/ci_inj.py` → `javac OK, 90 classes`。
+
+未验证：真机。装上之后先看 `files/elneazh_selfcheck.txt` 头部的 `native load:` 行（成功会带绝对路径与字节数），
+失败会带 `native load error: System.load(...) -> java.lang.UnsatisfiedLinkError: dlopen failed: …` 原文；
+再看 `adb logcat -s ElneaGate` 的 `attempt#N …`。
+
+## 2026-10-21 14:10 身份判定抽成 IdentityKeys + 纯 JDK 单测
+
+换身份这一路的判定逻辑原来埋在 `Backup.java` 里（`isLoginPrefKey` / 宽匹配词根 / 白名单），
+改一个字就得靠真机试。现在抽到 `inj/com/shuilize/elneazh/inj/IdentityKeys.java`（无 android 依赖的纯静态类），
+`Backup.isLoginPrefKey()` 转发过去，判定口径只有一份。
+
+- `IdentityKeys.WIDE_KEY_PARTS` 补了 `uid`（游戏 `login.php` 发的是 `uid` / `pas` 这对参数，
+  之前 `uid` 既不命中固定名单也不命中词根，换身份时不会被清）。
+- 新增 `IdentityKeys.isIdentityKey(String)` / `filterIdentityKeys(Iterable)` / `decode(String)`：
+  「换身份删除」和「只恢复存档跳过」现在是同一个函数，不会再各写一套越走越偏。
+- 新增 `tools/offline_test/com/shuilize/elneazh/inj/PlayerPrefsTest.java`（58 项，纯 JDK 跑）：
+  23 个身份键必须命中、18 个设置/资源包/汉化键必须保留、大小写与空格、`%5F` 这类 URL 编码键名、
+  `elneazh_*` 前缀永不算身份、白名单优先于宽匹配、窄匹配（旧 14 键行为）必须漏掉 `cached_user_id`（回归证据）。
+- `.github/workflows/build-check.yml` 的单测步骤加上 `IdentityKeys.java` 与 `PlayerPrefsTest`。
+
+**不确定就保留**（宁可新身份还残留一点，也不误删存档/资源）：白名单词根
+`assetbundle_version` `ab_version` `volume` `sound` `bgm` `quality` `resolution` `language` `lang`
+`brightness` `frame` `graphics` `shadow` `vsync` `fullscreen` `notify` `save_path` `autosave` `font`
+`scale` `user_dict` `user_skill` `user_item` `user_weapon` `user_mailbox` `user_sale` `user_right`
+`user_group` `user_locale` `userdata` `player_session`，以及整包 `elneazh_*`。
+宽匹配只在这张名单之外生效。
+
+自测：`tools/ci_inj.py` javac OK 88 classes；`PlayerPrefsTest` 58 checks / 0 failed；
+`tools/verify_identity.py` `identity wipe OK`（新增 5 项 IdentityKeys 检查）；
+`tools/verify_offline.py` 255 项全过；`tools/verify_gate.py` PASS。
+
+## 2026-10-21 13:05 恢复存档拆成两种：完整恢复 / 只恢复存档（保留当前身份）
+
+真机事故链（就是「换完身份还卡登录」的真正原因）：
+
+1. 「更换游戏身份」= 先备份 → **清存档 + 清账号文件**（见上一条）；
+2. 用户随即「导入存档」把刚才的备份导回来；
+3. 而备份里带着 `uuid` / `login_key`，`restore()` 会调用 `restoreIdentityFile()` 把它们**写回**；
+4. 于是身份又变回旧的 —— 换身份这一步白做。**这就是为什么清完还卡登录。**
+
+### 改法
+
+| 改动 | 位置 | 说明 |
+|------|------|------|
+| `restore(a, u, withIdentity)` | `Backup.java` | 加一个明确参数，不再有「隐式连身份一起回来」 |
+| 二次确认弹窗改双选项 | `Backup.confirmRestore` | **完整恢复（含身份）** / **只恢复存档（保留当前身份）** |
+| 只恢复模式下跳身份 prefs | `restore()` 解压循环 | `shared_prefs/` 里命中 `isIdentityPrefFile` 的整份跳过 |
+| 游戏 prefs 逐键剔除 | `stripIdentityKeys()` | 其余设置（画面/音量/资源版本）保留，只删身份键 |
+| 兜底再清一次 | `clearAllPrefs()` | 老格式备份放在别处也能保证结果 |
+| 身份键唯一判据 | `isIdentityKey()` | 换身份删除与只恢复跳过**共用**这一套，杜绝「一处删一处留」 |
+| UI 一行说明 | `Support.java` 存档组 | 「导入时可只恢复存档、保留当前身份；单机模式请选这一项。」 |
+
+`isIdentityKey` 覆盖：`uuid / login_key / althi_uniq / token / token_id / user_id / user_uniq /
+user_pass / user_name / user_rename / account / session / session_id / device_id`
++ 宽匹配（`ulid / udid / login / uniq / session / account / migrant / transfer / device / …`）
++ 设备指纹 `unity.cloud_userid`；`volume / assetbundle_version` 这类设置键永不误删。
+
+### 必须写清楚的事实（抓包结论）
+
+真机抓包（`acc_samples.json`，同一 uuid 连续两次 `login.php`）：**联网时「新 uuid + 旧存档」并不等于能玩**
+——服务器对着一个它没见过的 uuid 回 `already login!` / 或要求重新走登录，存档里的
+`user_id` 与请求身份对不上就会被踢回登录界面。
+
+所以：
+
+- **「只恢复存档（保留当前身份）」主要是给单机模式用的** —— 单机不连服务器，存档就是一切，
+  身份是谁无所谓，还能保住刚换过的新身份 / 或者干脆不换。
+- 联网状态下想玩旧号的存档，要选**「完整恢复（含身份）」**：身份和存档一起回去，
+  对服务器而言就是同一台设备的老账，不会撞 `already login!`。
+- UI 上已用一行字说明（见上表最后一行），不再靠用户猜。
+
+### 自测
+
+`verify_identity.py` 新增 32 项：双模式入口与文案、`restoreIdentityFile` 必须受 `withIdentity` 守卫、
+只恢复模式跳身份 prefs、14 个身份键逐个必须被剔除、`unity.cloud_userid` 必须被剔除、
+`volume / bgm_volume / assetbundle_version / quality_level` 必须保留、
+`isIdentityKey` 单一判据。结果 `identity wipe OK`。
+`ci_inj.py` javac OK / 87 classes；`verify_offline.py` 255 项全通过。
+
+## 2026-10-21 12:30 单机不弹账号面板 + 更换游戏身份整机清理（待真机验证）
+
+两条独立修复，都在 `feat/offline-share`，已同步到 `fix/anti-flag`（那边只有审计与身份部分，见下）。
+
+### A. 单机仍弹「账号输入」面板 -> 新增本地装玩族 LPLAY（commit 00482bc）
+
+真机：单机开着照样弹面板要账号，进不去本地存档。上一版的请求出口兜底闸（`EG_TARGET_ENC`）
+拦的是 `Cipher::EncryptRJ256`，而**这个面板不靠服务器回包**：它在 `TitlePanel` 里按本地状态
+（要不要账号 / 是不是空本地账号）自己弹。所以堵请求不会让它消失。
+
+第八族 `EG_TARGET_LPLAY`（Java `TARGET_LPLAY = 7` / C `EG_TARGET_LPLAY 8`）：
+
+| 成员 | 单机时 |
+|------|--------|
+| `openAccountPanel` / `AccountInputButtonClick` / `requestErrorAlert` | 直接不执行（返回 NULL）—— 账号框、通信错误框都不出 |
+| `set_isAccountInput(bool)` / `set_disableLocalPlay(bool)` | 传 `false` |
+| `set_isEmytyLocalAccount(bool)` | 传 `true` |
+
+**不伪造任何服务器回包**，只按游戏自己的状态机方向按住；关掉单机立刻恢复原行为。
+顺手修了上一版遗漏的 `eg_offline.h` 头文件保护（`#ifndef` 丢了导致编译失败），
+`EG_MAX` 96 -> 112。两个 ABI 都重编 + strip 并入库。
+
+真机自查：`adb logcat -s ElneaOffline`，应能看到
+`offline: TitlePanel::openAccountPanel skipped (no account/error popup)`；
+`install` 逐族日志里 `family 8 -> k` 的 k 必须 >= 3。
+
+### B. 更换游戏身份仍卡登录 -> 整机身份清理（commit 1eb5801）
+
+真机：点「更换游戏身份」不清数据再进，仍卡登录。原因是只清了 14 个 key：
+prefs xml 仍在，游戏读到旧 uuid 依旧不当新号（`acc_samples` 里同 uuid 第二次 `login.php`
+回的就是 `already login!`）。
+
+`Backup.wipeIdentity` 现在：枚举 `shared_prefs/` 下所有 xml，按文件名黑名单跳过
+（`elneazh_*` / 备份 / 汉化自身设置），**其余整文件删除**——不再假设 key 名单完备；
+再清 `files/zh_backup`、缓存目录、Play 安装 id 候选文件。**不碰玩家存档**
+（`files/*/sv1_ws_*`）。每步 `ElneaOffline` 日志，失败不吞。
+
+`tools/verify_identity.py` 的 prefs 枚举规则按真机文件重写并全绿。
+
+### 分支差异（如实写）
+
+`fix/anti-flag` **没有**单机模式整条链（`Offline.java` / `OfflineGate.java` /
+`NetBlocker.java` / `eg_offline.c` / `tools/verify_offline.py` 都不在该分支树里），
+所以 A 无法镜像过去；B 只涉及 `Backup.java` + `verify_identity.py`，但该分支的
+`Backup.java` 结构与本地装玩/单机部分不同，cherry-pick 必然撞文件删除冲突。
+在 branch 树补齐单机链之前，**B 只在 `feat/offline-share` 生效**；`fix/anti-flag`
+目前只同步了第 5 项（上传审计 `docs/UPLOAD_AUDIT.md` + `tools/acc_forensics.py`，
+commit 5b4920f）。
+
+## 2026-10-21 09:05 单机模式真机失效：请求出口兜底闸 + 安装链重写（待真机验证）
+
+真机反馈：**单机开着仍然上传存档、邮箱能领、仍弹账号登录面板**。查下来不是「判定写错」，
+而是**钩子一个都没挂上过**，界面上却照常显示「单机已开启」。
+
+### 根因（三个，全在安装链上）
+
+1. `ZhInit` 调 `OfflineGate.install(ctx, 1)` —— 传入 1ms，方法等 1ms 就返回，而后台线程
+   那时还在第一次 `nativeInstall` 里（libil2cpp 还没 dlopen），`lastResults` 全是 0。
+   支援弹窗里那句「原生闸门已挂钩 **0** 处」就是证据：六族一次都没成功。
+2. `OfflineGate.load` 与 `NameGate` **各自解包一份** `libelneagate.so` 再 `System.loadLibrary` 同名；
+   谁先谁后都可能让后者拿到「名字已占用但没真正加载」的状态，于是闸门永远静默不装。
+3. 六族全靠 il2cpp **按名字**解析 `HttpSystem` 的方法名。名字一旦对不上，上传/登录请求
+   一条也拦不住，而开关、界面、提示全都正常 —— 完全无声。
+
+### 改法
+
+| 改动 | 位置 | 作用 |
+|------|------|------|
+| **请求出口兜底闸** `EG_TARGET_ENC` | `eg_offline.c` / `eg_offline.h` | 挂在**已确认生效**的 `Cipher::EncryptRJ256`（与名字闸门同一个 `0x18ad7e4`，挂前先校验 8 字节序言，不认识就不挂）。它是每个 sns04 请求体的唯一出口：单机时返回 `NULL`，调用方走自己的「加密/发送失败」分支 —— **一个字节也出不了手机，且不伪造任何业务回包**。开关关着时原样转发。 |
+| 安装改后台重试 | `OfflineGate.install` | `install()` 立即返回，真装在后台线程；每族带重试直到 libil2cpp 出现（最长 90s），每族结果一出来就对外可见；一族失败不影响其它族。 |
+| `.so` 只装一份 | `OfflineGate.load` | 先复用 `NameGate` 已装好的；装不上才自己解包。 |
+| 状态可自证 | `nativeOff()` / `nativeEncState()` | native 现读的开关值 + 兜底闸状态。`Support` 切开关和启动时打对账日志（`ElneaOffline`），对不上立刻补装。 |
+| 补名单 | `httpTable` / `gateTable` | 加 `LoginRequest.*`、`AccountInputPanel.*` 发登录入口、`AddLoginPanel`（「仍弹账号面板」的直接来源）。 |
+
+### 真机自查（一条命令）
+
+```
+adb logcat -s ElneaOffline
+```
+
+- `boot: offline=true stateMatch=true enc=true` → 状态对上了、请求出口已封。
+- `install started in background` → 后台开始装；随后逐族 `family N -> k`、`hooked[i] kind=…`。
+- `fallback hooked EncryptRJ256 @ …` → **兜底闸挂上了**，这是「请求一定出不去」的判据。
+- 切开关：`state pushed: on=… ok=true nativeOff=1 enc=1` + `offline toggle -> …`。
+- `offline: request body refused at Cipher::EncryptRJ256 (nothing sent)` → 真的挡了一次。
+
+### 仍然的风险（如实写）
+
+- 兜底闸依赖 `EncryptRJ256` 的偏移 `0x18ad7e4` 与 8 字节序言（base 2.10.7）。换版本时
+  `verify_enc` 会返回 0 → **不挂**并打 `encrypt prologue mismatch`。此时只剩六族按名解析，
+  解析不到就还是老样子。所以 `enc=0` 要当成「没生效」看。
+- 六族的类名/方法名仍来自对 global-metadata 的静态推断；`miss=` 计数会告诉你有多少条没解析到。
+  兜底闸的存在就是为了让「名字全错」也不至于漏请求。
+- 登录面板本身：`AccountInputPanel` 在 GATE 名单里（`AddAccountInputPanel`），单机时造出来就
+  收掉；但**本地存档的直接入口**仍取决于游戏自己的离线分支（`OfflineData` / `IsOfflineActive`），
+  若游戏非要 `login.php` 成功才进主循环，它会走 FailPanel —— 这一点真机才能确认。
+
+
+## 2026-10-21 07:10 单机模式：联网/付费入口**直接隐藏**（六族 native 钩子，待真机验证）
+
+用户最终定调：单机时联网与付费入口**直接去掉——不显示、不置灰、不弹提示**。
+上一版（06:15）挂上去之后是把入口"置成不可用（变灰）"，不符合要求，已按下面改成隐藏。
+「入口返回 NULL 会空指针」的顾虑仍然成立，所以这一版**不出 NULL、不去设灰**，只做隐藏。
+
+### 六族钩子（编号 = Java `OfflineGate.TARGET_*` = C `EG_TARGET_*`，两处必须一致）
+
+| # | 名字 | 挂什么 | 单机时怎么做 |
+|---|------|--------|--------------|
+| 1 | PANEL | 纯「打开面板」的入口（`OpenShopPanel` 等） | 不执行，返回 NULL（返回值没人用） |
+| 2 | HTTP | `HttpSystem.httpConnect`/`connectWWW`/`AddHttpQueue`/`StartHttpQueue`/`UpdateUserInfoPair` | 返回 0，一个字节都不发，交给游戏自己的通信失败/离线分支 |
+| 3 | GATE | 47 个 `Add*Panel` 工厂 | 工厂照跑（拿到实例，**绝不返回 NULL**），造出来的面板立刻用面板自己的 `CloseAll` → `CloseButtonClick` → `SetActive(false)` 收掉 |
+| 4 | BUTTON | 34 个 `*ButtonClick` 入口回调 | **原回调一行都不跑**，并再 `SetActive(false)` 一次（入口本该已不可见，这是双保险）；不调 `interactable`、不弹提示 |
+| 5 | HIDE | `MenuCell.set_EnableFlag`/`set_ActiveFlag`/`set_IsActive`/`set_Visible`/`set_Alpha`/`SetActiveSelf`、`InfoMenuPanel.set_isActiveCheckBrokenPanelButton` | **先跑原方法**（不打断游戏自己的状态），紧接着 `GetComponent.gameObject.SetActive(false)` + 让所在 Grid/Table `Reposition()`（解析得到才调） |
+| 6 | MASKS | `AbstractPanel.addMaskCollider*`/`addNowLoadingPanel` | 不加遮罩，玩家不会被困在黑幕后面 |
+
+**隐藏而不是置灰**：入口对象走 `Component.get_gameObject()` → `GameObject.SetActive(false)`；
+退一步 `set_active` / `set_visible`。**不再有任何 `set_interactable` / `set_PanelEnabled` 调用**
+（`verify_offline.py` 有断言钉住这两者不出现，见下）。
+
+**为什么 GATE 不返回 NULL**：`Add*Panel` 的返回值调用方会立刻使用（`var p = AddMailPanel(...)`），
+返回 NULL 就是空指针。所以 GATE 走「照跑 + 立刻收掉」，且收的方法优先用**面板自己的**
+`CloseAll`/`CloseButtonClick`（metadata 22991 行起有 `CloseAll`、`CloseButtonClick`），
+最后才退到 `SetActive(false)` —— 不会留一个打不开又关不掉的框。
+
+### 怎么做的（`native/elneagate/eg_offline.c`）
+1. `dlsym` 取 `il2cpp_domain_get` → `il2cpp_domain_get_assemblies` → `il2cpp_assembly_get_image`
+   → `il2cpp_class_from_name` → `il2cpp_class_get_method_from_name`；另取
+   `il2cpp_object_get_class`（**从实例拿类**才能找到 `get_gameObject`/`SetActive` 这类成员）和
+   `il2cpp_thread_attach`（非游戏线程调托管方法前必须 attach）。
+2. 遍历所有 assembly 找类（命名空间写 `*` 表示不限），按 0..6 个参数依次试解析方法名，
+   取 `MethodInfo` 的**第一个字段**当函数地址。
+3. `A64HookFunction` 挂上去；`EG_MAX` 96 个槽，转发函数 `eg_hook_0..95` 用宏生成。
+4. 三个隐藏用的小工具：`eg_hide_object`（`SetActive(false)`，退 `set_active`/`set_visible`）、
+   `eg_close_panel`（`CloseAll` → `CloseButtonClick` → 隐藏）、`eg_relayout`（Grid/Table `Reposition`）。
+   不置灰、不写 alpha、不碰 interactable。
+5. 开关值 `'1'/'0'` 由 Java 侧 `push` 灌入、**每次回调现读**，切开关不用重进游戏。
+6. 解析不到的条目：`resolve miss: ...` 打一行日志并跳过，**绝不崩**。
+
+白名单全部在 `inj/.../OfflineGate.java`（`buttonTable()`/`gateTable()`/`hideTable()`/
+`panelTable()`/`httpTable()`/`masksTable()`），改名单只改这一个文件。
+
+### 接线
+- `ZhInit.onCreate`：`OfflineGate.install(getContext(), 1)`，自己的 try/catch，
+  排在 `NameGate.install` / `NetBlocker.install` 之后、`SelfCheck.run` 之前。
+- `Support` 支援弹窗：开关翻转时先 `OfflineGate.push(next)` + `OfflineGate.resetStats()` 再改界面；
+  单机时多一行 `OfflineGate.summary()`（挂了几个点、已挡几次请求/隐藏几次入口）。
+  文案写的是「联网/付费入口已隐藏」。
+- `SelfCheck`：`offline native: ...`、`offline native api: n/5`、六族条目数、`offline native per target: [...]`。
+
+### 真机怎么确认生效
+`adb logcat -s ElneaOffline`，认这几条（`verify_gate.py` 在 .so 里钉住了这些字符串）：
+- `offline: skip entry ... (not shown at all)` —— PANEL 族挡了打开入口；
+- `offline: drop request ... (report comm failure)` —— HTTP 族没发请求；
+- `offline: ... skipped (panel not created)` —— GATE 族收面板；
+- `offline: ... blocked (entry hidden=1)` —— BUTTON 族藏掉了入口；
+- `offline: ... hidden on refresh` —— HIDE 族在刷新时又藏了一次（`hidden=0` 说明 `get_gameObject`/`SetActive` 没解析上）；
+- `resolve miss: *	类	方法` —— 该条没解析上（跳过，无害）。
+
+### 边界（刻意保留的，别改）
+- **不伪造服务器回包**：native 侧没有任何组包/造响应对象的逻辑；`verify_offline.py` 有断言钉住
+  「`eg_offline.c`/`OfflineGate.java` 里不许出现 `il2cpp_object_new` / `il2cpp_string_new('{')`」。
+- 不做破解内购、不改设备码、不删服务器标记、不绕反作弊。
+  已购/已解锁内容沿用本机上次记录（`Offline.purchaseHint()`），不向服务器查询。
+- **资源下载不动**：下载走 `AssetBundleManager`，不带身份信息，边玩边下照旧。
+- **armv7 没有 hook 引擎**（And64InlineHook 只有 AArch64）：armv7 上 `nativeInstall` 返回 -4，
+  整族跳过，只剩 Java 层 `NetBlocker` 兜底。真机以 arm64 为准。
+- **关掉单机后恢复**：所有族回原样转发/执行，不再隐藏；下次界面重新构建时入口自然回来。
+  已经在屏幕上的那个界面要重新进一次才回来（我们不主动 `SetActive(true)`，避免和游戏的显隐逻辑打架）。
+
+### 必须先确认的（真机才知道，我不擅自改）
+1. **`get_gameObject` / `SetActive` / `CloseAll` / `CloseButtonClick` / `Reposition` 能否在运行期解析到**：
+   名字来自 `global-metadata.dat`（`AbstractPanel` 22949 行起、`MenuCell` 27487 行起），
+   但具体实例上能不能解析只有真机能确认。日志里 `hidden=0` 就说明没解析上。
+2. **GATE 族收面板会不会打断游戏自己的流程**：如果某个面板被收掉后游戏状态异常，
+   把该条从 `gateTable()` 删掉（改由 HIDE/BUTTON 族隐藏入口）即可，不用改代码结构。
+3. **`httpConnect` 的返回值语义**：返回 0 对 `IEnumerator`（协程不跑）/`void`（直接返回）合法，
+   对 `bool` 是 false。真机若表现为「一直转圈等网络」，把 `httpTable()` 清空，
+   只留 Java 层 `NetBlocker`（`Offline.allowWhileOffline` 那条闸）。
+4. **启动是否强依赖登录回包**：若开单机后卡在标题/维护画面，说明登录流程必须拿到服务器回包。
+   那就**不要伪造回包**，改为只挡写操作（`Offline.WRITE` 表里的 `save2`/`save`/`kpi` 等），
+   读类放行 —— 这条限制从第一版就写在 `Offline.limits()` 里。
+
+## 2026-10-21 05:55 单机模式改走 native（已被上面 07:10 版取代，只留结论）
+
+事实与 06:15 版相同，不再重复：Java 层反射不到 `MenuCell.EnableFlag`/`AbstractPanel`；
+`libil2cpp.so` 里 grep 不到这些名字（只在 `global-metadata.dat`）；
+`base.apk` 的 dex 里 `AndroidUuidPlugin`/`AndroidTools`/`GetUUID` **0 命中**。→ UI 与网络只能走 il2cpp。
+那版的「面板族返回 NULL」已被证明不够安全，见 06:15 节表格。
+
+## 2026-10-21 03:40 单机模式 + 分享/导出（分支 feat/offline-share，待真机验证）
+
+### 单机模式：开关，默认关，开了就真的一个字节都不出手机
+入口：游戏内 `Support`（汉化设置/支援弹窗）→「单机模式」开关。状态存
+`shared_prefs/elneazh_settings.xml`（键 `offline`），`Backup` 会跟着存档一起备份/恢复。
+
+判定「游戏服务器」：`Offline.isGameServer()` 按 **host 后缀**认 `althi.co.jp` 及其所有子域
+（**不用 contains** —— 会把 `althi.co.jp.evil.com` 误判成自家服务器），且路径含 `/sns04/`。
+Java 层闸门 `NetBlocker`（`URL.setURLStreamHandlerFactory` + `ProxySelector`）每个请求现读开关，
+命中就本地接住、不发出去。native 闸门（上一节）是更强的一层。
+
+### 不做 / 边界（刻意保留的）
+- 不伪造服务器业务数据（存档、角色、物品都不是编的）、不改设备码、不删服务器标记、不绕反作弊。
+- `Offline.limits()` 里写清了单机时不可用的东西：云存档、好友、邮件、PVP、礼物。
+
+### 扩展包 / 资源下载在单机模式下的处理（2026-10-21 补充，别再改回去）
+**结论：资源下载放行。** 依据（写进代码注释与 `Offline` 的类注释，勿推翻）：
+- 下载走 `AssetBundleManager.downloadAndCache` → `get_Url` → `UnityWebRequest`，
+  由 `getEnvironmentURL()`/`getAssetBundleURL()`/`getManifestURL()` 拼地址，**不经过 HttpSystem**；
+- `AssetBundleManager` 整块的字段/成员里 `user_number`/`crypt_key`/`UserNumberOnServer`/
+  `CryptKeyOnServer`/`key_header_info`/`addUniqArg`/`uniq`/`uuid`/`playerId`/`token`
+  **全部 0 次命中** —— 即这条下载路径不带任何账号或设备标识；
+- 身份参数只存在于 `HttpSystem`（即 `/sns04/*.php`）。
+
+放行/拦截规则（`Offline.allowWhileOffline`）：
+- **放行**：非游戏服务器 且 非资源宿主的地址；althi 宿主上「资源形状」的路径
+  （`.bundle`/`.unity3d`/`.ab`/`.assetbundle`/名字含 `assetbundle`/末段是 `manifest` 或 `*.manifest`）；
+  `*.php` 被显式排除在「资源形状」之外。
+- **拦截**：althi 宿主 + `/sns04/` + `*.php`（登录、存档上传、排行、邮件、PVP…）。
+
+已知限制：若某个版本改成「先请求带身份的 php 拿临时 URL 再下载」，那条 php 会被挡。
+届时应把它加进放行例外并在本节登记，**不伪造回包**。
+
+### 分享 / 导出（第三批）
+入口：`Support` 弹窗「分享 / 导出」区，三个按钮，各自独立 try/catch，出错只 Toast。
+- 导出存档：`Backup.make()` 现做一个 zip → `Share.stage()` 落到 `files/image_provider/`
+  → `FileProvider`（authority `jp.co.althi.elnea.en.zhfiles`）→ `ACTION_SEND` + `createChooser`。
+- 导入存档：`ACTION_OPEN_DOCUMENT` 选 zip → **先自动备份当前存档** → 走已有 restore。
+- 导出名字对照表：`elneazh_names` 别名表（中文↔拼音）→ `艾尔尼亚名字对照表.txt` → 分享。
+
+## 离线验证（CI 里跑，不需要手机）
+- `python tools/verify_offline.py` —— **172 项**源码级护栏（含六族表的格式/互不冲突、
+  资源下载不在拦截名单、「不置灰（`set_interactable`/`PanelEnabled` 不许出现）」、
+  「必须用 `SetActive` 隐藏」、GATE 必须用 `CloseAll` 收面板、隐藏后必须 `Reposition`、
+  不伪造回包的负向断言）。
+- `tools/offline_test/` 的 `OfflineTest`（JDK 直跑）—— **200 项**：六族编号、表格式、
+  去重、交叉冲突、覆盖面、`TARGET_HIDE` 名单、native 未加载时「安静失败不抛」。
+- `python tools/verify_gate.py` —— .so 里必须含 `ElneaOffline` 标签、7 个 JNI 导出、
+  六族钩子的日志字符串（`skip entry` / `drop request` / `panel not created` /
+  `blocked (entry hidden=` / `hidden on refresh` / `no mask for`；只在 arm64 检查，
+  armv7 没有 hook 引擎）。
 
 ## 现在能用的版本
 - Release `latest` 的 ElneaZH.apk（每次推送自动构建）。装前先在游戏「Support → 存档数据」备份，卸载原版后安装汉化版（签名不同）。
@@ -9,6 +480,83 @@ _最后更新：2026-10-20 12:45 CST_
 ## 固定签名 / 免卸载更新（21:05 加入，待真机验证）
 - 签名本来就固定（app/keystore/elneazh.p12），只有第一次从商店版换汉化版要卸载。
 - App 现在会：检测已装游戏是否是自己签名的汉化版 → 是就提示直接覆盖安装；第一次汉化成功后把原版 APK 存到 App 私有目录（filesDir/orig），以后用它打补丁。没存过的话让用户手动选原版 APK（仓库 base/apk 有）。
+
+## 2026-10-21 03:20 上传前名字闸门：改 EncryptRJ256 的明文（单向）
+
+**问题**：存档里只要带中文名，上传到 `sns04/*.php` 就是汉字。服务器只认原版字形，中文名是「非原版客户端」的硬证据。
+
+**落点（真机 frida 取样确认，不是猜的）**：`Assembly-CSharp` 的 `Cipher::EncryptRJ256(string)`
+
+| 项 | 值 |
+| --- | --- |
+| 函数入口 | VA `0x18ad7e4` = ELF file offset `0x18a97e4`（入口 `str x30,[sp,#-0x30]!`，x0 = 明文） |
+| 返回 | `0x18ad97c` 处 `b` 跳到 il2cpp String 构造，所以「返回值」就是下一次调用 EncryptRJ256 的入参 |
+| 兄弟函数 | `0x18ad984` = `DecryptRJ256`（服务器回包解密） |
+| 初始化块 | `0x18ad804` `tbnz` → `0x18ad840` 是「首次调用才走」的静态初始化分支（`bl il2cpp_codegen_initialize_runtime_metadata` + 置标志） |
+| 跳板位置 | `0x18ad834`，8 条指令 32 字节，正好塞在初始化块里；`0x18ad854` 回到原流程 |
+
+**为什么跳板敢放在初始化块里**：这段代码只在第一次调用时执行，只写 x8 与 `[x21+0xef9]` 标志位；而 EncryptRJ256 一进来（`0x18ad7e4..0x18ad830`）就把 x19/x20/x21 存到了栈上，跳板只用 x9/x10，且三条分支目标（`0x18ad6e0` / `0x18ad840` / 原地）全部落在原有入口内部 → 不动栈帧、不动活值。
+
+**改什么**：`Cipher.EncryptRJ256` 收到的明文是 JSON，其中 `ws_profiles` / `ws_familys` / `ws_animals*` 这些字段的值是 `base64(zlib(...))`，解开后名字是 `0x01 + 1 字节长度 + UTF-8` 的小槽。`inj/UploadNames.java` 只改这些槽：
+
+- 汉字名 → 固定拼音（同一汉字永远同一拼音，靠 SharedPreferences `elneazh_names` 记住），长度字节同步改写；
+- 其它字节（id、链接、25 字节属性、噪声）逐字节保持；
+- 解不开 / 不是 zlib / 不是 base64 / 替换反而更长 → **原样不动**，宁可漏改也不写坏存档；
+- 纯 ASCII 请求体直接跳过（原版玩家走路不变）。
+
+**验证**（`tools/verify_upload_names.py`，Python 复刻；`UploadNamesSample` + 真 JVM 跑同一套夹具）：
+
+```
+python tools/verify_upload_names.py     -> RESULT: PASS （19 项）
+javac/d8 inj -> javac OK, 57 classes
+JVM 直跑 Harness: filterNames OK / blob 96 -> 88 roundtrip OK notLonger OK -> RESULT PASS
+```
+
+**风险（真机未验证）**：跳板的机器码（`tools/net_gate_so.py`，尚未落地）本机没有真机跑过；`bl` 到 Java 的 JNI 往返（`NetGuard.ensure`）还没接完，目前 `NetGuard.install()` 只探测、返回 false 并写明「闸门未激活」，绝不阻断启动。跳板接好之前，这一层是**死代码**，不会影响游戏。
+
+**解密工具**：`tools/decrypt_acc.py`（`--key/--iv` 支持 hex 与 base64，`--mode cbc|ecb`，`--selftest` 自检全绿），用来核对抓包里的 `acc=`。
+
+## 2026-10-21 00:30 名字：本地存档保持中文，只在上传时换成拼音（单向）
+策略定稿：**不改存档、不改显示**。玩家和 NPC 的中文名照旧留在本地、照旧在界面上显示中文；
+只在数据离开设备（上传 `sns04/*.php`）时把明文里的中文名换成固定拼音；服务器响应里回来的拼音原样显示，不做反向还原。
+
+- 停用旧的「老存档人名转中文」：删除 `inj/.../SaveNames.java`，`ZhInit.onCreate` 里不再调用它。
+  （旧版 CI #62 / 909e224e 那套把存档里的人名改成中文，正是被标记的来源之一。）
+- 名字表不再做英文化：`tools/bmfont_zh.py`、`tools/metadata_zh.py`、`tools/build_patch.py` 保持原样
+  （即 Name 字体与取名白名单仍放行汉字、NPC 名字表仍是中文译文），因为中文现在只留在本地。
+- 新增 `inj/.../NameFix.java`：中文名 → **恒定**拼音。别名表（`SharedPreferences` `elneazh_names`，键 `n:<拼音>`）优先，
+  未命中则用 `names.tsv` 的中文→英文原文，再没有就逐字拼音（纯函数，同输入同输出），并写回别名表；
+  别名表在 `shared_prefs/` 下，`Backup` 已会随备份/恢复一起带走。
+- 新增 `inj/.../Pinyin.java`：`android.icu.text.Transliterator("Han-Latin; Latin-ASCII")`（反射调用，API 29+），
+  API 24–28 退回打包的 `assets/elneazh/data/pinyin.tsv`（GB2312 6763 字，`tools/pinyin_tables.py` 生成）。
+- `inj/.../NetGuard.java` 重写为**单向**闸门：`body()` 只清洗请求体键值里的非 ASCII，`resp()` 原样返回。
+  **代码位置已找到但 Java 侧挂不上**（证据见下），所以闸门目前是「备用+可离线自测」状态，
+  真正的防线在「名字进入游戏前就已经是 ASCII 之外无他」这条路上——见下一条。
+- 新增 `inj/.../SelfCheck.java`：启动时把词表规模、拼音恒定性、闸门行为写进 `files/elneazh_selfcheck.txt`
+  并打 `ElneaZH-SELF` 日志，便于真机一次 `adb logcat -d -s ElneaZH-SELF ElneaZH-NET` 验证。
+
+### 网络栈与加密入口的静态结论（找不到可挂点，记录以免重复挖）
+- 游戏 HTTP 走 `UnityWebRequest`（APK 的 `ScriptingAssemblies.json` 含 `UnityEngine.UnityWebRequestModule.dll`，
+  `libunity.so` 有 41 个 `UnityEngine.Networking.UnityWebRequest::*` 符号）；传输是 native curl，
+  **不经过 okhttp / java.net**——所以拦 Java 的 `CallServerInterceptor`、`HttpURLConnection` 一律无效。
+- `libil2cpp.so`（61MB）里 `acc=` / `lang=` / `sns04` / `althi` / `POST` **0 命中**；`libunity.so` 同样 0 命中。
+  请求体是 C# 层用 `il2cpp_string_new` 内联拼的代码（例：`pvp.php` 唯一引用点 VA 0x17fc6a8 是
+  `mov x8,wzr; stp x21,xzr,[x0]; adrp x20,#0x8d6000; add x20,#0x27c; mov w19,#0x15` 这种对象构造），
+  没有可替换的命名导出函数；il2cpp 的字符串表指针（`0x389c9a8`/`0x389c9b0`）静态初值为 0、运行时才填，
+  **静态定位不到加密入口**。要真正在加密前截明文，只能真机动态 hook（Frida/LSPatch）+ 一条抓包 `acc=` 样本。
+- 已知的接口名（`tools/metadata_zh.py --dump` 可从字面量表取到）：`http://app-elnea.althi.co.jp/sns04/`（字面量 #12315）、
+  `res-elnea`(#12320)、`cdn-elnea`(#12316)，参数名 `acc`(#10187) / `lang`(#12806)，接口 `read.php`/`save2.php`/
+  `recov2.php`/`pvp.php`/`rename.php`/`token.php` 等 27 个 `.php`。
+
+### 未验证 / 风险
+- 闸门在 Java 侧无挂点（上面已说明），所以**上传时是否真的没有汉字，取决于名字进入游戏前是否已转 ASCII**；
+  当前版本没有强制转换玩家输入（取名白名单仍放行汉字），这一点是有意保留的（用户要求本地保持中文）。
+- 真正要收敛风险，下一步应做动态 hook 或要求玩家取名用英文/拼音；等用户给 `acc=` 样本后可继续做解密侧验证。
+
+## 2026-10-20 23:30 已移除：888 好友上限（防封）
+- 移除 tools/so_patch_zh.py 里的 FRIEND_MIN/FRIEND_MAX/FRIEND_LIMIT 与 `mov w0,#888`/`mov w1,#888` 两个补丁字节；VA 0x19a48d4 / 0x19a48d8 现已恢复原指令 `mov w0,#52` / `mov w1,#102`（脚本里只留断言，输入 .so 若已被改过会直接报错）。
+- 原因：原版客户端交友上限就是 102，888 是服务器侧一眼可辨的非法值；get_limitFriendCount 又是每次存档/上传统计都会走到的数据来源，属于典型的“客户端数据与原版不一致”特征。本地多交友的收益远小于封号风险。
+- 国王补丁（CreateNewKing 首个国王「杨广」）与 SelectTalkFriend 补丁保留。注意：补丁本身不含中文，“杨广”两个汉字是 libil2cpp 里 `il2cpp_string_new` 从 so 内字面量构造的，不走存档名字段；若以后发现服务器会看到王的名字，需要再改。
 
 ## 2026-10-20 19:30 真机卡维护 / 强制输入账号（OurPlay 正常）
 - 根因：UuidPlugin.GetUUID 在 PlayerPrefs 没缓存时采用 AndroidUuidPlugin 按设备算出的 ID（清数据、卸载重装都不变），服务器对该身份下发了维护锁（规则模式→维护页；全局模式→登录失败 10 次弹账号框）。OurPlay 沙盒设备 ID 不同所以正常。
@@ -116,3 +664,89 @@ _最后更新：2026-10-20 12:45 CST_
 - 自动：ZhInit 最先执行，距上次超过 6 小时且有存档就备份一次（改名处理之前），自动的只留最近 10 份；手动、恢复前的备份永不删。
 - 「交流与支持」框加「备份存档」「从备份恢复存档」：恢复用系统文件选择器选 zip（重装后也能选旧备份）→ 确认 → 先备份当前 → 覆盖 → 关闭游戏，重开生效。只接受带 elneazh_backup.txt 的汉化版备份，路径防穿越。
 - 用户要求加入旧工作区的「假维护一键救援」（删服务器下发的作弊标记）/ 去掉维护检测：拒绝，属于绕过反作弊封禁。
+
+## 2026-10-21 04:10 上传前名字闸门：EncryptRJ256 入口把中文名换拼音（待真机验证）
+
+### 为什么
+上一版只有 Java 侧的过滤函数，没有任何挂点 —— 请求照样带着中文名出门，防封等于没做。
+这一版把闸门真正挂到游戏自己的加密函数上。
+
+### 加密入口（真机确认）
+- `Assembly-CSharp` 的 `Cipher::EncryptRJ256(string)`，`libil2cpp.so` VA `0x18ad7e4`（Decrypt 在 `0x18ad984`）。
+- 入参是**完整明文 JSON**，返回值就是抓包里的 `acc=`（base64）。
+- 明文里 `save2.php` 的 `savedata` 字段是「字符串里套 JSON」，内层每个 `ws_*` 的值是 `base64(zlib(二进制存档))`，
+  中文名就躺在 zlib 解出来的记录里；`login/check/pvp/mail/gift/kpi` 等请求本来就没有中文。
+
+### 实现（native/elneagate → libelneagate.so，arm64-v8a + armeabi-v7a）
+- `elneagate.c`：`JNI_OnLoad` 里对 `0x18ad7e4` 做 inline hook（vendor/And64InlineHook），
+  原函数执行前拿明文，过滤后再交给原函数；hook 不上就什么都不做，只打日志。
+- `eg_names.c`：
+  - `eg_filter_raw()`：扫存档记录里的名字槽（`0x01` + 1 字节长度 + UTF-8 字节），按表替换；
+    长度字节同步改写，替换只许变短或等长，超长/格式不符**原样不动**；
+  - `eg_filter_zlib()`：inflate → 过滤 → deflate(9)，结果比原 base64 长就放弃；
+  - `eg_rewrite_nested()` / `eg_filter_json()`：在明文里找 `\"key\":\"<base64>\"` 这种嵌套字面量，
+    只碰长得像 zlib+base64 的值，其它字段（uuid、lang…）一个字节都不动；纯 ASCII 明文直接返回 NULL（不处理）。
+  - 映射表 = `assets/elneazh/data/names.tsv`（NPC 中文名 → 英文原文）+ 玩家别名（中文 → 拼音），
+    由 Java 侧 `NameGate.pushNames()` 在 `NameFix.load()` 之后整表灌进来，两边同一份。
+- Java 侧：`NameGate.java`（把 `assets/elneagate/lib<abi>/libelneagate.so` 解到 `files/lib/` 后 `System.load`，
+  后台线程重试到 `libil2cpp` 加载完）、`NameFix.pairs()`（映射快照）、`NameFix.ascii()` 里每新增一条别名就同步给 native。
+- 日志标签 `ElneaGate` / `ElneaZH-NET`。
+
+### 只改请求，不改本地
+本地存档、界面、服务器回包都不经过这道闸门 —— 游戏里看到的名字仍然是中文，
+只有加密前那一刻的中文名被换成拼音。同一个名字每次换出的拼音固定，服务器侧看起来就是稳定用英文名。
+
+### 验证
+- `python tools/build_gate.py`：双 ABI 编译 + strip，arm64-v8a 27,272 B / armeabi-v7a 15,044 B。
+- `python tools/verify_gate.py`：26 项全 PASS（C 夹具 5 个名字逐字节、幂等、zlib 路径、
+  JSON 层 uuid/lang 不动、解压回 EXPECT、纯 ASCII 零改动、产物 ELF + 含日志标签）。
+- `python tools/ci_inj.py`：javac OK，60 个类。
+- `python tools/verify_upload_names.py`：29 项全 PASS。
+- 本地 `gradle assembleRelease` BUILD SUCCESSFUL，APK 内含 `assets/elneagate/{arm64-v8a,armeabi-v7a}/libelneagate.so`。
+- CI：`.github/workflows/build.yml` 与 `build-check.yml` 都加了 `tools/build_gate.py` + `tools/verify_gate.py` 两步。
+
+### 未验证 / 风险
+- **真机没验证**：hook 能否在游戏进程里成功装上（`il2cpp` 加载时机、arm64 指令改写、内存页权限）只有真机能确认。
+  装失败的表现是「日志里有 ElneaGate 的失败原因、游戏照常跑、请求仍带中文名」，不会崩。
+- 明文里如果出现非 `\"k\":\"v\"` 形态的中文名（例如直接写在顶层），这道闸门不处理 —— 目前抓包没见到。
+- 名字槽扫描是启发式的（`0x01` + 长度 + UTF-8 名字），存档格式若变体会漏掉，不会改坏。
+
+## 2026-10-20 23:55 更换游戏身份：先备份 + 清空本地数据（待真机验证）
+
+- 抓包结论：旧存档 + 新 uuid → login.php 回 `already login!` → 弹账号框。**只抹 uuid 没用**，服务器是拿存档里的账号信息认人的，必须整套本地数据重来。
+- inj/Identity.java（重写 `reset`）：
+  1. 后台线程跑 `Backup.backupForIdentity(a)`：`make(a,"换身份前")` 返回非 null，且再校验这份 zip 里真有 `name="uuid"` 或 `name="login_key"`，两者都成立才返回 uri；否则**中止，一个字节都不动**，只弹「备份失败，未更换」。
+  2. `Backup.wipeForIdentity(a, uri)`：按备份里 `elneazh_backup.txt` 的文件清单删 —— `files/`、`shared_prefs/`、`ext/` 下登记过的文件，外加 `shared_prefs/<pkg>.v2.playerprefs.xml`（uuid/login_key）、`databases/` 里的 login/token/user 类文件、`sv1_*` 与 `*.ntmp/*.rtmp`。**保留**：汉化主表 22 张（`zh/Contents` 里我们投放的 c_* 表）、我们自己的 `shared_prefs/elneazh_*`（含 `elneazh_names`）、`UnityCache`/`il2cpp` 缓存。
+  3. 2 秒后 `finishAffinity` + `killProcess`，重开即新人物新身份。
+- 备份侧（inj/Backup.java）：
+  - 新增 `prefsName(ctx)` = `<pkg>.v2.playerprefs`（文件名依据：`libunity.so` 字面量 `.v2.playerprefs`，Unity 的 SharedPreferences 名就是 `<pkg>.v2.playerprefs`，落盘为 `shared_prefs/<pkg>.v2.playerprefs.xml`）。
+  - `addPrefsFile()`：即使真实 prefs 文件不在 `/data/data/<pkg>/shared_prefs`（可能在 `/data/user_de/<n>/` 或 `/data/user/<n>/`），也用 `findPrefsFile()` 找到原文件整份写进 zip；再找不到就按 SharedPreferences 的 xml 结构从 `getAll()` 手写一份。zip 里重复条目合法，读取方按后者为准。
+  - `addIdentFiles()`：`databases/`、`no_backup/`、`files/` 根下名含 login/token/user/account/uuid/session 的文件一并备份。
+  - `elneazh_backup.txt` 增加 `identity=uuid=xxxx…xxxx login_key=true keys=N`（uuid 打码），列表里显示在大小后面，方便一眼分清哪份是哪个身份。
+  - `restore()` 结束后调用 `restoreIdentityFile()` 把备份里的 `uuid`/`login_key` 等键 `commit()` 回 SharedPreferences（**旧身份解封后恢复即回去**）；同时把「当前存在、但备份没登记」的 `sv1_*` 清掉，避免新旧两份存档混在一起。
+- `tools/verify_identity.py`：复刻 wipe 的保留/删除判定，实测 22 张汉化表 keep、`sv1_*`/playerprefs/login 库 delete、`elneazh_*` keep → `wipe rules OK`。
+- 编译：`python tools/ci_inj.py`（等价 CI 的 `javac --release 8 -cp android.jar`）→ `javac OK, 58 classes`。
+- 未验证：真机。风险点：某些机型 `shared_prefs` 目录被 SELinux 保护读不到时只能走「从内存手写 xml」分支（格式与 SharedPreferences 一致，恢复时由 `restoreIdentityFile` 重新 commit，理论可行）；`databases/` 里的登录库若被游戏打开着，删除后需重开进程生效（本流程本来就会 kill）。
+
+## 2026-10-21 00:05 更换身份：改成最小删除集合（绝不碰数据包）
+
+- 上一版（commit db2e97e）按备份清单整目录删，风险太大：`ext/UnityCache` 就是下载的 AssetBundle 缓存，删了要重下数据包。
+- 现在 `Backup.wipeForIdentity` 只删「明确是登录凭证 / 旧存档」的东西，**白名单式最小删除**：
+
+| 类别 | 处理 | 依据 |
+| --- | --- | --- |
+| `files/{zh,Contents,save,saves}` 及 ext 同位置的 `sv1_*`、`*.ntmp/*.rtmp` | 删 | 存档本体（旧身份的角色/家族/世界状态） |
+| PlayerPrefs 登录键：`uuid` `login_key` `althi_uniq` `token` `token_id` `user_id` `user_uniq` `user_pass` `user_name` `user_rename` `account` `session` `session_id` `device_id` | 逐键 remove | global-metadata 字面量表：`althi_uniq`=10282、`login_key`=12937、`uuid`=15217、`token`=14859、`user_id`=15196、`user_uniq`=15205，与 `already login!`(10275)、`login.php`(12935)、`create.php`(11131) 同属登录流程；libil2cpp.so 与 dex 里 0 命中 → 确认是 C# 字面量（只存在于 metadata） |
+| `shared_prefs/althi_uniq.xml`、`files/althi_uniq` 等独立凭证文件 | 删 | `althi_uniq` 有时单独存一个 xml / 无扩展名文件 |
+| `databases/` 里名字含 login/account/token/user/session/althi 的 `.db*` | 删 | 账号库 |
+| **`UnityCache/Shared/<bundle>/<hash>/{__data,__info}`** | **保留** | libunity.so 原生 AssetBundle 缓存（字面量 `UnityCache` / `__data` / `__info`），与登录无关 |
+| **汉化主表 `c_*`（22 张）** | **保留** | 我们投放的 `zh/Contents` 表 |
+| **`shared_prefs/elneazh_*`（含 `elneazh_names`、`elneazh_backup`）** | **保留** | 我们自己的设置 |
+| **PlayerPrefs 资源/版本键（`assetbundle_version`=10436 等）** | **保留** | 只 remove 登录键，不整体清空 prefs |
+
+- 附带修复：`Backup.add()` 原来的 `SKIP_DIRS` 只跳第 1 层，`ext/UnityCache` 这种深一层的仍会被打进备份 zip（备份因此巨大且慢）→ 改成任意层按名字跳。
+- `restore()` 里"清掉备份没登记的 sv1_*"也收窄为**只碰 `sv1_*`**，不碰缓存与汉化表。
+- 自检：`python tools/verify_identity.py` → `minimal wipe OK`（14 条文件规则 + 9 条 prefs 键规则，含 `UnityCache/__data` keep、`assetbundle_version` keep、`althi_uniq` delete）。
+- 编译：`python tools/ci_inj.py` → `javac OK, 58 classes`。
+- 目标达成路径：删掉登录键后 `UuidPlugin.GetUUID`（so_patch_zh.py 补丁：无缓存 id 就生成随机）会给新 uuid，`althi_uniq` 清空后重新取，AssetBundle 缓存仍在 → **重开不需要重新下载数据包，直接新建人物**。
+- 未验证：真机。若某些机型把资源版本键也放进了上述独立凭证 xml（`althi_uniq.xml`），那份会被整个删掉 → 最坏是重新校验一次版本，不会重下整包（`UnityCache` 在）。

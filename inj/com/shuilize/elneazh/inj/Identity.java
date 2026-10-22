@@ -34,7 +34,13 @@ final class Identity {
     static final String KEY = "uuid";
 
     /** Confirmation drawn in the same game-popup style as {@link Support} (cream panel, brown frame, orange buttons). */
-    static void confirm(final Activity a, final Runnable onCancel) {
+    static void confirm(final Activity a, final Runnable onCancel) { confirm(a, onCancel, "smart"); }
+
+    static void confirm(final Activity a, final Runnable onCancel, final boolean full) { confirm(a, onCancel, full ? "full" : "id"); }
+
+    /** mode: smart=更换身份（只清身份+账号+存档，保留资源）；full=完全清除（同系统清除数据）；id=只换身份保留存档。 */
+    static void confirm(final Activity a, final Runnable onCancel, final String mode) {
+        final boolean full = !"id".equals(mode);
         try {
             final float d = a.getResources().getDisplayMetrics().density;
             final Dialog dlg = new Dialog(a);
@@ -50,7 +56,7 @@ final class Identity {
             card.setPadding(pad, (int) (14 * d), pad, (int) (16 * d));
 
             TextView title = new TextView(a);
-            title.setText("更换游戏身份");
+            title.setText("smart".equals(mode) ? "更换身份" : "full".equals(mode) ? "更换身份（完全清除）" : "只更换身份（保留存档）");
             title.setTextColor(Support.BROWN);
             title.setTextSize(19);
             title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -68,19 +74,26 @@ final class Identity {
             tv.setTextColor(Support.BROWN_TEXT);
             tv.setTextSize(14);
             tv.setLineSpacing(0, 1.25f);
-            tv.setText("只在游戏一直卡「维护中」或强制要求输入账号时使用。\n\n"
-                    + "点「确定更换」后会先把当前存档（含游戏身份）备份成一份「换身份前」，"
-                    + "成功后才清空本地存档并重新开始 —— 相当于一个全新账号。\n\n"
-                    + "旧存档不会丢：旧身份解封后，在「交流与支持 → 存档管理」里恢复那份「换身份前」备份，"
-                    + "就会连原来的身份一起回去。\n\n"
-                    + "更换后游戏会自动关闭，请重新打开。");
+            tv.setText("smart".equals(mode)
+                    ? "卡「维护中」或卡登录时用。\n\n"
+                    + "卡维护/卡登录都是「账号和设备码配不上」。更换身份会把设备码、账号、存档一起换新，"
+                    + "汉化和已下载的资源包、数据表都保留，不用重下。\n\n"
+                    + "会先自动备份一份「换身份前」（含身份），想回来就在「存档管理」完整恢复它。\n\n"
+                    + "确定后游戏会关闭，重新打开即生效。"
+                    : "full".equals(mode)
+                    ? "测试用：和系统「清除数据」一样全部清掉（只留汉化和资源缓存），用来对比。\n\n"
+                    + "会先自动备份一份「换身份前」（含身份）。确定后游戏关闭，重新打开即生效。"
+                    : "测试用：只换掉设备码 / uuid / login_key / 账号块等身份，存档原样保留。\n\n"
+                    + "先自动备份一份「换身份前」（含身份），然后游戏关闭；重新打开时在游戏启动前清掉身份。\n\n"
+                    + "注意：存档和旧设备码是绑在一起的，保留存档换身份很可能仍然卡登录 —— 这正是要测的。"
+                    + "想回去就在「存档管理」完整恢复那份「换身份前」。");
             card.addView(tv, new LinearLayout.LayoutParams(-1, -2));
 
             card.addView(Support.button(a, d, "确定更换", Support.ORANGE, Support.ORANGE_DARK, Color.WHITE, new View.OnClickListener() {
                 @Override public void onClick(View v) {
                     ok[0] = true;
                     try { dlg.dismiss(); } catch (Throwable ignored) {}
-                    reset(a);
+                    reset(a, mode);
                 }
             }));
             card.addView(Support.button(a, d, "取消", Support.BROWN, Color.rgb(0x4E, 0x2F, 0x14), Color.WHITE, new View.OnClickListener() {
@@ -111,7 +124,12 @@ final class Identity {
      * 备份 → 校验身份 → 清空本地数据 → 结束进程。备份失败就不动任何数据（只提示）。
      * 整个过程在后台线程跑，UI 线程只弹提示。
      */
-    static void reset(final Activity a) {
+    static void reset(final Activity a) { reset(a, "smart"); }
+
+    static void reset(final Activity a, final boolean full) { reset(a, full ? "full" : "id"); }
+
+    static void reset(final Activity a, final String mode) {
+        final boolean full = !"id".equals(mode);
         Backup.toast(a, "正在备份当前存档…");
         final Activity act = a;
         new Thread(new Runnable() { @Override public void run() {
@@ -134,19 +152,19 @@ final class Identity {
                 return;
             }
             try {
-                Backup.wipeForIdentity(act, bk);
-                Log.i(Support.TAG, "identity: wiped, restarting");
+                Backup.scheduleIdentityWipe(act, mode);
+                Log.i(Support.TAG, "identity: wipe scheduled for next start, killing now");
             } catch (Throwable t) {
-                Log.e(Support.TAG, "identity wipe", t);
-                Backup.toast(act, "清空存档失败，已保留备份：" + t.getMessage());
+                Log.e(Support.TAG, "identity schedule", t);
+                Backup.toast(act, "更换失败，已保留备份：" + t.getMessage());
                 return;
             }
-            Backup.toast(act, "已换成新身份，请重新打开游戏");
-            try {
-                act.getWindow().getDecorView().postDelayed(new Runnable() {
-                    @Override public void run() { kill(act); }
-                }, 2000);
-            } catch (Throwable t) { kill(act); }
+            Backup.toast(act, full ? "已备份。游戏会关闭，重新打开时自动清干净并换成新身份"
+                    : "已备份。游戏会关闭，重新打开时只换身份、存档保留");
+            // 不走 finishAffinity：那会触发 Unity onPause，把内存里的旧身份/存档写回磁盘。
+            try { Thread.sleep(1500); } catch (Throwable ignored) {}
+            android.os.Process.killProcess(android.os.Process.myPid());
+            System.exit(0);
         }}).start();
     }
 

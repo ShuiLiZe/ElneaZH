@@ -86,6 +86,16 @@ jobs:
           PY
           ls -la app/src/main/assets
 
+      - name: Build native name gate (request-body CJK filter)
+        run: |
+          python tools/build_gate.py
+          python tools/verify_gate.py
+          ls -la app/src/main/assets/elneagate/*/
+      - name: Verify native .so is shipped into the game APK (payload chain + load path)
+        run: |
+          mkdir -p app/src/main/assets/elneazh/elneagate
+          cp -r app/src/main/assets/elneagate/lib* app/src/main/assets/elneazh/elneagate/
+          python tools/verify_native_load.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -138,7 +148,7 @@ jobs:
             echo "**本次更新：** $(git log -1 --pretty=%s)"
             echo
             echo "---"
-            echo "下载 ElneaZH.apk 装到手机，打开后按步骤一键汉化。完全免费，禁止倒卖；汉化交流 QQ 群 790184852。"
+            echo "下载 ElneaZH.apk 装到手机，打开后按步骤一键汉化。完全免费，禁止倒卖；汉化交流群在汉化器里点「加入汉化交流 QQ 群」。"
           } > notes.md
           # 旧的单一 "latest" 发布改为按版本发布，删一次即可
           gh release delete latest --cleanup-tag -y >/dev/null 2>&1 || true

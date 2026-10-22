@@ -120,6 +120,8 @@ def main():
                     print('font replaced', len(data), 'bytes')
     if a.bmfont:
         import bmfont_zh
+        # 名字字体的汉字集来自 tools/names.txt（NPC 全名表 + 常用人名用字），
+        # 与 metadata_zh 的取名白名单同源；不把整张 GB2312 塞进 Name 字体（图集空间有限）。
         bmfont_zh.apply(env.file.files['resources.assets'], a.bmfont, used)
     with open(a.out, 'wb') as f:
         f.write(env.file.save(packer='lz4'))  # keep LZ4 blocks like the original
