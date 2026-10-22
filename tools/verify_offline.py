@@ -245,8 +245,8 @@ check("Backup.pick" in sup or "restore" in sup, "Support 弹窗有「导入存�
 
 # 弹窗版面（第五批）：一条 QQ 群、收款码折叠、存档组、单机一个开关、账号组、底部链接
 check(sup.count("ORANGE, ORANGE_DARK, Color.WHITE") == 1, "整个弹窗只有一个橙色按钮")
-for label in ("立即备份", "导入存档", "更换游戏身份", "关闭"):
-    check('"%s"' % label in sup, "弹窗按钮「%s」" % label)
+for label in ("立即备份", "存档管理（读取 / 删除 / 导入", "更换身份", "关闭"):
+    check(('"%s"' % label in sup) or ('"%s' % label in sup), "弹窗按钮「%s」" % label)
 check('"导出分享"' not in sup, "「导出分享」按钮已并入「立即备份」（不留旧按钮）")
 check("分享到…" in sup, "备份成功后显示「分享到…」按钮")
 for label in ("导出名字对照表", "联系原作者", "赞赏支持"):
