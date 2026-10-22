@@ -260,7 +260,7 @@ final class Support {
         // ---------------- 账号 ----------------
         addSep(a, d, card, 12);
         caption(a, d, card, "账号");
-        card.addView(button(a, d, "更换身份（清数据）", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
+        card.addView(button(a, d, "更换身份", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
             @Override public void onClick(View v) {
                 try {
                     Identity.confirm(a, null);
@@ -269,7 +269,7 @@ final class Support {
                 }
             }
         }));
-        smallLine(a, d, card, "一直卡「维护中」时用：先备份，再像系统「清除数据」一样清干净，不用自己去设置里清。");
+        smallLine(a, d, card, "卡「维护中」或卡登录时用：设备码、账号、存档一起换新，资源包和数据表保留。会先备份。");
         // 账号自愈（默认开）：native 记下每次登录成功的账号；游戏丢了本地账号要匿名登录时换回真账号。
         final java.io.File accOff = new java.io.File(a.getFilesDir(), "elneazh_account_fix.off");
         final java.io.File accFile = new java.io.File(a.getFilesDir(), "elneazh_account.json");
@@ -396,6 +396,14 @@ final class Support {
             }
         }), lp3);
         smallLine(a, d, lab, "只换设备码等身份，不清存档，用来测是不是存档绑着旧身份。");
+        LinearLayout.LayoutParams lp4 = new LinearLayout.LayoutParams(-1, -2);
+        lp4.topMargin = (int) (8 * d);
+        lab.addView(button(a, d, "更换身份（完全清除）", CREAM_DARK, BROWN, BROWN, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                try { Identity.confirm(a, null, "full"); } catch (Throwable t) { Log.w(TAG, "identity-full", t); }
+            }
+        }), lp4);
+        smallLine(a, d, lab, "和系统「清除数据」一样（只留汉化和资源缓存），普通更换身份不行时对比用。");
     }
 
     /**
