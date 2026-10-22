@@ -148,7 +148,7 @@ jobs:
             echo "**本次更新：** $(git log -1 --pretty=%s)"
             echo
             echo "---"
-            echo "下载 ElneaZH.apk 装到手机，打开后按步骤一键汉化。完全免费，禁止倒卖；汉化交流 QQ 群 790184852。"
+            echo "下载 ElneaZH.apk 装到手机，打开后按步骤一键汉化。完全免费，禁止倒卖；汉化交流群在汉化器里点「加入汉化交流 QQ 群」。"
           } > notes.md
           # 旧的单一 "latest" 发布改为按版本发布，删一次即可
           gh release delete latest --cleanup-tag -y >/dev/null 2>&1 || true
