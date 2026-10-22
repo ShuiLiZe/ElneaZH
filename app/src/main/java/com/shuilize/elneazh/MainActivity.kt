@@ -103,6 +103,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun GlassBackdrop() {
     Canvas(Modifier.fillMaxSize()) {
+        if (size.width < 2f || size.height < 2f) return@Canvas   // 尺寸为 0 时 RadialGradient 会抛异常
         drawRect(Brush.verticalGradient(listOf(BgTop, Color(0xFF1E2458), BgBottom)))
         fun glow(c: Color, x: Float, y: Float, r: Float) =
             drawCircle(Brush.radialGradient(listOf(c, Color.Transparent), center = Offset(x, y), radius = r), r, Offset(x, y))
