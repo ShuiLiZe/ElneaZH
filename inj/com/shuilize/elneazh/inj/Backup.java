@@ -642,10 +642,14 @@ final class Backup {
      *  - files/althi_uniq 这类无扩展名的凭证文件
      * UnityCache、汉化表、我们自己的 elneazh_* 全部保留。
      */
-    static void wipeForIdentity(Context ctx, Uri backup) {
+    static void wipeForIdentity(Context ctx, Uri backup) { wipeIdentity(ctx, false); }
+
+    /** keepSaves=true：只更换身份（测试功能）—— 删身份/登录相关，存档 sv1_* 与其兄弟文件不动。 */
+    static void wipeIdentity(Context ctx, boolean keepSaves) {
         File data = ctx.getFilesDir().getParentFile();
         File ext = ctx.getExternalFilesDir(null);
         int del = 0;
+        if (!keepSaves) {
 
         // 1) 存档 sv1_*（files/zh、files/Contents、ext/zh、ext/Contents 以及这两个根的其它子目录）
         for (File root : new File[]{ctx.getFilesDir(), ctx.getExternalFilesDir(null)}) {
@@ -672,6 +676,8 @@ final class Backup {
                 }
             }
         }
+
+        }   // !keepSaves
 
         // 1c) 登录目录：SaveData.GetLoginDirectory() 建的那一层（取证：'_loginDirectory'
         //     'GetLoginDirectory' 'saveFolder' 'contentsFolder'）—— 服务器认旧身份时读的就是它，
@@ -746,7 +752,12 @@ final class Backup {
             }
         }
 
-        del += wipeWebStorage(ctx);
+        if (keepSaves) {
+            // 下次启动时跑（主线程、WebView 未初始化）：直接删 WebView 的 cookie 目录，不走 CookieManager
+            if (data != null) del += deleteTree(new File(data, "app_webview"));
+        } else {
+            del += wipeWebStorage(ctx);
+        }
 
         // 7) 设备码 / 账号块在游戏私有目录**之外**的副本 —— 真机「换了身份还是旧账号」的头号原因。
         //    取证：getExternalFilesDir(null)/althi_uniq 里有一份 41 字符的设备码（/sdcard/Android/data/
@@ -768,15 +779,24 @@ final class Backup {
     // Unity 起来之前，把私有目录和外置目录按「清除数据」清空，只留汉化自己的东西与资源缓存。
     static final String PENDING_WIPE = "pending_identity_wipe";
 
-    static void scheduleIdentityWipe(Context ctx) {
+    /** full=true：按清除数据清；false：只更换身份（保留存档）。 */
+    static void scheduleIdentityWipe(Context ctx, boolean full) {
         ctx.getSharedPreferences("elneazh_settings", Context.MODE_PRIVATE).edit()
-                .putBoolean(PENDING_WIPE, true).commit();
+                .putString(PENDING_WIPE, full ? "full" : "id").commit();
     }
 
     /** ZhInit 最前面调用。返回是否执行了清理。 */
     static boolean runPendingIdentityWipe(Context ctx) {
         SharedPreferences sp = ctx.getSharedPreferences("elneazh_settings", Context.MODE_PRIVATE);
-        if (!sp.getBoolean(PENDING_WIPE, false)) return false;
+        String mode = null;
+        try { mode = sp.getString(PENDING_WIPE, null); } catch (Throwable t) { mode = "full"; }  // 旧版存的是 boolean
+        if (mode == null) return false;
+        if ("id".equals(mode)) {
+            sp.edit().remove(PENDING_WIPE).commit();
+            try { wipeIdentity(ctx, true); } catch (Throwable t) { Log.w(TAG, "identity-only wipe", t); }
+            Log.i(TAG, "identity wipe (identity only, saves kept) done");
+            return true;
+        }
         int n = 0;
         try {
             File data = ctx.getFilesDir().getParentFile();
@@ -1223,7 +1243,7 @@ final class Backup {
                 new Runnable() { @Override public void run() { confirmRestore(a, it.uri); } },
                 new Runnable() { @Override public void run() { confirmDelete(a, it); } });
         if (!root) p.link("备份放在 Documents/" + DIR + "，点这里改放到根目录", new Runnable() { @Override public void run() { askRoot(a); } });
-        p.btn("备份当前存档", 0, new Runnable() { @Override public void run() { chooseBackup(a); } });
+        p.btn("备份当前存档", 0, new Runnable() { @Override public void run() { doBackup(a, true); } });
         p.btn("从文件导入（别人发的 / 重装前的）", 1, new Runnable() { @Override public void run() { importFile(a); } });
         p.btn("关闭", 3, null);
         p.show();
@@ -1243,7 +1263,7 @@ final class Backup {
         p.show();
     }
 
-    private static void doBackup(final Activity a, final boolean withId) {
+    static void doBackup(final Activity a, final boolean withId) {
         toast(a, withId ? "正在备份（含身份）…" : "正在备份（不含身份）…");
         new Thread(new Runnable() { @Override public void run() {
             String n = make(a, "手动", withId);
@@ -1453,18 +1473,7 @@ final class Backup {
      * 立即备份；成功时把文件名回调给调用方（Support 用它弹「分享到…」）。
      * 回调跑在主线程。
      */
-    static void manual(final Activity a, final OnBackupDone done) {
-        Pop p = new Pop(a, "立即备份");
-        p.msg("选一种，zip 里会附一份说明。");
-        p.row("含身份（卡维护选这个）",
-                "存档 + 账号身份原样保存。卡维护、卡登录时发给汉化作者排查；换机、重装回原号也用它。只发给汉化作者。",
-                new Runnable() { @Override public void run() { manual(a, done, true); } });
-        p.row("不含身份（测试中）",
-                "只留存档。存档和设备码绑定，发给别人会卡登录，只适合本机留存档。",
-                new Runnable() { @Override public void run() { manual(a, done, false); } });
-        p.btn("取消", 3, null);
-        p.show();
-    }
+    static void manual(final Activity a, final OnBackupDone done) { manual(a, done, true); }
 
     static void manual(final Activity a, final OnBackupDone done, final boolean withId) {
         toast(a, withId ? "正在备份（含身份）…" : "正在备份（不含身份）…");
