@@ -40,6 +40,8 @@ public final class ZhInit extends ContentProvider {
         //    连击 2 次启动没活下来 → 之后自动不加载 native（Java 兜底照旧）。
         try { NativeGuard.boot(getContext()); } catch (Throwable t) { Log.w(TAG, "boot guard failed", t); }
         Backup.setCtx(getContext());
+        // 换身份 v2：上一轮点了「更换身份」→ 这里（Unity 起来之前）按「清除数据」口径清空
+        try { Backup.runPendingIdentityWipe(getContext()); } catch (Throwable t) { Log.e(TAG, "identity wipe failed", t); }
         // 上传方向的中文名映射（中文名 -> 固定拼音）。只加载词表，不动存档。
         try { NameFix.load(getContext()); } catch (Throwable t) { Log.e(TAG, "names load failed", t); }
         try { Backup.auto(getContext()); } catch (Throwable t) { Log.e(TAG, "auto backup failed", t); }
