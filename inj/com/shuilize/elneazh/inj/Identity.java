@@ -70,10 +70,11 @@ final class Identity {
             tv.setLineSpacing(0, 1.25f);
             tv.setText("只在游戏一直卡「维护中」或强制要求输入账号时使用。\n\n"
                     + "点「确定更换」后会先把当前存档（含游戏身份）备份成一份「换身份前」，"
-                    + "成功后才清空本地存档并重新开始 —— 相当于一个全新账号。\n\n"
+                    + "成功后游戏关闭；重新打开时会像系统「清除数据」一样把本地数据清干净"
+                    + "（汉化和已下载的资源包保留，不用重下），相当于一个全新账号。\n\n"
                     + "旧存档不会丢：旧身份解封后，在「交流与支持 → 存档管理」里恢复那份「换身份前」备份，"
                     + "就会连原来的身份一起回去。\n\n"
-                    + "更换后游戏会自动关闭，请重新打开。");
+                    + "更换后游戏会自动关闭，请重新打开（第一次打开会稍慢）。");
             card.addView(tv, new LinearLayout.LayoutParams(-1, -2));
 
             card.addView(Support.button(a, d, "确定更换", Support.ORANGE, Support.ORANGE_DARK, Color.WHITE, new View.OnClickListener() {
@@ -134,19 +135,18 @@ final class Identity {
                 return;
             }
             try {
-                Backup.wipeForIdentity(act, bk);
-                Log.i(Support.TAG, "identity: wiped, restarting");
+                Backup.scheduleIdentityWipe(act);
+                Log.i(Support.TAG, "identity: wipe scheduled for next start, killing now");
             } catch (Throwable t) {
-                Log.e(Support.TAG, "identity wipe", t);
-                Backup.toast(act, "清空存档失败，已保留备份：" + t.getMessage());
+                Log.e(Support.TAG, "identity schedule", t);
+                Backup.toast(act, "更换失败，已保留备份：" + t.getMessage());
                 return;
             }
-            Backup.toast(act, "已换成新身份，请重新打开游戏");
-            try {
-                act.getWindow().getDecorView().postDelayed(new Runnable() {
-                    @Override public void run() { kill(act); }
-                }, 2000);
-            } catch (Throwable t) { kill(act); }
+            Backup.toast(act, "已备份。游戏会关闭，重新打开时自动清干净并换成新身份");
+            // 不走 finishAffinity：那会触发 Unity onPause，把内存里的旧身份/存档写回磁盘。
+            try { Thread.sleep(1500); } catch (Throwable ignored) {}
+            android.os.Process.killProcess(android.os.Process.myPid());
+            System.exit(0);
         }}).start();
     }
 
