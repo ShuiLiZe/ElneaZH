@@ -200,9 +200,9 @@ def main():
               encoding='utf-8').read()
     got_sig = 'has-param' if ('final Uri u, final boolean withIdentity' in bj) else '旧签名'
     check('restore', got_sig, 'has-param', 'restore 带 withIdentity 参数')
-    check('restore', 'has' if 'restore(a, u, true)' in bj else 'missing',
+    check('restore', 'has' if ('restore(a, u, true)' in bj or 'askBackupFirst(a, u, true)' in bj) else 'missing',
               'has', '存在「完整恢复（含身份）」入口')
-    check('restore', 'has' if 'restore(a, u, false)' in bj else 'missing',
+    check('restore', 'has' if ('restore(a, u, false)' in bj or 'askBackupFirst(a, u, false)' in bj) else 'missing',
               'has', '存在「只恢复存档（保留当前身份）」入口')
     check('restore', 'has' if '完整恢复（含身份）' in bj else 'missing',
               'has', 'UI 文案「完整恢复（含身份）」')
@@ -212,7 +212,7 @@ def main():
                           and 'isIdentityPrefFile(' in bj) else 'missing')
     check('restore', got_skip, 'has', '只恢复存档时跳过身份 prefs 文件')
     # 关键：只恢复存档模式下 restoreIdentityFile 绝不能被无条件调用
-    check('restore', 'guarded' if 'if (withIdentity) {' in bj and 'restoreIdentityFile(a, prefsXml)' in bj
+    check('restore', 'guarded' if 'if (withIdentity) {' in bj and ('restoreIdentityFile(a, prefsXml)' in bj or 'restoreIdentityFile(ctx, prefsXml)' in bj)
               else 'unguarded', 'guarded', 'restoreIdentityFile 受 withIdentity 守卫')
     check('restore', 'has' if 'stripIdentityKeys' in bj else 'missing',
               'has', '只恢复存档时逐键剔除身份键（保留画面/音量设置）')
