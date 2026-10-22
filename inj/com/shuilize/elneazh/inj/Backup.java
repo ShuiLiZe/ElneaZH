@@ -121,7 +121,7 @@ final class Backup {
             + "  注意：拿到这份文件的人能登录你的号，只发给汉化作者。\n\n"
             + "■ 不含身份\n"
             + "  去掉了已知的身份文件（uuid / login_key / 设备码 / 账号块），只留存档和设置。\n"
-            + "  注意：存档本身是否还带着能被服务器认出的信息，目前还在测试，不保证别人导入后能正常联网登录。\n\n"
+            + "  注意：存档和设备码是绑在一起的，这份发给别人、或换了设备码再导入，联网会卡登录。只适合本机自己留存档。\n\n"
             + "■ 怎么恢复\n"
             + "  游戏内「交流与支持 → 存档管理 → 从文件导入」，选这个 zip。\n"
             + "  含身份的备份可选：完整恢复（含身份）/ 只恢复存档（保留当前身份）。\n"
@@ -759,6 +759,69 @@ final class Backup {
                 + " + web storage + 外部设备码/账号副本");
     }
 
+    // ---------------- 换身份 v2：下次启动时按「清除数据」口径清 ----------------
+    // 真机（2026-10-22）：点「更换身份」后仍进不去，系统「清除数据」后能进。原因两条：
+    //  1) 旧流程在游戏进程里删完文件，再 finishAffinity —— Unity onPause/onDestroy 会把内存里的
+    //     PlayerPrefs（含旧身份）和存档重新写回磁盘；
+    //  2) 只删「认得出的」身份键/文件，漏网的就留下了。
+    // 现在：当前进程只做备份 + 立旗，然后立刻杀进程（不走 finish）；下次启动在 ZhInit 最前面、
+    // Unity 起来之前，把私有目录和外置目录按「清除数据」清空，只留汉化自己的东西与资源缓存。
+    static final String PENDING_WIPE = "pending_identity_wipe";
+
+    static void scheduleIdentityWipe(Context ctx) {
+        ctx.getSharedPreferences("elneazh_settings", Context.MODE_PRIVATE).edit()
+                .putBoolean(PENDING_WIPE, true).commit();
+    }
+
+    /** ZhInit 最前面调用。返回是否执行了清理。 */
+    static boolean runPendingIdentityWipe(Context ctx) {
+        SharedPreferences sp = ctx.getSharedPreferences("elneazh_settings", Context.MODE_PRIVATE);
+        if (!sp.getBoolean(PENDING_WIPE, false)) return false;
+        int n = 0;
+        try {
+            File data = ctx.getFilesDir().getParentFile();
+            n += clearLikeSystem(data, 0);
+            File ext = ctx.getExternalFilesDir(null);
+            if (ext != null && ext.getParentFile() != null) n += clearLikeSystem(ext.getParentFile(), 0); // Android/data/<pkg>
+            try { n += wipeIdentityCopies(ctx); } catch (Throwable ignored) {}
+            File de = null;
+            try {
+                int uid = ctx.getApplicationInfo().uid;
+                de = new File("/data/user_de/" + (uid / 100000) + "/" + ctx.getPackageName());
+            } catch (Throwable ignored) {}
+            if (de != null && de.isDirectory()) n += clearLikeSystem(de, 0);
+        } catch (Throwable t) { Log.w(TAG, "pending wipe", t); }
+        sp.edit().remove(PENDING_WIPE).commit();
+        Log.i(TAG, "identity wipe v2 (like clear data): deleted " + n + " file(s)");
+        return true;
+    }
+
+    /** 留下的：native 库、汉化自己的文件/设置、资源缓存（不含身份，删了要重下几百 MB）。 */
+    private static boolean keepOnWipe(File f, int depth) {
+        String nm = f.getName();
+        String ln = nm.toLowerCase(Locale.US);
+        if (ln.startsWith("elneazh")) return true;                 // elneazh_settings.xml / elneazh_* 文件
+        if (ln.startsWith("com.shuilize")) return true;
+        if (depth == 0 && (nm.equals("lib") || nm.equals("code_cache"))) return true;
+        if (nm.equals("UnityCache")) return true;
+        if (nm.equals("lib") && f.getParentFile() != null && "files".equals(f.getParentFile().getName())) return true; // files/lib/libelneagate.so
+        return false;
+    }
+
+    private static int clearLikeSystem(File dir, int depth) {
+        int n = 0;
+        File[] ls = dir.listFiles();
+        if (ls == null) return 0;
+        for (File c : ls) {
+            if (keepOnWipe(c, depth)) continue;
+            if (c.isDirectory()) {
+                n += clearLikeSystem(c, depth + 1);
+                c.delete();     // 空了才删得掉；里面有要留的东西就留着
+            } else if (c.delete()) n++;
+        }
+        return n;
+    }
+
     /** 递归删一整棵目录（只用于登录目录这种明确目标）。 */
     /**
      * 换身份：清 WebView 的 cookie 与网页缓存。
@@ -1174,7 +1237,7 @@ final class Backup {
                 "存档 + 账号身份（uuid / login_key / 设备码）原样保存。卡维护、卡登录时发给汉化作者排查；换机、重装回原号也用它。拿到的人能登你的号，只发给汉化作者。",
                 new Runnable() { @Override public void run() { doBackup(a, true); } });
         p.row("不含身份（测试中）",
-                "去掉已知的身份文件，只留存档和设置。存档里是否还带能被服务器认出的信息还在测试，别人导入后不保证能正常登录。",
+                "去掉身份文件，只留存档和设置。存档和设备码绑定，发给别人或换设备码后导入会卡登录，只适合本机留存档。",
                 new Runnable() { @Override public void run() { doBackup(a, false); } });
         p.btn("取消", 3, new Runnable() { @Override public void run() { manage(a); } });
         p.show();
@@ -1397,7 +1460,7 @@ final class Backup {
                 "存档 + 账号身份原样保存。卡维护、卡登录时发给汉化作者排查；换机、重装回原号也用它。只发给汉化作者。",
                 new Runnable() { @Override public void run() { manual(a, done, true); } });
         p.row("不含身份（测试中）",
-                "去掉已知的身份文件，只留存档。别人导入后能否正常登录还在测试。",
+                "只留存档。存档和设备码绑定，发给别人会卡登录，只适合本机留存档。",
                 new Runnable() { @Override public void run() { manual(a, done, false); } });
         p.btn("取消", 3, null);
         p.show();
