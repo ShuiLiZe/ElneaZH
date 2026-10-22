@@ -42,6 +42,8 @@ public final class ZhInit extends ContentProvider {
         Backup.setCtx(getContext());
         // 换身份 v2：上一轮点了「更换身份」→ 这里（Unity 起来之前）按「清除数据」口径清空
         try { Backup.runPendingIdentityWipe(getContext()); } catch (Throwable t) { Log.e(TAG, "identity wipe failed", t); }
+        // 恢复 v2：上一轮选了恢复 → Unity 起来之前写入（完整恢复会先按清除数据清空）
+        try { Backup.runPendingRestore(getContext()); } catch (Throwable t) { Log.e(TAG, "pending restore failed", t); }
         // 上传方向的中文名映射（中文名 -> 固定拼音）。只加载词表，不动存档。
         try { NameFix.load(getContext()); } catch (Throwable t) { Log.e(TAG, "names load failed", t); }
         try { Backup.auto(getContext()); } catch (Throwable t) { Log.e(TAG, "auto backup failed", t); }
