@@ -278,6 +278,7 @@ static char *eg_string_to_utf8(void *s, size_t *out_len) {
 }
 
 char *eg_rp_fix_uniq(const char *tx);
+char *eg_rp_fix_anon(const char *tx);
 char *eg_rp_fix_master(const char *tx);
 #if defined(__aarch64__)
 static void *eg_hook(void *plain_str) {
@@ -300,6 +301,8 @@ static void *eg_hook(void *plain_str) {
 
     plain = eg_string_to_utf8(plain_str, &plain_len);
     {
+        char *an = eg_rp_fix_anon(plain);  // 账号自愈：本地丢账号要匿名登录 → 换回已记账号
+        if (an) { free(plain); plain = an; plain_len = strlen(an); uniq_fixed = 1; }
         char *u = eg_rp_fix_uniq(plain);   // 换身份后登录：user_uniq 换回服务器认的
         if (u) { free(plain); plain = u; plain_len = strlen(u); ctx.hits += 0; uniq_fixed = 1; }
         char *m = eg_rp_fix_master(plain);  // 联网补整表：库里没有整表的主数据表让服务器回整表
