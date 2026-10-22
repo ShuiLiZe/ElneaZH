@@ -795,6 +795,8 @@ final class Backup {
         String mode = null;
         try { mode = sp.getString(PENDING_WIPE, null); } catch (Throwable t) { mode = "full"; }  // 旧版存的是 boolean
         if (mode == null) return false;
+        // 换身份就是不要旧账号：账号自愈记下的旧账号一起删（elneazh_* 在清理白名单里，要单独删）
+        try { new File(ctx.getFilesDir(), "elneazh_account.json").delete(); } catch (Throwable ignored) {}
         if ("id".equals(mode)) {
             sp.edit().remove(PENDING_WIPE).commit();
             try { wipeIdentity(ctx, true); } catch (Throwable t) { Log.w(TAG, "identity-only wipe", t); }
