@@ -93,9 +93,47 @@ final class Backup {
         }
     }
 
-    /** Writes one backup zip; returns its file name or null. */
-    static String make(Context ctx, String kind) {
-        String name = "存档_" + kind + "_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".zip";
+    /** 当前这次打包是否「不含身份」（make 内部用；add/addPrefsFile 递归里读）。 */
+    private static final ThreadLocal<Boolean> NO_ID = new ThreadLocal<>();
+    private static boolean noId() { return Boolean.TRUE.equals(NO_ID.get()); }
+
+    static final String META = "elneazh_meta.txt";
+    static final String README = "说明（先看我）.txt";
+
+    /** Writes one backup zip (含身份); returns its file name or null. */
+    static String make(Context ctx, String kind) { return make(ctx, kind, true); }
+
+    /**
+     * withIdentity=false：不含身份 —— 跳过整份身份文件与外部身份副本，PlayerPrefs 里逐键剔除身份键
+     * （与「只恢复存档」同一套 isIdentityKey），适合发给别人 / 分享。
+     */
+    static String make(Context ctx, String kind, boolean withIdentity) {
+        NO_ID.set(!withIdentity);
+        try { return make0(ctx, kind, withIdentity); } finally { NO_ID.remove(); }
+    }
+
+    private static String readme(boolean withIdentity) {
+        return "艾尔尼亚王国 汉化版（ElneaZH）存档备份\n\n"
+            + "这份备份：" + (withIdentity ? "【含身份】" : "【不含身份】") + "\n\n"
+            + "■ 含身份\n"
+            + "  存档 + 账号身份（uuid / login_key / 设备码）全部打包。\n"
+            + "  用途：自己留底、换手机、重装后回到原来那个号；卡维护的号也能先整份保存下来，以后解封再恢复。\n"
+            + "  注意：拿到这份文件的人可以登录你的号，不要发给别人。\n\n"
+            + "■ 不含身份\n"
+            + "  只有存档（角色、家族、世界、设置），不带任何账号身份。\n"
+            + "  用途：发给朋友、分享存档、换身份后导入旧存档。对方导入后用的是他自己的账号，不会顶号。\n\n"
+            + "■ 怎么恢复\n"
+            + "  游戏内「交流与支持 → 存档管理 → 从文件导入」，选这个 zip。\n"
+            + "  含身份的备份会让你选：\n"
+            + "    · 完整恢复（含身份）：存档和旧账号一起回来。\n"
+            + "    · 只恢复存档（保留当前身份）：只要存档，账号不变。单机模式、换过身份后用这个。\n"
+            + "  不含身份的备份只能「只恢复存档」。\n"
+            + "  恢复前会先自动备份当前存档；恢复后游戏会关闭，重新打开即可。\n\n"
+            + "■ 不要改动 zip 里的文件，改了可能导不回去。\n";
+    }
+
+    private static String make0(Context ctx, String kind, boolean withIdentity) {
+        String name = "存档_" + kind + (withIdentity ? "_含身份" : "_无身份") + "_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".zip";
         OutputStream out = null;
         Uri dst = null;
         try {
@@ -107,16 +145,24 @@ final class Backup {
             File data = ctx.getFilesDir().getParentFile();
             try (ZipOutputStream z = new ZipOutputStream(out)) {
                 StringBuilder lst = new StringBuilder();
+                // 元信息放第一条：读的时候不用把整个 zip 扫完
+                z.putNextEntry(new ZipEntry(META));
+                z.write(("with_identity=" + (withIdentity ? 1 : 0) + "\n").getBytes("UTF-8"));
+                z.closeEntry();
+                z.putNextEntry(new ZipEntry(README));
+                z.write(readme(withIdentity).getBytes("UTF-8"));
+                z.closeEntry();
                 int n = add(z, new File(data, "files"), "files/", tables, 0, lst);
                 n += add(z, new File(data, "shared_prefs"), "shared_prefs/", tables, 0, lst);
                 File ext = ctx.getExternalFilesDir(null);
                 if (ext != null) n += add(z, ext, "ext/", tables, 0, lst);
                 // 身份文件兜底：真实 prefs 文件不在上面几个目录里时也要进备份
                 n += addPrefsFile(ctx, z, lst);
-                n += addIdentFiles(ctx, z, lst);
+                if (withIdentity) n += addIdentFiles(ctx, z, lst);
                 z.putNextEntry(new ZipEntry("elneazh_backup.txt"));
                 z.write(("ElneaZH save backup\nfiles=" + n + "\ntime=" + new Date() + "\ndata=" + data + "\next=" + ext
-                        + "\nidentity=" + identSummary(ctx) + "\n\n" + lst).getBytes("UTF-8"));
+                        + "\nwith_identity=" + (withIdentity ? 1 : 0)
+                        + "\nidentity=" + (withIdentity ? identSummary(ctx) : "无（不含身份）") + "\n\n" + lst).getBytes("UTF-8"));
                 z.closeEntry();
                 z.finish();
             }
@@ -157,6 +203,21 @@ final class Backup {
         // 备份里带上它，恢复别人的存档就会把「单机开/关」一起换掉，用户会莫名其妙断网/联网。
         // 换身份同样不动它（wipe 跳过 elneazh_* 前缀），恢复时保留当前值。
         if (path.startsWith("shared_prefs/elneazh_settings")) return 0;
+        if (noId()) {
+            if (isIdentityCopy(nm)) return 0;
+            if (path.startsWith("shared_prefs/")) {
+                if (isIdentityPrefFile(nm)) return 0;
+                String x = readText(f);
+                if (x != null) {
+                    byte[] b = stripXml(x).getBytes("UTF-8");
+                    lst.append(path).append('\t').append(b.length).append('\n');
+                    z.putNextEntry(new ZipEntry(path));
+                    z.write(b);
+                    z.closeEntry();
+                    return 1;
+                }
+            }
+        }
         lst.append(path).append('\t').append(f.length()).append('\n');
         z.putNextEntry(new ZipEntry(path));
         try (InputStream in = new FileInputStream(f)) { pipe(in, z); }
@@ -181,10 +242,12 @@ final class Backup {
                 // 已在 add(shared_prefs/) 里就跳过（避免重复）；否则补一份
                 if (lst.indexOf(entry + "\t") >= 0) { Log.i(TAG, "prefs already in backup: " + entry); return 0; }
                 z.putNextEntry(new ZipEntry(entry));
-                try (InputStream in = new FileInputStream(f)) { pipe(in, z); }
+                String sx = noId() ? readText(f) : null;
+                if (sx != null) z.write(stripXml(sx).getBytes("UTF-8"));
+                else try (InputStream in = new FileInputStream(f)) { pipe(in, z); }
                 z.closeEntry();
                 lst.append(entry).append('\t').append(f.length()).append('\n');
-                Log.i(TAG, "prefs added from " + f + " keys=" + all.keySet());
+                Log.i(TAG, "prefs added from " + f + " keys=" + all.keySet() + " noId=" + noId());
                 return 1;
             }
             // 文件不在常规位置：按 SharedPreferences 的 xml 结构手写一份
@@ -192,6 +255,7 @@ final class Backup {
             for (Map.Entry<String, ?> e : all.entrySet()) {
                 Object v = e.getValue();
                 if (v == null) continue;
+                if (noId() && isIdentityKey(e.getKey())) continue;
                 String t = v instanceof Boolean ? "boolean" : v instanceof Integer ? "int"
                         : v instanceof Long ? "long" : v instanceof Float ? "float" : "string";
                 x.append("    <").append(t).append(" name=\"").append(esc(e.getKey())).append("\">")
@@ -925,6 +989,35 @@ final class Backup {
      * 其余设置（画面 / 音量 / 资源版本）保留。判据与换身份删除是同一套
      * {@link #isIdentityKey}，不会出现「这边删那边留」。
      */
+    /** 去掉 SharedPreferences xml 里的身份键（不含身份的备份用），其余原样。 */
+    static String stripXml(String xml) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("<(string|int|long|boolean|float)\\s+name=\"([^\"]+)\"[^>]*>[^<]*</\\1>"
+                        + "|<(string|int|long|boolean|float)\\s+name=\"([^\"]+)\"[^>]*/>")
+                .matcher(xml);
+        StringBuilder out = new StringBuilder(xml.length());
+        int pos = 0;
+        while (m.find()) {
+            String k = m.group(2) != null ? m.group(2) : m.group(4);
+            if (k != null && (isIdentityKey(k) || isIdentityKey(android.net.Uri.decode(k)))) {
+                out.append(xml, pos, m.start());
+                pos = m.end();
+            }
+        }
+        out.append(xml.substring(pos));
+        return out.toString();
+    }
+
+    /** 备份是否含身份：读第一条元信息；旧备份没有元信息时按「含身份」算（旧版一律整包）。 */
+    static boolean metaHasIdentity(Context ctx, Uri u) {
+        try (ZipInputStream z = new ZipInputStream(ctx.getContentResolver().openInputStream(u))) {
+            ZipEntry e = z.getNextEntry();
+            if (e == null || !META.equals(e.getName())) return true;
+            byte[] b = new byte[256]; int n = z.read(b);
+            return n <= 0 || !new String(b, 0, n, "UTF-8").contains("with_identity=0");
+        } catch (Throwable t) { return true; }
+    }
+
     static void stripIdentityKeys(Context ctx, File prefsXml) {
         try {
             String xml = readText(prefsXml);
@@ -1069,17 +1162,33 @@ final class Backup {
                 new Runnable() { @Override public void run() { confirmRestore(a, it.uri); } },
                 new Runnable() { @Override public void run() { confirmDelete(a, it); } });
         if (!root) p.link("备份放在 Documents/" + DIR + "，点这里改放到根目录", new Runnable() { @Override public void run() { askRoot(a); } });
-        p.btn("备份当前存档", 0, new Runnable() { @Override public void run() {
-            toast(a, "正在备份存档…");
-            new Thread(new Runnable() { @Override public void run() {
-                String n = make(a, "手动");
-                toast(a, n == null ? "备份失败（手机存储不可写？）" : "备份好了");
-                manage(a);
-            }}).start();
-        }});
+        p.btn("备份当前存档", 0, new Runnable() { @Override public void run() { chooseBackup(a); } });
         p.btn("从文件导入（别人发的 / 重装前的）", 1, new Runnable() { @Override public void run() { importFile(a); } });
         p.btn("关闭", 3, null);
         p.show();
+    }
+
+    /** 备份前选：含身份 / 不含身份。 */
+    static void chooseBackup(final Activity a) {
+        Pop p = new Pop(a, "备份当前存档");
+        p.msg("选一种。两种都会放进存档管理，zip 里附带一份说明。");
+        p.row("含身份（自己留底）",
+                "存档 + 账号身份（uuid / login_key / 设备码）全部保存。换机、重装、卡维护的号先存下来以后再回去，都选这个。别发给别人，拿到的人能登你的号。",
+                new Runnable() { @Override public void run() { doBackup(a, true); } });
+        p.row("不含身份（发给别人）",
+                "只有存档，不带账号。分享给朋友、换身份后导老存档用这个；对方导入后用他自己的号，不会顶号。",
+                new Runnable() { @Override public void run() { doBackup(a, false); } });
+        p.btn("取消", 3, new Runnable() { @Override public void run() { manage(a); } });
+        p.show();
+    }
+
+    private static void doBackup(final Activity a, final boolean withId) {
+        toast(a, withId ? "正在备份（含身份）…" : "正在备份（不含身份）…");
+        new Thread(new Runnable() { @Override public void run() {
+            String n = make(a, "手动", withId);
+            toast(a, n == null ? "备份失败（手机存储不可写？）" : "备份好了：" + n);
+            manage(a);
+        }}).start();
     }
 
     /** 系统文件选择器选一个备份 zip；结果只有 SupportActivity 收得到，所以不在它里面时转过去。 */
@@ -1257,12 +1366,14 @@ final class Backup {
 
     private static String head(Item it) {
         String n = it.name.replace("存档_", "").replace(".zip", "");
+        String tag = n.contains("_无身份_") ? "（不含身份）" : n.contains("_含身份_") ? "（含身份）" : "";
+        n = n.replace("_无身份_", "_").replace("_含身份_", "_");
         String[] p = n.split("_");
         String kind = p.length > 0 ? p[0] : n;
         String when = n;
         if (p.length >= 3 && p[1].length() == 8 && p[2].length() >= 4)
             when = p[1].substring(0, 4) + "-" + p[1].substring(4, 6) + "-" + p[1].substring(6, 8) + "  " + p[2].substring(0, 2) + ":" + p[2].substring(2, 4);
-        return when + "  ·  " + kind + "备份";
+        return when + "  ·  " + kind + "备份" + tag;
     }
 
     private static String size(Item it) {
@@ -1282,9 +1393,22 @@ final class Backup {
      * 回调跑在主线程。
      */
     static void manual(final Activity a, final OnBackupDone done) {
-        toast(a, "正在备份存档…");
+        Pop p = new Pop(a, "立即备份");
+        p.msg("选一种，zip 里会附一份说明。");
+        p.row("含身份（自己留底）",
+                "存档 + 账号身份全部保存。换机、重装、卡维护的号先存下来以后再回去都选这个。别发给别人。",
+                new Runnable() { @Override public void run() { manual(a, done, true); } });
+        p.row("不含身份（发给别人）",
+                "只有存档，不带账号。分享给朋友用这个，对方导入后用他自己的号。",
+                new Runnable() { @Override public void run() { manual(a, done, false); } });
+        p.btn("取消", 3, null);
+        p.show();
+    }
+
+    static void manual(final Activity a, final OnBackupDone done, final boolean withId) {
+        toast(a, withId ? "正在备份（含身份）…" : "正在备份（不含身份）…");
         new Thread(new Runnable() { @Override public void run() {
-            final String n = make(a, "手动");
+            final String n = make(a, "手动", withId);
             if (n == null) {
                 toast(a, "备份失败（手机存储不可写？）");
                 if (done != null) new Handler(Looper.getMainLooper()).post(new Runnable() {
@@ -1327,9 +1451,10 @@ final class Backup {
             // 身份要不要跟着回来，是两件完全不同的事，必须让用户自己选一次：
             //  - 完整恢复：连 uuid / login_key 一起写回 —— 等于「回到备份那台机器的身份」。
             //  - 只恢复存档：跳过全部身份/登录键 —— 换身份之后导老存档用这个，否则一导入身份就回去了。
-            p.row("完整恢复（含身份）",
+            if (metaHasIdentity(a, u)) p.row("完整恢复（含身份）",
                     "存档 + 旧账号身份一起回来；想回到备份时的那个号选这个。",
                     new Runnable() { @Override public void run() { chosen[0] = true; restore(a, u, true); } });
+            else p.msg("这份备份不含身份（别人发的或分享用的），只能恢复存档，账号保持你现在的。");
             p.row("只恢复存档（保留当前身份）",
                     "只写回存档，不动 uuid / login_key；换过身份后用这个。单机模式用这个。",
                     new Runnable() { @Override public void run() { chosen[0] = true; restore(a, u, false); } });
