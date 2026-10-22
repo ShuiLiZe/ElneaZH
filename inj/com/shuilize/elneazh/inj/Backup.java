@@ -784,9 +784,11 @@ final class Backup {
     static final String PENDING_WIPE = "pending_identity_wipe";
 
     /** full=true：按清除数据清；false：只更换身份（保留存档）。 */
-    static void scheduleIdentityWipe(Context ctx, boolean full) {
+    static void scheduleIdentityWipe(Context ctx, boolean full) { scheduleIdentityWipe(ctx, full ? "full" : "id"); }
+
+    static void scheduleIdentityWipe(Context ctx, String mode) {
         ctx.getSharedPreferences("elneazh_settings", Context.MODE_PRIVATE).edit()
-                .putString(PENDING_WIPE, full ? "full" : "id").commit();
+                .putString(PENDING_WIPE, mode).commit();
     }
 
     /** ZhInit 最前面调用。返回是否执行了清理。 */
@@ -801,6 +803,13 @@ final class Backup {
             sp.edit().remove(PENDING_WIPE).commit();
             try { wipeIdentity(ctx, true); } catch (Throwable t) { Log.w(TAG, "identity-only wipe", t); }
             Log.i(TAG, "identity wipe (identity only, saves kept) done");
+            return true;
+        }
+        if ("smart".equals(mode)) {
+            sp.edit().remove(PENDING_WIPE).commit();
+            int m = 0;
+            try { m = smartWipe(ctx); } catch (Throwable t) { Log.w(TAG, "smart wipe", t); }
+            Log.i(TAG, "identity wipe v3 (smart: device code + account + saves; tables/bundles kept): deleted " + m + " file(s)");
             return true;
         }
         int n = 0;
@@ -820,6 +829,77 @@ final class Backup {
         sp.edit().remove(PENDING_WIPE).commit();
         Log.i(TAG, "identity wipe v2 (like clear data): deleted " + n + " file(s)");
         return true;
+    }
+
+
+    // ---------------- 换身份 v3（smart）----------------
+    // 10-22 抓包结论：服务器按「设备码 + 账号」配对。设备码在、账号丢 → 匿名登录 → 假维护（end_maintenance=现在+3h）；
+    // 账号在、设备码换 → 卡登录。所以换新身份 = 设备码、账号、和账号绑着的存档一起清，缺一不可；
+    // 主数据表（zh/Contents 里的 c_*）、资源包缓存、汉化文件跟身份无关，留着免得重下。
+    static int smartWipe(Context ctx) {
+        int n = 0;
+        File data = ctx.getFilesDir().getParentFile();
+        // PlayerPrefs：只留画面/资源版本这类设置，其余（uuid、login_key、unity 各种 id、区域）全删
+        try {
+            File px = new File(data, "shared_prefs/" + prefsName(ctx) + ".xml");
+            if (px.isFile()) n += filterPlayerPrefs(px);
+        } catch (Throwable t) { Log.w(TAG, "smart prefs", t); }
+        if (data != null) n += clearSmart(data, 0);
+        File ext = ctx.getExternalFilesDir(null);
+        if (ext != null && ext.getParentFile() != null) n += clearSmart(ext.getParentFile(), 0);
+        try { n += wipeIdentityCopies(ctx); } catch (Throwable ignored) {}
+        try {
+            int uid = ctx.getApplicationInfo().uid;
+            File de = new File("/data/user_de/" + (uid / 100000) + "/" + ctx.getPackageName());
+            if (de.isDirectory()) n += clearLikeSystem(de, 0);
+        } catch (Throwable ignored) {}
+        return n;
+    }
+
+    private static int filterPlayerPrefs(File px) throws Exception {
+        String x = readText(px);
+        if (x == null) return 0;
+        StringBuilder o = new StringBuilder("<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n");
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("<(string|int|long|float|boolean)\\s+name=\"([^\"]*)\"[^>]*?(/>|>.*?</\\1>)", java.util.regex.Pattern.DOTALL)
+                .matcher(x);
+        int dropped = 0;
+        while (m.find()) {
+            String k = m.group(2);
+            boolean keep = k.startsWith("Screenmanager") || k.equals("UnityVersionForAssetBundle")
+                    || k.startsWith("unity6000") || k.equals("size_alert") || k.equals("__UNITY_PLAYERPREFS_VERSION__");
+            if (keep) o.append("    ").append(m.group(0)).append('\n'); else dropped++;
+        }
+        o.append("</map>\n");
+        try (OutputStream os = new FileOutputStream(px)) { os.write(o.toString().getBytes("UTF-8")); }
+        return dropped;
+    }
+
+    /** smart 保留：clearLikeSystem 的白名单 + 主数据表 c_* + 游戏的 PlayerPrefs（已过滤）。 */
+    private static boolean keepSmart(File f, int depth) {
+        if (keepOnWipe(f, depth)) return true;
+        String nm = f.getName();
+        File p = f.getParentFile();
+        String pn = p != null ? p.getName() : "";
+        if (f.isFile() && nm.startsWith("c_") && (pn.equals("zh") || pn.equals("Contents"))) return true;
+        if (f.isFile() && nm.endsWith(".v2.playerprefs.xml")) return true;
+        if (f.isDirectory() && (nm.equals("il2cpp") || nm.equals("zh_backup"))) return true;
+        return false;
+    }
+
+    private static int clearSmart(File dir, int depth) {
+        int n = 0;
+        File[] ls = dir.listFiles();
+        if (ls == null) return 0;
+        for (File c : ls) {
+            if (c.getName().equals("elneazh_account.json")) { if (c.delete()) n++; continue; }
+            if (keepSmart(c, depth)) continue;
+            if (c.isDirectory()) {
+                n += clearSmart(c, depth + 1);
+                c.delete();
+            } else if (c.delete()) n++;
+        }
+        return n;
     }
 
     /** 留下的：native 库、汉化自己的文件/设置、资源缓存（不含身份，删了要重下几百 MB）。 */
