@@ -6,6 +6,13 @@ import java.util.Map;
 /** 只为本地跑规则测试而写的极小 stub：够 Offline / NameFix 存取开关。 */
 public class Context {
     public static final int MODE_PRIVATE = 0;
+    public static final String ACTIVITY_SERVICE = "activity";
+    public Object getSystemService(String name) { return null; }
+    public android.content.pm.ApplicationInfo getApplicationInfo() {
+        android.content.pm.ApplicationInfo a = new android.content.pm.ApplicationInfo();
+        a.sourceDir = new java.io.File(TMP, "base.apk").getPath();
+        return a;
+    }
     private static final java.io.File TMP = new java.io.File(System.getProperty("java.io.tmpdir"), "elneazh_test");
     private static final Map<String, SharedPreferences> PRES = new HashMap<String, SharedPreferences>();
     private static java.io.File DIR;
