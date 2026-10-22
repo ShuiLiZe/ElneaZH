@@ -192,6 +192,10 @@ final class Backup {
         }
         String nm = f.getName();
         if (nm.endsWith(".tmp") || f.length() > MAX_FILE) return 0;
+        // 不是存档：调试大表、native 库、文件选择器缓存（里面常是上一份备份 zip，会套娃）
+        if (nm.equals("elneazh_dump.tsv") || nm.endsWith(".so") || nm.endsWith(".so.stamp")
+                || nm.startsWith("elneazh_pending_restore")) return 0;
+        if (path.startsWith("files/lib/") || path.startsWith("files/image_provider/")) return 0;
         // 只跳第 1 层会漏掉 ext/UnityCache 这类深一层的大目录 → 任意层都按名字跳
         if (SKIP_DIRS.contains(path.substring(path.indexOf('/') + 1).split("/")[0])) return 0;
         if (SKIP_DIRS.contains(nm)) return 0;
@@ -1517,17 +1521,17 @@ final class Backup {
         try {
             final boolean[] chosen = {false};
             Pop p = new Pop(a, "恢复存档")
-                    .msg("会覆盖当前存档（当前存档先自动备份一份）。恢复后游戏会关闭，请重新打开。");
+                    .msg("会覆盖当前存档。恢复后游戏会关闭，重新打开时生效。");
             // 身份要不要跟着回来，是两件完全不同的事，必须让用户自己选一次：
             //  - 完整恢复：连 uuid / login_key 一起写回 —— 等于「回到备份那台机器的身份」。
             //  - 只恢复存档：跳过全部身份/登录键 —— 换身份之后导老存档用这个，否则一导入身份就回去了。
             if (metaHasIdentity(a, u)) p.row("完整恢复（含身份）",
                     "存档 + 旧账号身份一起回来；想回到备份时的那个号选这个。",
-                    new Runnable() { @Override public void run() { chosen[0] = true; restore(a, u, true); } });
+                    new Runnable() { @Override public void run() { chosen[0] = true; askBackupFirst(a, u, true); } });
             else p.msg("这份备份不含身份，只能恢复存档，账号保持你现在的。");
             p.row("只恢复存档（保留当前身份）",
                     "只写回存档，不动 uuid / login_key；换过身份后用这个。单机模式用这个。",
-                    new Runnable() { @Override public void run() { chosen[0] = true; restore(a, u, false); } });
+                    new Runnable() { @Override public void run() { chosen[0] = true; askBackupFirst(a, u, false); } });
             p.btn("取消", 3, null);
             p.dlg.setOnDismissListener(new DialogInterface.OnDismissListener() {
                 @Override public void onDismiss(DialogInterface d) { if (!chosen[0]) closeIfRestoreOnly(a); }
@@ -1540,97 +1544,163 @@ final class Backup {
         try { if (a.getIntent() != null && a.getIntent().getBooleanExtra("restore", false)) a.finish(); } catch (Throwable ignored) {}
     }
 
-    private static void restore(final Activity a, final Uri u, final boolean withIdentity) {
-        toast(a, withIdentity ? "正在完整恢复…" : "正在恢复存档（保留当前身份）…");
+    static final String PENDING_RESTORE = "pending_restore";
+    static final String PENDING_RESTORE_FILE = "elneazh_pending_restore.zip";
+
+    private static void askBackupFirst(final Activity a, final Uri u, final boolean withIdentity) {
+        try {
+            final boolean[] chosen = {false};
+            Pop p = new Pop(a, "恢复前要备份吗？")
+                    .msg("要不要先把你现在的存档备份一份？以后想回来可以再恢复它。");
+            p.row("先备份，再恢复", "多一份「恢复前」备份，稳妥。",
+                    new Runnable() { @Override public void run() { chosen[0] = true; restore(a, u, withIdentity, true); } });
+            p.row("不备份，直接恢复", "现在的存档会被覆盖，找不回来。",
+                    new Runnable() { @Override public void run() { chosen[0] = true; restore(a, u, withIdentity, false); } });
+            p.btn("取消", 3, null);
+            p.dlg.setOnDismissListener(new DialogInterface.OnDismissListener() {
+                @Override public void onDismiss(DialogInterface d) { if (!chosen[0]) closeIfRestoreOnly(a); }
+            });
+            p.show();
+        } catch (Throwable t) { Log.w(TAG, "askBackupFirst", t); }
+    }
+
+    /**
+     * 恢复 v2：当前进程只做（可选）备份 + 把 zip 拷到私有目录 + 立旗，然后直接杀进程。
+     * 旧做法在游戏进程里写文件再 finishAffinity，Unity 退出时会把内存里的 PlayerPrefs（你当前的 uuid）
+     * 写回去，盖掉刚恢复的身份 —— 这就是「读了别人的完整身份存档，身份没变」的原因。
+     * 真正写入放在下次启动 ZhInit 最前面（Unity 起来之前）。完整恢复还会先按「清除数据」清空，
+     * 免得备份里没有的你自己的账号块/存档/身份副本残留。
+     */
+    private static void restore(final Activity a, final Uri u, final boolean withIdentity, final boolean backupFirst) {
+        toast(a, backupFirst ? "正在备份当前存档…" : "正在准备恢复…");
         new Thread(new Runnable() { @Override public void run() {
             try {
                 if (!looksLikeBackup(a, u)) { toast(a, "这不是汉化版的存档备份"); return; }
-                make(a, "恢复前");
-                File data = a.getFilesDir().getParentFile();
-                String base = data.getCanonicalPath() + File.separator;
-                int n = 0, skipped = 0;
-                try (ZipInputStream z = new ZipInputStream(a.getContentResolver().openInputStream(u))) {
-                    ZipEntry e;
-                    while ((e = z.getNextEntry()) != null) {
-                        String p = e.getName();
-                        if (e.isDirectory()) continue;
-                        // 「只恢复存档」：身份文件整份跳过 —— 里面就是 uuid / login_key，
-                        // 写回一个 uuid 就等于把旧身份又装回了，换身份白做。
-                        if (!withIdentity && p.startsWith("shared_prefs/")
-                                && isIdentityPrefFile(p.substring("shared_prefs/".length()))) {
-                            skipped++;
-                            Log.i(TAG, "restore: skipped identity prefs " + p);
-                            continue;
-                        }
-                        // 「只恢复存档」：备份里散落的身份副本（files/althi_uniq、ext/ws_account…）同样不许写回 ——
-                        // 它们不是存档，写回去等于把旧设备码又装了一份。只认身份文件名，不误伤存档与汉化表。
-                        if (!withIdentity && isRestoreIdentityCopy(p)) {
-                            skipped++;
-                            Log.i(TAG, "restore: skipped identity copy " + p);
-                            continue;
-                        }
-                        File t;
-                        if (p.startsWith("files/") || p.startsWith("shared_prefs/")) {
-                            t = new File(data, p);
-                            if (!t.getCanonicalPath().startsWith(base)) continue;
-                        } else if (p.startsWith("ext/") && a.getExternalFilesDir(null) != null) {
-                            File ex = a.getExternalFilesDir(null);
-                            t = new File(ex, p.substring(4));
-                            if (!t.getCanonicalPath().startsWith(ex.getCanonicalPath() + File.separator)) continue;
-                        } else continue;
-                        File dir = t.getParentFile();
-                        if (dir != null && !dir.isDirectory()) dir.mkdirs();
-                        File tmp = new File(t.getPath() + ".rtmp");
-                        try (OutputStream o = new FileOutputStream(tmp)) { pipe(z, o); }
-                        if (!tmp.renameTo(t)) { t.delete(); tmp.renameTo(t); }
-                        n++;
-                    }
-                }
-                Log.i(TAG, "restored " + n + " files, skipped " + skipped + " identity file(s), withIdentity=" + withIdentity);
-                // 身份（uuid / login_key）一起写回：旧身份解封后恢复即回去。只恢复存档时**绝不写**。
-                if (withIdentity) {
-                    File prefsXml = new File(data, "shared_prefs/" + prefsName(a) + ".xml");
-                    if (prefsXml.isFile()) restoreIdentityFile(a, prefsXml);
-                } else {
-                    // 游戏的 PlayerPrefs xml 里除了身份还有画面/音量/资源版本等设置，整份跳过会丢设置，
-                    // 所以这里逐键剔除：身份键全部删掉，其余设置保留。
-                    File prefsXml = new File(data, "shared_prefs/" + prefsName(a) + ".xml");
-                    if (prefsXml.isFile()) stripIdentityKeys(a, prefsXml);
-                    // 双保险：即使 prefs 文件没被扫到（老格式备份放在别处），也按同一套判定再清一次，
-                    // 保证「保留当前身份」这件事在结果上成立。
-                    int wiped = clearAllPrefs(a, data);
-                    Log.i(TAG, "restore: kept current identity, cleared " + wiped + " identity key(s)");
-                }
-                // 换成新身份后本机可能已经跑出了新号的存档；恢复旧备份时先删掉这些「备份里没有的 sv1_*」，
-                // 否则新旧两份存档混在一起。只碰 sv1_*，不碰缓存、不碰汉化表。
-                try {
-                    Set<String> keep = indexOf(a, u);
-                    for (File root : new File[]{a.getFilesDir(), a.getExternalFilesDir(null)}) {
-                        if (root == null) continue;
-                        for (String d : new String[]{"zh", "Contents"}) {
-                            File[] ls = new File(root, d).listFiles();
-                            if (ls == null) continue;
-                            for (File f : ls) {
-                                String nm = f.getName();
-                                if (!nm.startsWith("sv1_") || !f.isFile()) continue;
-                                String rel = (root == a.getFilesDir() ? "files/" : "ext/") + d + "/" + nm;
-                                if (keep.contains(rel)) continue;
-                                if (f.delete()) Log.i(TAG, "restore: removed newer save " + rel);
-                            }
-                        }
-                    }
-                } catch (Throwable t) { Log.w(TAG, "restore cleanup", t); }
-                toast(a, (withIdentity ? "已完整恢复 " : "已恢复存档（身份保留）") + n
-                        + " 个文件，游戏即将关闭，请重新打开");
+                if (backupFirst && make(a, "恢复前") == null) { toast(a, "备份当前存档失败，已取消恢复"); return; }
+                File dst = new File(a.getFilesDir(), PENDING_RESTORE_FILE);
+                File tmp = new File(dst.getPath() + ".part");
+                try (InputStream in = a.getContentResolver().openInputStream(u);
+                     OutputStream o = new FileOutputStream(tmp)) { pipe(in, o); }
+                if (!tmp.renameTo(dst)) { dst.delete(); if (!tmp.renameTo(dst)) throw new java.io.IOException("rename"); }
+                a.getSharedPreferences("elneazh_settings", Context.MODE_PRIVATE).edit()
+                        .putString(PENDING_RESTORE, withIdentity ? "full" : "save").commit();
+                toast(a, "游戏即将关闭，重新打开时完成恢复");
                 new Handler(Looper.getMainLooper()).postDelayed(new Runnable() { @Override public void run() {
-                    try { a.finishAffinity(); } catch (Throwable ignored) {}
-                    android.os.Process.killProcess(android.os.Process.myPid());
-                }}, 2500);
+                    android.os.Process.killProcess(android.os.Process.myPid());   // 不走 finish，防 Unity 写回旧身份
+                }}, 1800);
             } catch (Throwable t) {
-                Log.e(TAG, "restore failed", t);
+                Log.e(TAG, "restore stage failed", t);
                 toast(a, "恢复失败：" + t.getClass().getSimpleName());
             }
         }}).start();
+    }
+
+    /** ZhInit 最前面（换身份清理之后）调用。 */
+    static boolean runPendingRestore(Context ctx) {
+        SharedPreferences sp = ctx.getSharedPreferences("elneazh_settings", Context.MODE_PRIVATE);
+        String mode = sp.getString(PENDING_RESTORE, null);
+        if (mode == null) return false;
+        sp.edit().remove(PENDING_RESTORE).commit();
+        File zf = new File(ctx.getFilesDir(), PENDING_RESTORE_FILE);
+        if (!zf.isFile()) { Log.w(TAG, "pending restore: zip missing"); return false; }
+        boolean full = "full".equals(mode);
+        try {
+            if (full) {
+                // 完整恢复 = 变成备份里那台机器的样子：先清干净（elneazh_* 留着，包括这份 zip）
+                sp.edit().putString(PENDING_WIPE, "full").commit();
+                runPendingIdentityWipe(ctx);
+            }
+            applyRestore(ctx, android.net.Uri.fromFile(zf), full);
+            sp.edit().putString("last_restore", (full ? "完整恢复" : "只恢复存档") + " 完成 " + new Date()).commit();
+        } catch (Throwable t) {
+            Log.e(TAG, "pending restore failed", t);
+            sp.edit().putString("last_restore", "恢复失败 " + t + " " + new Date()).commit();
+        } finally {
+            zf.delete();
+        }
+        return true;
+    }
+
+    private static void applyRestore(final Context ctx, final Uri u, final boolean withIdentity) throws Exception {
+        File data = ctx.getFilesDir().getParentFile();
+        String base = data.getCanonicalPath() + File.separator;
+        int n = 0, skipped = 0;
+        try (ZipInputStream z = new ZipInputStream(ctx.getContentResolver().openInputStream(u))) {
+            ZipEntry e;
+            while ((e = z.getNextEntry()) != null) {
+                String p = e.getName();
+                if (e.isDirectory()) continue;
+                // 老备份里夹带的 native 库/调试表/文件选择器缓存：不写回，免得旧 .so 盖掉当前版本
+                if (p.startsWith("files/lib/") || p.startsWith("files/image_provider/") || p.endsWith(".so")
+                        || p.endsWith(".so.stamp") || p.endsWith("elneazh_dump.tsv")
+                        || p.startsWith("shared_prefs/elneazh_settings")) continue;
+                // 「只恢复存档」：身份文件整份跳过 —— 里面就是 uuid / login_key，
+                // 写回一个 uuid 就等于把旧身份又装回了，换身份白做。
+                if (!withIdentity && p.startsWith("shared_prefs/")
+                        && isIdentityPrefFile(p.substring("shared_prefs/".length()))) {
+                    skipped++;
+                    Log.i(TAG, "restore: skipped identity prefs " + p);
+                    continue;
+                }
+                // 「只恢复存档」：备份里散落的身份副本（files/althi_uniq、ext/ws_account…）同样不许写回 ——
+                // 它们不是存档，写回去等于把旧设备码又装了一份。只认身份文件名，不误伤存档与汉化表。
+                if (!withIdentity && isRestoreIdentityCopy(p)) {
+                    skipped++;
+                    Log.i(TAG, "restore: skipped identity copy " + p);
+                    continue;
+                }
+                File t;
+                if (p.startsWith("files/") || p.startsWith("shared_prefs/")) {
+                    t = new File(data, p);
+                    if (!t.getCanonicalPath().startsWith(base)) continue;
+                } else if (p.startsWith("ext/") && ctx.getExternalFilesDir(null) != null) {
+                    File ex = ctx.getExternalFilesDir(null);
+                    t = new File(ex, p.substring(4));
+                    if (!t.getCanonicalPath().startsWith(ex.getCanonicalPath() + File.separator)) continue;
+                } else continue;
+                File dir = t.getParentFile();
+                if (dir != null && !dir.isDirectory()) dir.mkdirs();
+                File tmp = new File(t.getPath() + ".rtmp");
+                try (OutputStream o = new FileOutputStream(tmp)) { pipe(z, o); }
+                if (!tmp.renameTo(t)) { t.delete(); tmp.renameTo(t); }
+                n++;
+            }
+        }
+        Log.i(TAG, "restored " + n + " files, skipped " + skipped + " identity file(s), withIdentity=" + withIdentity);
+        // 身份（uuid / login_key）一起写回：旧身份解封后恢复即回去。只恢复存档时**绝不写**。
+        if (withIdentity) {
+            File prefsXml = new File(data, "shared_prefs/" + prefsName(ctx) + ".xml");
+            if (prefsXml.isFile()) restoreIdentityFile(ctx, prefsXml);
+        } else {
+            // 游戏的 PlayerPrefs xml 里除了身份还有画面/音量/资源版本等设置，整份跳过会丢设置，
+            // 所以这里逐键剔除：身份键全部删掉，其余设置保留。
+            File prefsXml = new File(data, "shared_prefs/" + prefsName(ctx) + ".xml");
+            if (prefsXml.isFile()) stripIdentityKeys(ctx, prefsXml);
+            // 双保险：即使 prefs 文件没被扫到（老格式备份放在别处），也按同一套判定再清一次，
+            // 保证「保留当前身份」这件事在结果上成立。
+            int wiped = clearAllPrefs(ctx, data);
+            Log.i(TAG, "restore: kept current identity, cleared " + wiped + " identity key(s)");
+        }
+        // 换成新身份后本机可能已经跑出了新号的存档；恢复旧备份时先删掉这些「备份里没有的 sv1_*」，
+        // 否则新旧两份存档混在一起。只碰 sv1_*，不碰缓存、不碰汉化表。
+        try {
+            Set<String> keep = indexOf(ctx, u);
+            for (File root : new File[]{ctx.getFilesDir(), ctx.getExternalFilesDir(null)}) {
+                if (root == null) continue;
+                for (String d : new String[]{"zh", "Contents"}) {
+                    File[] ls = new File(root, d).listFiles();
+                    if (ls == null) continue;
+                    for (File f : ls) {
+                        String nm = f.getName();
+                        if (!nm.startsWith("sv1_") || !f.isFile()) continue;
+                        String rel = (root == ctx.getFilesDir() ? "files/" : "ext/") + d + "/" + nm;
+                        if (keep.contains(rel)) continue;
+                        if (f.delete()) Log.i(TAG, "restore: removed newer save " + rel);
+                    }
+                }
+            }
+        } catch (Throwable t) { Log.w(TAG, "restore cleanup", t); }
+
     }
 
     private static boolean looksLikeBackup(Context c, Uri u) {
