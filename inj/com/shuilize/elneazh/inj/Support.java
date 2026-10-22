@@ -167,7 +167,7 @@ final class Support {
                 }
             }
         }));
-        smallLine(a, d, card, "启动时也会自动备份（含身份），卸载游戏也不丢。发给别人请选「不含身份」。");
+        smallLine(a, d, card, "启动时也会自动备份（含身份），卸载游戏也不丢。含身份的备份能登你的号，只发给汉化作者。");
 
         // 存档管理：列出全部备份，每份都有「读取 / 删除」，底下还有「从文件导入」。
         LinearLayout.LayoutParams impLp = new LinearLayout.LayoutParams(-1, (int) (46 * d));
@@ -183,7 +183,7 @@ final class Support {
             }
         });
         card.addView(imp, impLp);
-        smallLine(a, d, card, "备份可选含身份（自己留底、卡维护的号先存着）或不含身份（发给别人）。读取时可只恢复存档、保留当前身份。");
+        smallLine(a, d, card, "卡维护/卡登录：备份时选「含身份」，把 zip 发给汉化作者排查。读取时可只恢复存档、保留当前身份。");
 
         // 小文字链接：导出名字对照表
         TextView names = link(a, d, "导出名字对照表（NPC 中文名 ↔ 上传用英文）");
