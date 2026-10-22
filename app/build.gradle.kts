@@ -29,9 +29,8 @@ android {
 
     buildTypes {
         release {
-            // 混淆 + 压缩：汉化器自己的代码改名，第三方库（apksig / commons-compress）保持原样防出错
-            isMinifyEnabled = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // R8 混淆在 v1.0.87 导致打开闪退，先关掉保稳定（proguard-rules.pro 保留备用）
+            isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("release")
         }
         debug {
