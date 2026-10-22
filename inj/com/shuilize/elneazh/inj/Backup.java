@@ -105,7 +105,7 @@ final class Backup {
 
     /**
      * withIdentity=false：不含身份 —— 跳过整份身份文件与外部身份副本，PlayerPrefs 里逐键剔除身份键
-     * （与「只恢复存档」同一套 isIdentityKey），适合发给别人 / 分享。
+     * （与「只恢复存档」同一套 isIdentityKey），别人导入能否正常登录尚在测试。
      */
     static String make(Context ctx, String kind, boolean withIdentity) {
         NO_ID.set(!withIdentity);
@@ -115,18 +115,16 @@ final class Backup {
     private static String readme(boolean withIdentity) {
         return "艾尔尼亚王国 汉化版（ElneaZH）存档备份\n\n"
             + "这份备份：" + (withIdentity ? "【含身份】" : "【不含身份】") + "\n\n"
-            + "■ 含身份\n"
-            + "  存档 + 账号身份（uuid / login_key / 设备码）全部打包。\n"
-            + "  用途：自己留底、换手机、重装后回到原来那个号；卡维护的号也能先整份保存下来，以后解封再恢复。\n"
-            + "  注意：拿到这份文件的人可以登录你的号，不要发给别人。\n\n"
+            + "■ 含身份（卡维护请选这个）\n"
+            + "  存档 + 账号身份（uuid / login_key / 设备码 althi_uniq / 账号块）全部原样打包。\n"
+            + "  用途：一直卡「维护中」或卡登录时，把这份发给汉化作者排查；自己换机、重装、想回到原来那个号也用它。\n"
+            + "  注意：拿到这份文件的人能登录你的号，只发给汉化作者。\n\n"
             + "■ 不含身份\n"
-            + "  只有存档（角色、家族、世界、设置），不带任何账号身份。\n"
-            + "  用途：发给朋友、分享存档、换身份后导入旧存档。对方导入后用的是他自己的账号，不会顶号。\n\n"
+            + "  去掉了已知的身份文件（uuid / login_key / 设备码 / 账号块），只留存档和设置。\n"
+            + "  注意：存档本身是否还带着能被服务器认出的信息，目前还在测试，不保证别人导入后能正常联网登录。\n\n"
             + "■ 怎么恢复\n"
             + "  游戏内「交流与支持 → 存档管理 → 从文件导入」，选这个 zip。\n"
-            + "  含身份的备份会让你选：\n"
-            + "    · 完整恢复（含身份）：存档和旧账号一起回来。\n"
-            + "    · 只恢复存档（保留当前身份）：只要存档，账号不变。单机模式、换过身份后用这个。\n"
+            + "  含身份的备份可选：完整恢复（含身份）/ 只恢复存档（保留当前身份）。\n"
             + "  不含身份的备份只能「只恢复存档」。\n"
             + "  恢复前会先自动备份当前存档；恢复后游戏会关闭，重新打开即可。\n\n"
             + "■ 不要改动 zip 里的文件，改了可能导不回去。\n";
@@ -1172,11 +1170,11 @@ final class Backup {
     static void chooseBackup(final Activity a) {
         Pop p = new Pop(a, "备份当前存档");
         p.msg("选一种。两种都会放进存档管理，zip 里附带一份说明。");
-        p.row("含身份（自己留底）",
-                "存档 + 账号身份（uuid / login_key / 设备码）全部保存。换机、重装、卡维护的号先存下来以后再回去，都选这个。别发给别人，拿到的人能登你的号。",
+        p.row("含身份（卡维护选这个）",
+                "存档 + 账号身份（uuid / login_key / 设备码）原样保存。卡维护、卡登录时发给汉化作者排查；换机、重装回原号也用它。拿到的人能登你的号，只发给汉化作者。",
                 new Runnable() { @Override public void run() { doBackup(a, true); } });
-        p.row("不含身份（发给别人）",
-                "只有存档，不带账号。分享给朋友、换身份后导老存档用这个；对方导入后用他自己的号，不会顶号。",
+        p.row("不含身份（测试中）",
+                "去掉已知的身份文件，只留存档和设置。存档里是否还带能被服务器认出的信息还在测试，别人导入后不保证能正常登录。",
                 new Runnable() { @Override public void run() { doBackup(a, false); } });
         p.btn("取消", 3, new Runnable() { @Override public void run() { manage(a); } });
         p.show();
@@ -1395,11 +1393,11 @@ final class Backup {
     static void manual(final Activity a, final OnBackupDone done) {
         Pop p = new Pop(a, "立即备份");
         p.msg("选一种，zip 里会附一份说明。");
-        p.row("含身份（自己留底）",
-                "存档 + 账号身份全部保存。换机、重装、卡维护的号先存下来以后再回去都选这个。别发给别人。",
+        p.row("含身份（卡维护选这个）",
+                "存档 + 账号身份原样保存。卡维护、卡登录时发给汉化作者排查；换机、重装回原号也用它。只发给汉化作者。",
                 new Runnable() { @Override public void run() { manual(a, done, true); } });
-        p.row("不含身份（发给别人）",
-                "只有存档，不带账号。分享给朋友用这个，对方导入后用他自己的号。",
+        p.row("不含身份（测试中）",
+                "去掉已知的身份文件，只留存档。别人导入后能否正常登录还在测试。",
                 new Runnable() { @Override public void run() { manual(a, done, false); } });
         p.btn("取消", 3, null);
         p.show();
@@ -1454,7 +1452,7 @@ final class Backup {
             if (metaHasIdentity(a, u)) p.row("完整恢复（含身份）",
                     "存档 + 旧账号身份一起回来；想回到备份时的那个号选这个。",
                     new Runnable() { @Override public void run() { chosen[0] = true; restore(a, u, true); } });
-            else p.msg("这份备份不含身份（别人发的或分享用的），只能恢复存档，账号保持你现在的。");
+            else p.msg("这份备份不含身份，只能恢复存档，账号保持你现在的。");
             p.row("只恢复存档（保留当前身份）",
                     "只写回存档，不动 uuid / login_key；换过身份后用这个。单机模式用这个。",
                     new Runnable() { @Override public void run() { chosen[0] = true; restore(a, u, false); } });
