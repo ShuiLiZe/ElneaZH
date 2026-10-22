@@ -270,6 +270,25 @@ final class Support {
             }
         }));
         smallLine(a, d, card, "一直卡「维护中」时用：先备份，再像系统「清除数据」一样清干净，不用自己去设置里清。");
+        // 账号自愈（默认开）：native 记下每次登录成功的账号；游戏丢了本地账号要匿名登录时换回真账号。
+        final java.io.File accOff = new java.io.File(a.getFilesDir(), "elneazh_account_fix.off");
+        final java.io.File accFile = new java.io.File(a.getFilesDir(), "elneazh_account.json");
+        final TextView accBtn = button(a, d, "", CREAM_DARK, BROWN, BROWN, null);
+        final Runnable accLabel = new Runnable() { @Override public void run() {
+            accBtn.setText("防卡维护（账号自愈）：" + (accOff.exists() ? "已关闭" : "已开启"));
+        }};
+        accLabel.run();
+        accBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                try {
+                    if (accOff.exists()) accOff.delete(); else accOff.createNewFile();
+                } catch (Throwable t) { Log.w(TAG, "acc toggle", t); }
+                accLabel.run();
+            }
+        });
+        card.addView(accBtn);
+        smallLine(a, d, card, "默认开启。每次登录成功会记下你的账号；游戏丢了本地账号、想匿名登录（会卡「维护中」）时，自动换回你的账号。"
+                + (accFile.isFile() ? "已记下账号。" : "还没记下账号，正常登录一次就有。"));
 
         // ---------------- 底部 ----------------
         addSep(a, d, card, 12);
