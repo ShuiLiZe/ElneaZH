@@ -320,11 +320,13 @@ static void rp_put_learned(const char *key, const char *val) {
     rp_put(key, val);
 }
 
+static void acc_learn(const char *tx, const char *rx);
 // 联网时：rec_dec_hook 拿到一条回包明文 rx，与当前请求配对后存库
 void rp_learn(const char *rx, size_t n) {
     const char *tx = g_cur_tx ? g_cur_tx : g_last_tx;
     if (!tx || !rx || n < 32) return;
     if (!strstr(rx, "\"$_sys_result_$\":\"Done.")) return;   // 只学成功回包
+    acc_learn(tx, rx);
     char sign[512];
     if (!rp_sign(tx, strlen(tx), sign, sizeof sign)) return;
     rp_load();
@@ -410,6 +412,86 @@ char *eg_rp_fix_uniq(const char *tx) {
         out = rp_replace(tx, f, t);
     }
     free(cur);
+    return out;
+}
+
+
+// ---------------------------------------------------------- 账号自愈（默认开启）
+// 真机 10-22 抓包：卡维护 = 游戏本地丢了账号（ws_account / login_key），改发
+// user_name=anonymous / user_pass=freepass + user_uniq；该设备码服务器上已有号 → 回 user_id 0 +
+// end_maintenance=服务器时间+3h（滚动，假维护）。修法：每次登录成功把账号记进
+// files/elneazh_account.json；之后同一设备码要匿名登录时，换回这个真账号。
+// 关闭：files/elneazh_account_fix.off 存在。换身份时 Java 侧会删掉 elneazh_account.json。
+#define ACC_PATH FILES "elneazh_account.json"
+#define ACC_OFF  FILES "elneazh_account_fix.off"
+static int acc_ok_val(const char *v) {
+    if (!v || !*v || strlen(v) > 200) return 0;
+    for (const char *c = v; *c; c++) if (*c == '"' || *c == '\\' || (unsigned char) *c < 0x20) return 0;
+    return 1;
+}
+static void acc_learn(const char *tx, const char *rx) {
+    if (!strstr(rx, "\"login_key\":\"") || !strstr(rx, "\"user_name\":\"")) return;
+    const char *res = strstr(rx, "\"result\"");
+    if (!res) return;
+    char *uid = rp_json_str(res, "user_id");
+    char *name = rp_json_str(res, "user_name");
+    char *pass = rp_json_str(res, "user_pass");
+    char *key = rp_json_str(res, "login_key");
+    char *dev = NULL;
+    if (g_last_tx && strstr(g_last_tx, "\"user_uniq\":\"")) dev = rp_json_str(g_last_tx, "user_uniq");
+    if (!dev && tx) dev = rp_json_str(tx, "user_uniq");
+    if (uid && strcmp(uid, "0") != 0 && acc_ok_val(name) && strcmp(name, "anonymous") != 0
+            && acc_ok_val(pass) && acc_ok_val(key)) {
+        char buf[1024];
+        snprintf(buf, sizeof buf, "{\"user_id\":\"%s\",\"user_name\":\"%s\",\"user_pass\":\"%s\",\"login_key\":\"%s\",\"dev_uniq\":\"%s\"}\n",
+                 acc_ok_val(uid) ? uid : "", name, pass, key, acc_ok_val(dev) ? dev : "");
+        FILE *old = fopen(ACC_PATH, "r");
+        char prev[1024] = {0};
+        if (old) { size_t r = fread(prev, 1, sizeof prev - 1, old); prev[r] = 0; fclose(old); }
+        if (strcmp(prev, buf) != 0) {
+            FILE *f = fopen(ACC_PATH ".tmp", "w");
+            if (f) {
+                fputs(buf, f); fclose(f);
+                rename(ACC_PATH ".tmp", ACC_PATH);
+                RPI("账号自愈：已记下账号 %s（id=%s）", name, uid);
+            }
+        }
+    }
+    free(uid); free(name); free(pass); free(key); free(dev);
+}
+
+char *eg_rp_fix_anon(const char *tx) {
+    if (!tx || eg_of_is_off()) return NULL;
+    if (!strstr(tx, "\"user_name\":\"anonymous\"") || !strstr(tx, "\"user_pass\":\"freepass\"")) return NULL;
+    if (strstr(tx, "\"login_key\"")) return NULL;
+    if (access(ACC_OFF, F_OK) == 0) { RPW("账号自愈：已关闭，匿名登录照发"); return NULL; }
+    FILE *f = fopen(ACC_PATH, "r");
+    if (!f) { RPW("账号自愈：匿名登录但没有记过账号，照发"); return NULL; }
+    char j[1024]; size_t r = fread(j, 1, sizeof j - 1, f); j[r] = 0; fclose(f);
+    char *name = rp_json_str(j, "user_name"), *pass = rp_json_str(j, "user_pass"),
+         *key = rp_json_str(j, "login_key"), *dev = rp_json_str(j, "dev_uniq"),
+         *cur = rp_json_str(tx, "user_uniq");
+    char *out = NULL;
+    if (acc_ok_val(name) && acc_ok_val(pass) && acc_ok_val(key)) {
+        if (dev && *dev && cur && strcmp(dev, cur) != 0) {
+            RPW("账号自愈：设备码不同（记录 %.6s…，本机 %.6s…），不替换", dev, cur);
+        } else {
+            char a[300], b[300];
+            snprintf(b, sizeof b, "\"user_name\":\"%s\"", name);
+            char *t1 = rp_replace(tx, "\"user_name\":\"anonymous\"", b);
+            snprintf(b, sizeof b, "\"user_pass\":\"%s\"", pass);
+            char *t2 = t1 ? rp_replace(t1, "\"user_pass\":\"freepass\"", b) : NULL;
+            if (t2 && t2[0] == '{') {
+                snprintf(a, sizeof a, "{\"login_key\":\"%s\",", key);
+                size_t n = strlen(t2);
+                out = (char *) malloc(n + strlen(a) + 2);
+                if (out) { strcpy(out, a); strcat(out, t2 + 1); }
+                RPW("账号自愈：游戏要匿名登录 → 换回已记账号 %s", name);
+            }
+            free(t1); free(t2);
+        }
+    }
+    free(name); free(pass); free(key); free(dev); free(cur);
     return out;
 }
 
